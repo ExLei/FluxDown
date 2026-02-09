@@ -38,6 +38,12 @@ Future<void> main(List<String> args) async {
     await windowManager.ensureInitialized();
 
     if (windowType == 'quick_download') {
+      // 子窗口也使用自定义标题栏
+      const windowOptions = WindowOptions(
+        titleBarStyle: TitleBarStyle.hidden,
+        windowButtonVisibility: false,
+      );
+      windowManager.waitUntilReadyToShow(windowOptions, () async {});
       runApp(
         QuickDownloadApp(windowController: windowController, args: windowArgs),
       );

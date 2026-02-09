@@ -9,6 +9,7 @@ import 'package:window_manager/window_manager.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../theme/theme_provider.dart';
+import '../widgets/title_drag_area.dart';
 
 /// 独立快速下载确认窗口 — 浏览器扩展拦截下载时弹出
 ///
@@ -52,7 +53,7 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
 
   Future<void> _initWindow() async {
     await windowManager.setSize(const Size(520, 420));
-    await windowManager.setMinimumSize(const Size(400, 350));
+    await windowManager.setMinimumSize(const Size(400, 300));
     await windowManager.center();
     await windowManager.setAlwaysOnTop(true);
     await windowManager.setTitle('FluxDown - 新建下载');
@@ -135,154 +136,196 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
 
     return Scaffold(
       backgroundColor: c.bg,
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // 标题行
-            Row(
-              children: [
-                Icon(LucideIcons.download, size: 20, color: c.accent),
-                const SizedBox(width: 8),
-                Text(
-                  '新建下载',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: c.textPrimary,
+      body: Column(
+        children: [
+          // ===== 自定义标题栏 =====
+          _TitleBar(c: c, onClose: _cancel),
+          // ===== 内容区域 =====
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 可滚动内容区
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          // 标题行
+                          Row(
+                            children: [
+                              Icon(
+                                LucideIcons.download,
+                                size: 20,
+                                color: c.accent,
+                              ),
+                              const SizedBox(width: 8),
+                              Text(
+                                '新建下载',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: c.textPrimary,
+                                ),
+                              ),
+                              const Spacer(),
+                              if (fileSize > 0)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 3,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: c.surface2,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    _formatFileSize(fileSize),
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: c.textSecondary,
+                                    ),
+                                  ),
+                                ),
+                              if (mimeType.isNotEmpty) ...[
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 3,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: c.surface2,
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    mimeType,
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      color: c.textSecondary,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+
+                          // URL 显示
+                          _label('下载链接', c),
+                          const SizedBox(height: 4),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 12,
+                              vertical: 10,
+                            ),
+                            decoration: BoxDecoration(
+                              color: c.surface2,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: c.border),
+                            ),
+                            child: SelectableText(
+                              url,
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: c.textSecondary,
+                                fontFamily: 'monospace',
+                              ),
+                              maxLines: 2,
+                            ),
+                          ),
+
+                          const SizedBox(height: 14),
+
+                          // 保存目录 + 线程数
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    _label('保存目录', c),
+                                    const SizedBox(height: 4),
+                                    GestureDetector(
+                                      onTap: _pickSaveDir,
+                                      child: AbsorbPointer(
+                                        child: ShadInput(
+                                          controller: _saveDirController,
+                                          placeholder: const Text('保存目录'),
+                                          readOnly: true,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const SizedBox(width: 10),
+                              SizedBox(
+                                width: 100,
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    _label('线程数', c),
+                                    const SizedBox(height: 4),
+                                    ShadSelect<String>(
+                                      placeholder: const Text('自动'),
+                                      options:
+                                          ['自动', '4', '8', '16', '32', '64']
+                                              .map(
+                                                (e) => ShadOption(
+                                                  value: e,
+                                                  child: Text(e),
+                                                ),
+                                              )
+                                              .toList(),
+                                      selectedOptionBuilder: (context, value) =>
+                                          Text(value),
+                                      onChanged: (v) =>
+                                          setState(() => selectedThreads = v),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+
+                          const SizedBox(height: 14),
+
+                          // 文件名
+                          _label('文件名（留空自动识别）', c),
+                          const SizedBox(height: 4),
+                          ShadInput(
+                            controller: _renameController,
+                            placeholder: const Text('自动识别文件名'),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                ),
-                const Spacer(),
-                if (fileSize > 0)
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: c.surface2,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      _formatFileSize(fileSize),
-                      style: TextStyle(fontSize: 11, color: c.textSecondary),
-                    ),
-                  ),
-                if (mimeType.isNotEmpty) ...[
-                  const SizedBox(width: 6),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 8,
-                      vertical: 3,
-                    ),
-                    decoration: BoxDecoration(
-                      color: c.surface2,
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      mimeType,
-                      style: TextStyle(fontSize: 11, color: c.textSecondary),
-                    ),
+                  const SizedBox(height: 16),
+
+                  // 底部按钮（固定在底部）
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      ShadButton.outline(
+                        onPressed: _cancel,
+                        child: const Text('取消'),
+                      ),
+                      const SizedBox(width: 8),
+                      ShadButton(
+                        onPressed: _startDownload,
+                        child: const Text('开始下载'),
+                      ),
+                    ],
                   ),
                 ],
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // URL 显示
-            _label('下载链接', c),
-            const SizedBox(height: 4),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                color: c.surface2,
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: c.border),
-              ),
-              child: SelectableText(
-                url,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: c.textSecondary,
-                  fontFamily: 'monospace',
-                ),
-                maxLines: 2,
               ),
             ),
-
-            const SizedBox(height: 14),
-
-            // 保存目录 + 线程数
-            Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _label('保存目录', c),
-                      const SizedBox(height: 4),
-                      GestureDetector(
-                        onTap: _pickSaveDir,
-                        child: AbsorbPointer(
-                          child: ShadInput(
-                            controller: _saveDirController,
-                            placeholder: const Text('保存目录'),
-                            readOnly: true,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 10),
-                SizedBox(
-                  width: 100,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _label('线程数', c),
-                      const SizedBox(height: 4),
-                      ShadSelect<String>(
-                        placeholder: const Text('自动'),
-                        options: ['自动', '4', '8', '16', '32', '64']
-                            .map((e) => ShadOption(value: e, child: Text(e)))
-                            .toList(),
-                        selectedOptionBuilder: (context, value) => Text(value),
-                        onChanged: (v) => setState(() => selectedThreads = v),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-
-            const SizedBox(height: 14),
-
-            // 文件名
-            _label('文件名（留空自动识别）', c),
-            const SizedBox(height: 4),
-            ShadInput(
-              controller: _renameController,
-              placeholder: const Text('自动识别文件名'),
-            ),
-
-            const Spacer(),
-
-            // 底部按钮
-            Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                ShadButton.outline(onPressed: _cancel, child: const Text('取消')),
-                const SizedBox(width: 8),
-                ShadButton(
-                  onPressed: _startDownload,
-                  child: const Text('开始下载'),
-                ),
-              ],
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
@@ -294,6 +337,71 @@ class _QuickDownloadWindowState extends State<QuickDownloadWindow> {
         fontSize: 11,
         fontWeight: FontWeight.w500,
         color: c.textSecondary,
+      ),
+    );
+  }
+}
+
+/// 子窗口自定义标题栏 — 拖拽移动 + 关闭按钮
+class _TitleBar extends StatefulWidget {
+  final AppColors c;
+  final VoidCallback onClose;
+
+  const _TitleBar({required this.c, required this.onClose});
+
+  @override
+  State<_TitleBar> createState() => _TitleBarState();
+}
+
+class _TitleBarState extends State<_TitleBar> {
+  bool _isCloseHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    return TitleDragArea(
+      child: Container(
+        height: 36,
+        padding: const EdgeInsets.only(left: 14),
+        decoration: BoxDecoration(
+          color: c.surface1,
+          border: Border(bottom: BorderSide(color: c.border, width: 1)),
+        ),
+        child: Row(
+          children: [
+            Icon(LucideIcons.download, size: 14, color: c.accent),
+            const SizedBox(width: 8),
+            Text(
+              'FluxDown',
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: c.textPrimary,
+              ),
+            ),
+            const Spacer(),
+            // 关闭按钮
+            MouseRegion(
+              onEnter: (_) => setState(() => _isCloseHovered = true),
+              onExit: (_) => setState(() => _isCloseHovered = false),
+              child: GestureDetector(
+                onTap: widget.onClose,
+                child: Container(
+                  width: 40,
+                  height: 36,
+                  color: _isCloseHovered
+                      ? AppColors.red.withValues(alpha: 0.9)
+                      : Colors.transparent,
+                  child: Icon(
+                    LucideIcons.x,
+                    size: 14,
+                    color: _isCloseHovered ? Colors.white : c.textSecondary,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
