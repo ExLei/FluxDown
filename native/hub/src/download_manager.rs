@@ -671,8 +671,8 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
         let resolved_name = state.file_name.clone();
 
         // For terminal states (completed / error / paused) always send immediately.
-        // For downloading (status=1), rate-limit to avoid flooding Dart.
-        let is_terminal = update.status != 1;
+        // For downloading (status=1) and preparing (status=5), rate-limit to avoid flooding Dart.
+        let is_terminal = update.status != 1 && update.status != 5;
         let should_send = is_terminal || {
             let last = last_dart_send.get(&update.task_id);
             last.is_none() || now.duration_since(*last.unwrap_or(&now)).as_millis() >= MIN_DART_INTERVAL_MS

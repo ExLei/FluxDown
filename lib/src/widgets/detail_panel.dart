@@ -458,7 +458,8 @@ class DetailPanel extends StatelessWidget {
         children: [
           // 暂停 / 恢复
           if (task.status == TaskStatus.downloading ||
-              task.status == TaskStatus.pending)
+              task.status == TaskStatus.pending ||
+              task.status == TaskStatus.preparing)
             SizedBox(
               width: double.infinity,
               child: ShadButton(

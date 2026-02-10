@@ -694,6 +694,21 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
 async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     rinf::debug_print!("[download] task {} starting, url={}", p.task_id, p.url);
 
+    // Transition to status=5 (preparing) — probing server, resolving file info
+    let _ = p.db.update_task_status(&p.task_id, 5, "").await;
+    let _ = p
+        .progress_tx
+        .send(ProgressUpdate {
+            task_id: p.task_id.clone(),
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            status: 5,
+            error_message: String::new(),
+            file_name: p.file_name.clone(),
+            segment_details: None,
+        })
+        .await;
+
     let client = &p.client;
 
     rinf::debug_print!("[download] task {} resolving file info...", p.task_id);

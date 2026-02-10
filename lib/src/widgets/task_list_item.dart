@@ -202,6 +202,7 @@ class _TaskListItemState extends State<TaskListItem> {
     switch (task.status) {
       case TaskStatus.downloading:
       case TaskStatus.pending:
+      case TaskStatus.preparing:
       case TaskStatus.resuming:
         return c.accent;
       case TaskStatus.completed:
@@ -234,6 +235,7 @@ class _TaskListItemState extends State<TaskListItem> {
     switch (task.status) {
       case TaskStatus.downloading:
       case TaskStatus.resuming:
+      case TaskStatus.preparing:
         statusColor = c.accent;
       case TaskStatus.completed:
         statusColor = AppColors.green;
@@ -272,6 +274,7 @@ void showTaskContextMenu(
   switch (task.status) {
     case TaskStatus.downloading:
     case TaskStatus.pending:
+    case TaskStatus.preparing:
     case TaskStatus.resuming:
       items.add(
         ContextMenuItem(

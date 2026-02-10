@@ -3,9 +3,17 @@ import 'dart:math';
 import '../bindings/bindings.dart';
 
 /// 任务状态 — 与 Rust 端状态码对应
-/// 0=pending, 1=downloading, 2=paused, 3=completed, 4=error
+/// 0=pending, 1=downloading, 2=paused, 3=completed, 4=error, 5=preparing
 /// resuming 为纯 Dart 端状态，点击继续后立即切换，Rust 返回 status=1 后自动过渡到 downloading
-enum TaskStatus { pending, downloading, paused, completed, error, resuming }
+enum TaskStatus {
+  pending,
+  downloading,
+  paused,
+  completed,
+  error,
+  resuming,
+  preparing,
+}
 
 /// 文件类型分类 — 由扩展名推断
 enum FileCategory {
@@ -125,6 +133,7 @@ TaskStatus taskStatusFromInt(int value) {
     2 => TaskStatus.paused,
     3 => TaskStatus.completed,
     4 => TaskStatus.error,
+    5 => TaskStatus.preparing,
     _ => TaskStatus.error,
   };
 }
@@ -298,6 +307,8 @@ class DownloadTask {
         return 'HTTP · $sizeText · ${errorMessage.isEmpty ? '出错' : errorMessage}';
       case TaskStatus.pending:
         return 'HTTP · 等待中...';
+      case TaskStatus.preparing:
+        return 'HTTP · 准备中...';
       case TaskStatus.resuming:
         return 'HTTP · $sizeText · 恢复中...';
     }
@@ -311,6 +322,7 @@ class DownloadTask {
       TaskStatus.paused => '已暂停',
       TaskStatus.completed => '已完成',
       TaskStatus.error => '出错',
+      TaskStatus.preparing => '准备中',
       TaskStatus.resuming => '恢复中',
     };
   }

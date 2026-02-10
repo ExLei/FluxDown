@@ -144,14 +144,14 @@ impl Db {
         .await?
     }
 
-    /// 启动时将所有 downloading(1) 和 pending(0) 的任务矫正为 paused(2)
+    /// 启动时将所有 downloading(1)、pending(0)、preparing(5) 的任务矫正为 paused(2)
     /// 因为重启后没有活跃的下载线程，这些任务实际上处于暂停状态
     pub async fn reset_incomplete_tasks_to_paused(&self) -> Result<u64, DbError> {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
             let affected = conn.execute(
-                "UPDATE tasks SET status = 2 WHERE status IN (0, 1)",
+                "UPDATE tasks SET status = 2 WHERE status IN (0, 1, 5)",
                 [],
             )?;
             Ok(affected as u64)

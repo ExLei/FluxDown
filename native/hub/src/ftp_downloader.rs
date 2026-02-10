@@ -423,6 +423,21 @@ async fn compute_ftp_segments(p: &DownloadParams, info: &FileInfo) -> i32 {
 async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     rinf::debug_print!("[ftp-download] task {} starting, url={}", p.task_id, p.url);
 
+    // Transition to status=5 (preparing) — probing FTP server, resolving file info
+    let _ = p.db.update_task_status(&p.task_id, 5, "").await;
+    let _ = p
+        .progress_tx
+        .send(ProgressUpdate {
+            task_id: p.task_id.clone(),
+            downloaded_bytes: 0,
+            total_bytes: 0,
+            status: 5,
+            error_message: String::new(),
+            file_name: p.file_name.clone(),
+            segment_details: None,
+        })
+        .await;
+
     let info = resolve_ftp_file_info(&p.url).await?;
     rinf::debug_print!(
         "[ftp-download] task {} resolved: name={}, size={}, range={}",

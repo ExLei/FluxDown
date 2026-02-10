@@ -83,6 +83,7 @@ class DownloadController extends ChangeNotifier {
               (t) =>
                   t.status == TaskStatus.downloading ||
                   t.status == TaskStatus.pending ||
+                  t.status == TaskStatus.preparing ||
                   t.status == TaskStatus.resuming,
             )
             .toList(),
@@ -106,6 +107,7 @@ class DownloadController extends ChangeNotifier {
               (t) =>
                   t.status == TaskStatus.downloading ||
                   t.status == TaskStatus.pending ||
+                  t.status == TaskStatus.preparing ||
                   t.status == TaskStatus.resuming,
             )
             .length,
@@ -214,9 +216,12 @@ class DownloadController extends ChangeNotifier {
       _tasks.where((t) => t.status == TaskStatus.error).length;
   int get pendingCount =>
       _tasks.where((t) => t.status == TaskStatus.pending).length;
+  int get preparingCount =>
+      _tasks.where((t) => t.status == TaskStatus.preparing).length;
   int get resumingCount =>
       _tasks.where((t) => t.status == TaskStatus.resuming).length;
-  int get activeCount => downloadingCount + pendingCount + resumingCount;
+  int get activeCount =>
+      downloadingCount + pendingCount + preparingCount + resumingCount;
 
   /// 全局下载速度
   int get totalDownloadSpeed {
@@ -260,7 +265,8 @@ class DownloadController extends ChangeNotifier {
       // 仅对活跃状态的任务执行暂停
       if (t.status == TaskStatus.downloading ||
           t.status == TaskStatus.resuming ||
-          t.status == TaskStatus.pending) {
+          t.status == TaskStatus.pending ||
+          t.status == TaskStatus.preparing) {
         _tasks[idx] = t.copyWith(status: TaskStatus.paused, speed: 0);
         _safeNotifyListeners();
       }
@@ -317,7 +323,8 @@ class DownloadController extends ChangeNotifier {
     for (final t in _tasks) {
       if (t.status == TaskStatus.downloading ||
           t.status == TaskStatus.resuming ||
-          t.status == TaskStatus.pending) {
+          t.status == TaskStatus.pending ||
+          t.status == TaskStatus.preparing) {
         pauseTask(t.id);
       }
     }

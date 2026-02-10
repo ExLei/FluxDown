@@ -31,7 +31,7 @@ pub struct RequestAllTasks {}
 #[derive(Serialize, RustSignal)]
 pub struct TaskProgress {
     pub task_id: String,
-    pub status: i32, // 0=pending, 1=downloading, 2=paused, 3=completed, 4=error
+    pub status: i32, // 0=pending, 1=downloading, 2=paused, 3=completed, 4=error, 5=preparing
     pub downloaded_bytes: i64,
     pub total_bytes: i64,
     pub speed: i64, // bytes per second
@@ -125,7 +125,7 @@ pub struct TaskInfo {
     pub url: String,
     pub file_name: String,
     pub save_dir: String,
-    pub status: i32, // 0=pending, 1=downloading, 2=paused, 3=completed, 4=error
+    pub status: i32, // 0=pending, 1=downloading, 2=paused, 3=completed, 4=error, 5=preparing
     pub downloaded_bytes: i64,
     pub total_bytes: i64,
     pub error_message: String,

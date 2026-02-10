@@ -33,6 +33,7 @@ pub struct DownloadRequest {
     #[serde(default)]
     pub cookies: String,
     #[serde(default)]
+    #[allow(dead_code)]
     pub headers: Option<std::collections::HashMap<String, String>>,
     #[serde(rename = "fileSize")]
     #[serde(default)]
@@ -158,10 +159,10 @@ fn find_header_end(data: &[u8]) -> Option<usize> {
 fn parse_content_length(headers: &str) -> usize {
     for line in headers.lines() {
         let lower = line.to_lowercase();
-        if let Some(value) = lower.strip_prefix("content-length:") {
-            if let Ok(len) = value.trim().parse::<usize>() {
-                return len;
-            }
+        if let Some(value) = lower.strip_prefix("content-length:")
+            && let Ok(len) = value.trim().parse::<usize>()
+        {
+            return len;
         }
     }
     0
