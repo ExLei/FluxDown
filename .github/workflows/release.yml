@@ -174,25 +174,36 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
+      # actions/checkout 会用 --no-tags 将 commit SHA 覆盖到 refs/tags/，
+      # 导致 annotated tag 退化为 lightweight tag，需要重新 fetch 恢复。
+      - name: Re-fetch annotated tag
+        shell: bash
+        run: |
+          TAG_NAME="${GITHUB_REF#refs/tags/}"
+          git fetch origin tag "$TAG_NAME" --force
+          echo "tag type: $(git cat-file -t "$TAG_NAME")"
+
       - name: Extract tag annotation for release notes
         id: tag_message
         shell: bash
         run: |
           TAG_NAME="${GITHUB_REF#refs/tags/}"
-          # 仅当 tag 是 annotated tag 时提取其注解内容
+          # 仅当 tag 是 annotated tag 时，用 cat-file 提取完整注解
           OBJ_TYPE=$(git cat-file -t "$TAG_NAME" 2>/dev/null || echo "unknown")
           if [ "$OBJ_TYPE" = "tag" ]; then
-            # git tag -m 写入的完整注解（subject + body）
-            TAG_MSG=$(git tag -l --format='%(contents:subject)%0a%(contents:body)' "$TAG_NAME" | sed '/^$/d')
+            # cat-file -p 输出 tag 对象，注解从第一个空行之后开始
+            TAG_MSG=$(git cat-file -p "$TAG_NAME" | sed '1,/^$/d')
           else
             TAG_MSG=""
           fi
           if [ -z "$TAG_MSG" ]; then
             TAG_MSG="Release $TAG_NAME"
           fi
-          echo "body<<EOF" >> "$GITHUB_OUTPUT"
+          # 使用随机 delimiter 避免内容中出现 EOF 导致截断
+          DELIM="RELEASE_NOTES_$(openssl rand -hex 8)"
+          echo "body<<$DELIM" >> "$GITHUB_OUTPUT"
           echo "$TAG_MSG" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "$DELIM" >> "$GITHUB_OUTPUT"
 
       # ── 下载所有构建产物 ──
       - name: Download Windows installer
