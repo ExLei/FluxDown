@@ -73,3 +73,6 @@ website/.vercel/
 
 # Sisyphus
 .sisyphus/
+
+# Memory debug output
+.mem_debug/

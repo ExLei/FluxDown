@@ -126,9 +126,9 @@ class _DownloadCompleteWindowState extends State<DownloadCompleteWindow>
     final c = AppColors.of(context);
 
     // 不使用 transparent 背景 — 原生 Win32 窗口不支持透明，
-    // 会露出白色底色。直接用 surface1 填满整个窗口。
+    // 会露出白色底色。直接用 dialogBg 填满整个窗口（暗色下使用 Apple 风格深灰）。
     return Scaffold(
-      backgroundColor: c.surface1,
+      backgroundColor: c.dialogBg,
       body: MouseRegion(
         onEnter: (_) {
           _isHovered = true;

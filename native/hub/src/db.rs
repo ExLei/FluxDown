@@ -31,7 +31,8 @@ impl Db {
              PRAGMA foreign_keys=ON;\
              PRAGMA cache_size=-512;\
              PRAGMA temp_store=MEMORY;\
-             PRAGMA mmap_size=0;",
+             PRAGMA mmap_size=0;\
+             PRAGMA wal_autocheckpoint=0;",
         )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS tasks (
@@ -619,6 +620,20 @@ impl Db {
                 "UPDATE tasks SET total_bytes = ?1 WHERE id = ?2",
                 params![total_bytes, id],
             )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Manually run a WAL checkpoint to merge the write-ahead log back into the
+    /// main database file.  Called when all downloads are idle (no active tasks)
+    /// so the WAL doesn't grow unbounded and no background autocheckpoint causes
+    /// unexpected disk I/O.
+    pub async fn wal_checkpoint(&self) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
             Ok(())
         })
         .await?

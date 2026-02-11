@@ -276,56 +276,70 @@ class HeaderBarState extends State<HeaderBar> {
                   child: KeyboardListener(
                     focusNode: FocusNode(), // dummy node for key events
                     onKeyEvent: _handleKeyEvent,
-                    child: ShadInput(
-                      key: _searchBoxKey,
-                      controller: _searchController,
-                      focusNode: _focusNode,
-                      placeholder: Text(
-                        LocaleScope.of(context).searchPlaceholder,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        color: _isSearchActive ? c.inputFocusBg : c.bg,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: _isSearchActive
+                              ? c.accent.withValues(alpha: 0.6)
+                              : c.border.withValues(alpha: 0.5),
+                          width: 1,
+                        ),
                       ),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
-                      ),
-                      constraints: const BoxConstraints(
-                        minHeight: 32,
-                        maxHeight: 32,
-                      ),
-                      gap: 6,
-                      leading: Icon(
-                        LucideIcons.search,
-                        size: 14,
-                        color: _isSearchActive ? c.accent : c.textMuted,
-                      ),
-                      trailing: Visibility(
-                        visible: !_isSearchActive,
-                        maintainSize: true,
-                        maintainAnimation: true,
-                        maintainState: true,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 5,
-                            vertical: 1,
-                          ),
-                          decoration: BoxDecoration(
-                            color: c.surface2,
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: c.border, width: 1),
-                          ),
-                          child: Text(
-                            'Ctrl+F',
-                            style: TextStyle(
-                              fontSize: 10,
-                              color: c.textMuted,
-                              fontWeight: FontWeight.w500,
+                      child: ShadInput(
+                        key: _searchBoxKey,
+                        controller: _searchController,
+                        focusNode: _focusNode,
+                        placeholder: Text(
+                          LocaleScope.of(context).searchPlaceholder,
+                        ),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        constraints: const BoxConstraints(
+                          minHeight: 30,
+                          maxHeight: 30,
+                        ),
+                        gap: 6,
+                        leading: Icon(
+                          LucideIcons.search,
+                          size: 14,
+                          color: _isSearchActive ? c.accent : c.textMuted,
+                        ),
+                        trailing: Visibility(
+                          visible: !_isSearchActive,
+                          maintainSize: true,
+                          maintainAnimation: true,
+                          maintainState: true,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 5,
+                              vertical: 1,
+                            ),
+                            decoration: BoxDecoration(
+                              color: c.surface2,
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: c.border, width: 1),
+                            ),
+                            child: Text(
+                              'Ctrl+F',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: c.textMuted,
+                                fontWeight: FontWeight.w500,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                      style: const TextStyle(fontSize: 13),
-                      decoration: const ShadDecoration(
-                        secondaryFocusedBorder: ShadBorder.none,
-                        secondaryBorder: ShadBorder.none,
+                        style: const TextStyle(fontSize: 13),
+                        decoration: const ShadDecoration(
+                          border: ShadBorder.none,
+                          focusedBorder: ShadBorder.none,
+                          secondaryFocusedBorder: ShadBorder.none,
+                          secondaryBorder: ShadBorder.none,
+                        ),
                       ),
                     ),
                   ),

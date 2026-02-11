@@ -67,12 +67,17 @@ class _TaskListItemState extends State<TaskListItem> {
         onSecondaryTapDown: isManage ? null : _showContextMenu,
         child: Container(
           height: 64,
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: EdgeInsets.only(
+            left: (widget.isSelected || (isManage && isChecked)) ? 0 : 16,
+            right: 16,
+            top: 8,
+            bottom: 8,
+          ),
           decoration: BoxDecoration(
             color: isManage && isChecked
-                ? c.accentBg
+                ? c.selectedBg
                 : widget.isSelected
-                ? c.accentBg
+                ? c.selectedBg
                 : _isHovered
                 ? c.hoverBg
                 : Colors.transparent,
@@ -80,6 +85,18 @@ class _TaskListItemState extends State<TaskListItem> {
           ),
           child: Row(
             children: [
+              // 选中/勾选时左侧 accent 指示条
+              if (widget.isSelected || (isManage && isChecked)) ...[
+                Container(
+                  width: 3,
+                  height: 28,
+                  decoration: BoxDecoration(
+                    color: c.accent,
+                    borderRadius: BorderRadius.circular(1.5),
+                  ),
+                ),
+                const SizedBox(width: 13),
+              ],
               // 管理模式下显示复选框
               if (isManage) ...[
                 SizedBox(
@@ -437,7 +454,7 @@ void showDeleteConfirmDialog(
   final s = LocaleScope.of(context);
   showShadDialog(
     context: context,
-    barrierColor: const Color(0x1A000000),
+    barrierColor: c.dialogBarrier,
     animateIn: const [],
     animateOut: const [],
     builder: (ctx) => ShadDialog(
@@ -491,7 +508,7 @@ void showBatchDeleteConfirmDialog(
   final s = LocaleScope.of(context);
   showShadDialog(
     context: context,
-    barrierColor: const Color(0x1A000000),
+    barrierColor: c.dialogBarrier,
     animateIn: const [],
     animateOut: const [],
     builder: (ctx) => ShadDialog(

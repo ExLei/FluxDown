@@ -568,7 +568,7 @@ class _GeneralContent extends StatelessWidget {
                   if (!ok && context.mounted) {
                     showShadDialog(
                       context: context,
-                      barrierColor: const Color(0x1A000000),
+                      barrierColor: AppColors.of(context).dialogBarrier,
                       animateIn: const [],
                       animateOut: const [],
                       builder: (ctx) => ShadDialog.alert(
@@ -1040,7 +1040,7 @@ class _BtTrackerEditorState extends State<_BtTrackerEditor> {
   void _resetToDefault() {
     showShadDialog(
       context: context,
-      barrierColor: const Color(0x1A000000),
+      barrierColor: AppColors.of(context).dialogBarrier,
       animateIn: const [],
       animateOut: const [],
       builder: (ctx) => ShadDialog.alert(
@@ -1157,19 +1157,19 @@ class _BtTrackerEditorState extends State<_BtTrackerEditor> {
                       hintMaxLines: 5,
                       contentPadding: const EdgeInsets.all(10),
                       filled: true,
-                      fillColor: c.surface1,
+                      fillColor: c.inputBg,
                       hoverColor: Colors.transparent,
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
-                        borderSide: BorderSide(color: c.border),
+                        borderSide: BorderSide(color: c.inputBorder),
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
-                        borderSide: BorderSide(color: c.border),
+                        borderSide: BorderSide(color: c.inputBorder),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(8),
-                        borderSide: BorderSide(color: c.accent),
+                        borderSide: BorderSide(color: c.inputFocusBorder),
                       ),
                     ),
                     onChanged: (_) => setState(() {}),

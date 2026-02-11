@@ -316,16 +316,7 @@ impl DownloadManager {
             if queued.is_resume {
                 self.do_resume_task(&queued.task_id).await;
             } else {
-                self.do_start_task(
-                    queued.task_id,
-                    queued.url,
-                    queued.save_dir,
-                    queued.file_name,
-                    queued.segments,
-                    queued.cookies,
-                    queued.torrent_file_bytes,
-                )
-                .await;
+                self.do_start_task(queued).await;
             }
         }
     }
@@ -346,6 +337,19 @@ impl DownloadManager {
             }
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
+        self.maybe_wal_checkpoint().await;
+    }
+
+    /// Run a WAL checkpoint when all tasks are idle (no active downloads and
+    /// nothing queued) so the WAL file doesn't linger and cause sporadic disk
+    /// I/O in the background.
+    async fn maybe_wal_checkpoint(&self) {
+        if self.active_tokens.is_empty()
+            && self.pending_queue.is_empty()
+            && let Err(e) = self.db.wal_checkpoint().await
+        {
+            rinf::debug_print!("[manager] wal_checkpoint error: {e}");
+        }
     }
 
     pub async fn load_and_send_all_tasks(&self) {
@@ -436,10 +440,10 @@ impl DownloadManager {
         }
 
         // Persist .torrent file bytes to DB for resume after restart.
-        if !torrent_file_bytes.is_empty() {
-            if let Err(e) = self.db.save_torrent_file_bytes(&task_id, &torrent_file_bytes).await {
-                rinf::debug_print!("save_torrent_file_bytes error: {}", e);
-            }
+        if !torrent_file_bytes.is_empty()
+            && let Err(e) = self.db.save_torrent_file_bytes(&task_id, &torrent_file_bytes).await
+        {
+            rinf::debug_print!("save_torrent_file_bytes error: {}", e);
         }
 
         TaskProgress {
@@ -458,43 +462,44 @@ impl DownloadManager {
         // BT tasks bypass the HTTP/FTP concurrency queue — they are managed
         // by the shared librqbit session with its own concurrency controls.
         let is_bt = is_magnet(&url) || !torrent_file_bytes.is_empty();
+        let queued = QueuedTask {
+            task_id,
+            url: db_url,
+            save_dir,
+            file_name,
+            segments: seg,
+            is_resume: false,
+            cookies,
+            torrent_file_bytes,
+        };
         if is_bt || self.has_capacity() {
-            self.do_start_task(task_id, db_url, save_dir, file_name, seg, cookies, torrent_file_bytes)
-                .await;
+            self.do_start_task(queued).await;
             // If do_start_task failed early (e.g. BT session init), the slot
             // was freed — drain the queue so pending tasks can proceed.
             self.drain_queue().await;
         } else {
             rinf::debug_print!(
                 "[manager] queuing task {} (active={}, max={})",
-                task_id,
+                queued.task_id,
                 self.active_tokens.len(),
                 self.max_concurrent
             );
-            self.pending_queue.push_back(QueuedTask {
-                task_id,
-                url: db_url,
-                save_dir,
-                file_name,
-                segments: seg,
-                is_resume: false,
-                cookies,
-                torrent_file_bytes,
-            });
+            self.pending_queue.push_back(queued);
         }
     }
 
     /// Internal: actually spawn the download task (no concurrency check).
-    async fn do_start_task(
-        &mut self,
-        task_id: String,
-        url: String,
-        save_dir: String,
-        file_name: String,
-        segments: i32,
-        cookies: String,
-        torrent_file_bytes: Vec<u8>,
-    ) {
+    async fn do_start_task(&mut self, queued: QueuedTask) {
+        let QueuedTask {
+            task_id,
+            url,
+            save_dir,
+            file_name,
+            segments,
+            is_resume: _,
+            cookies,
+            torrent_file_bytes,
+        } = queued;
         self.generation += 1;
         let spawn_gen = self.generation;
         let cancel_token = CancellationToken::new();
@@ -994,10 +999,27 @@ impl DownloadManager {
             }
         }
 
+        // Notify progress_reporter so it can remove its per-task HashMap
+        // entries (states, last_dart_send, last_db_save).  Without this the
+        // reporter leaks ~300-1400 bytes per deleted task indefinitely.
+        let _ = self
+            .progress_tx
+            .send(ProgressUpdate {
+                task_id: task_id.to_string(),
+                downloaded_bytes: 0,
+                total_bytes: 0,
+                status: 4, // triggers cleanup at progress_reporter
+                error_message: "deleted".to_string(),
+                file_name: String::new(),
+                segment_details: None,
+            })
+            .await;
+
         let _ = self.db.delete_task(task_id).await;
 
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
+        self.maybe_wal_checkpoint().await;
     }
 }
 
@@ -1197,8 +1219,11 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                 .await;
         }
 
-        // Clean up finished tasks.
-        if update.status == 3 || update.status == 4 {
+        // Clean up tasks that are no longer actively downloading.
+        // Status 2 (paused): speed state is stale; a fresh one will be
+        //   created via `or_insert_with` when the task resumes.
+        // Status 3 (completed) / 4 (error/cancelled/deleted): terminal.
+        if update.status == 2 || update.status == 3 || update.status == 4 {
             states.remove(&update.task_id);
             last_dart_send.remove(&update.task_id);
             last_db_save.remove(&update.task_id);

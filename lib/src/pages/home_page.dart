@@ -107,7 +107,7 @@ class _HomePageState extends State<HomePage> {
     final s = LocaleScope.of(context);
     showShadDialog(
       context: context,
-      barrierColor: const Color(0x1A000000),
+      barrierColor: AppColors.of(context).dialogBarrier,
       animateIn: const [],
       animateOut: const [],
       builder: (ctx) => ShadDialog.alert(

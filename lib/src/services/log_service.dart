@@ -17,6 +17,9 @@ class LogService {
   Timer? _flushTimer;
   bool _initialized = false;
 
+  /// 自上次 flush 以来是否有新数据写入
+  bool _dirty = false;
+
   /// 日志目录 — exe 同级 logs/
   late final Directory _logDir;
 
@@ -33,10 +36,13 @@ class LogService {
 
     _rotateSink();
 
-    // 每 2 秒刷盘一次，确保崩溃前有足够日志
+    // 每 2 秒刷盘一次，确保崩溃前有足够日志。
+    // 仅在有新数据写入时才调用 flushSync，避免空闲时无谓的磁盘 I/O。
     _flushTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (!_dirty) return;
       try {
         _raf?.flushSync();
+        _dirty = false;
       } catch (_) {}
     });
   }
@@ -51,6 +57,7 @@ class LogService {
           '${_pad2(now.hour)}:${_pad2(now.minute)}:${_pad2(now.second)}.${_pad3(now.millisecond)}';
       final line = '$ts [$tag] $message\n';
       _raf?.writeStringSync(line);
+      _dirty = true;
       // 仅在 debug 模式下输出到控制台，避免 release 模式的字符串缓存开销
       if (kDebugMode) {
         // ignore: avoid_print
@@ -71,6 +78,7 @@ class LogService {
     // 错误立即刷盘
     try {
       _raf?.flushSync();
+      _dirty = false;
     } catch (_) {}
   }
 
@@ -114,6 +122,7 @@ class LogService {
         '  isolate: ${Isolate.current.debugName}\n'
         '\n';
     _raf!.writeStringSync(header);
+    _dirty = true;
   }
 
   static String _pad2(int n) => n.toString().padLeft(2, '0');

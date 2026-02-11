@@ -27,6 +27,10 @@ class DownloadController extends ChangeNotifier {
   // 时间分组折叠状态（key 为 TimeGroup，value 为是否折叠）
   final Map<TimeGroup, bool> _collapsedGroups = {};
 
+  /// 已删除任务 ID 集合 — 防止 Rust 残余信号将已删除任务「复活」到列表中。
+  /// 在 _onAllTasks 刷新时清空（Rust 端不再包含该任务即可安全移除）。
+  final Set<String> _deletedTaskIds = {};
+
   /// 下载完成回调 — 当任务状态从非 completed 变为 completed 时触发
   void Function(DownloadTask task)? onTaskCompleted;
 
@@ -222,6 +226,7 @@ class DownloadController extends ChangeNotifier {
     for (final id in ids) {
       final action = deleteFiles ? 3 : 4;
       ControlTask(taskId: id, action: action).sendSignalToRust();
+      _deletedTaskIds.add(id);
       _tasks.removeWhere((t) => t.id == id);
       if (_selectedTaskId == id) _selectedTaskId = null;
     }
@@ -394,6 +399,7 @@ class DownloadController extends ChangeNotifier {
     logInfo(_tag, 'deleteTask: $taskId, deleteFiles=$deleteFiles');
     final action = deleteFiles ? 3 : 4;
     ControlTask(taskId: taskId, action: action).sendSignalToRust();
+    _deletedTaskIds.add(taskId);
     _tasks.removeWhere((t) => t.id == taskId);
     if (_selectedTaskId == taskId) _selectedTaskId = null;
     _safeNotifyListeners();
@@ -467,6 +473,7 @@ class DownloadController extends ChangeNotifier {
     }
     final incoming = pack.message.tasks;
     logInfo(_tag, '_onAllTasks: received ${incoming.length} tasks');
+    _deletedTaskIds.clear(); // 全量刷新后旧的删除标记不再需要
     _tasks.clear();
     for (final info in incoming) {
       _tasks.add(DownloadTask.fromTaskInfo(info));
@@ -477,6 +484,8 @@ class DownloadController extends ChangeNotifier {
   void _onProgress(RustSignalPack<TaskProgress> pack) {
     if (_disposed) return;
     final p = pack.message;
+    // 忽略已删除任务的残余信号，防止「僵尸复活」
+    if (_deletedTaskIds.contains(p.taskId)) return;
     final newStatus = taskStatusFromInt(p.status);
     final idx = _tasks.indexWhere((t) => t.id == p.taskId);
     if (idx >= 0) {
@@ -521,6 +530,7 @@ class DownloadController extends ChangeNotifier {
   void _onSegmentProgress(RustSignalPack<SegmentProgress> pack) {
     if (_disposed) return;
     final sp = pack.message;
+    if (_deletedTaskIds.contains(sp.taskId)) return;
     final idx = _tasks.indexWhere((t) => t.id == sp.taskId);
     if (idx < 0) return;
 
@@ -545,6 +555,7 @@ class DownloadController extends ChangeNotifier {
   void _onSplitEvent(RustSignalPack<SegmentSplitEvent> pack) {
     if (_disposed) return;
     final evt = pack.message;
+    if (_deletedTaskIds.contains(evt.taskId)) return;
     final idx = _tasks.indexWhere((t) => t.id == evt.taskId);
     if (idx < 0) return;
 

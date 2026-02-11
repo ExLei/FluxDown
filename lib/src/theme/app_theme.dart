@@ -70,9 +70,18 @@ void invalidateThemeCache() {
   _cachedDark = null;
 }
 
+/// Apple 风格暗色模式的色值常量
+const _darkSurface1 = Color(0xFF2C2C2E);
+const _darkHoverBg = Color(0xFF363638);
+const _darkBorder = Color(0xFF48484A);
+const _darkSwitchTrack = Color(0xFF636366);
+
 void _ensureCache(AppColorScheme scheme) {
   if (_cachedScheme == scheme) return;
   _cachedScheme = scheme;
+
+  final darkColorScheme = _darkColorScheme(scheme);
+
   _cachedLight = ShadThemeData(
     brightness: Brightness.light,
     colorScheme: _lightColorScheme(scheme),
@@ -81,9 +90,44 @@ void _ensureCache(AppColorScheme scheme) {
   );
   _cachedDark = ShadThemeData(
     brightness: Brightness.dark,
-    colorScheme: _darkColorScheme(scheme),
+    colorScheme: darkColorScheme,
     textTheme: ShadTextTheme(family: _fontFamily),
     buttonSizesTheme: _buttonSizes,
+    // ── Ghost/Outline 按钮 hover 适配 Apple 深灰层级 ──
+    ghostButtonTheme: const ShadButtonTheme(hoverBackgroundColor: _darkHoverBg),
+    outlineButtonTheme: const ShadButtonTheme(
+      hoverBackgroundColor: _darkHoverBg,
+    ),
+    // ── Switch (Apple 风格) ──
+    switchTheme: const ShadSwitchTheme(
+      thumbColor: Colors.white,
+      uncheckedTrackColor: _darkSwitchTrack,
+    ),
+    // ── Input (Apple 风格深灰背景 + 可见边框) ──
+    inputTheme: ShadInputTheme(cursorColor: darkColorScheme.primary),
+    // ── Dialog (使用 surface1 背景 + 清晰边框) ──
+    primaryDialogTheme: ShadDialogTheme(
+      backgroundColor: _darkSurface1,
+      border: Border.all(color: _darkBorder, width: 1),
+      shadows: const [
+        BoxShadow(
+          color: Color(0x40000000),
+          blurRadius: 24,
+          offset: Offset(0, 8),
+        ),
+      ],
+    ),
+    alertDialogTheme: ShadDialogTheme(
+      backgroundColor: _darkSurface1,
+      border: Border.all(color: _darkBorder, width: 1),
+      shadows: const [
+        BoxShadow(
+          color: Color(0x40000000),
+          blurRadius: 24,
+          offset: Offset(0, 8),
+        ),
+      ],
+    ),
   );
 }
 

@@ -306,12 +306,13 @@ impl SharedBtSession {
         speed_limit_bps: u64,
         bt_config: &BtConfig,
     ) -> Result<Self, DownloadError> {
-        // Scale worker threads with CPU cores for better throughput on
-        // multi-core machines.  Minimum 4, maximum 16.
+        // Scale worker threads with CPU cores.  BT workload is mostly I/O-bound
+        // so diminishing returns beyond 8 threads; capping here saves ~2 MB of
+        // stack memory per thread avoided.
         let cpu_cores = std::thread::available_parallelism()
             .map(|n| n.get())
             .unwrap_or(4);
-        let worker_threads = cpu_cores.clamp(4, 16);
+        let worker_threads = cpu_cores.clamp(2, 8);
 
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
@@ -385,11 +386,11 @@ impl SharedBtSession {
                 // paused/restarted torrents can skip re-verification.
                 // Requires `persistence` to be set to take effect.
                 fastresume: true,
-                // Buffer up to 128 MiB of writes in memory before flushing
-                // to disk.  Reduces I/O contention from many small pieces
-                // and significantly improves throughput on HDD.  Raised
-                // from 64 to better accommodate high-speed connections.
-                defer_writes_up_to: Some(128),
+                // Buffer writes in memory before flushing to disk.  Reduces
+                // I/O contention from many small pieces.  64 MiB is enough
+                // for high-speed connections while keeping RSS reasonable
+                // (was 128 — saved ~64 MB of potential RSS).
+                defer_writes_up_to: Some(64),
                 // Limit concurrent torrent initialisation to 3 to prevent
                 // DHT/tracker storms when many BT tasks start at once.
                 concurrent_init_limit: Some(3),
