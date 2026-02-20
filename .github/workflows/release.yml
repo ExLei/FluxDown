@@ -133,6 +133,7 @@ jobs:
       - name: Create portable zip
         shell: pwsh
         run: |
+          New-Item -Path "build\windows\${{ matrix.arch }}\runner\Release\portable" -ItemType File -Force | Out-Null
           Compress-Archive -Path "build\windows\${{ matrix.arch }}\runner\Release\*" -DestinationPath "build\installer\FluxDown-${{ steps.version.outputs.VERSION }}-windows-${{ matrix.arch }}-portable.zip"
 
       # ── Upload artifacts（供 release job 使用）──
