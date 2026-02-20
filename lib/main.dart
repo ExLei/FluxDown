@@ -69,6 +69,9 @@ Future<void> main(List<String> args) async {
 
   // ===== 主窗口正常启动流程 =====
 
+  // 检测是否为免打扰启动（开机自启时带 --silentStart 参数）
+  final isSilentStart = args.contains('--silentStart');
+
   // 提取启动参数中的 .torrent 文件路径（Windows 文件关联双击打开）
   final torrentFilePaths = args
       .where((a) => a.toLowerCase().endsWith('.torrent') && !a.startsWith('-'))
@@ -127,16 +130,21 @@ Future<void> main(List<String> args) async {
   );
 
   windowManager.waitUntilReadyToShow(windowOptions, () async {
-    logInfo('main', 'window ready to show');
-    await windowManager.show();
-    await windowManager.focus();
-    logInfo('main', 'window shown and focused');
+    logInfo('main', 'window ready to show, isSilentStart=$isSilentStart');
+    if (!isSilentStart) {
+      await windowManager.show();
+      await windowManager.focus();
+      logInfo('main', 'window shown and focused');
+    } else {
+      logInfo('main', 'silent start — window stays hidden, tray only');
+    }
   });
 
-  // 初始化开机启动支持
+  // 初始化开机启动支持（注册时附带 --silentStart 参数，开机自启免打扰）
   launchAtStartup.setup(
     appName: 'FluxDown',
     appPath: Platform.resolvedExecutable,
+    args: ['--silentStart'],
   );
   logInfo('main', 'launchAtStartup setup done');
 
@@ -564,6 +572,10 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
   ShadThemeData _resolveTheme(BuildContext context) {
     final mode = themeProvider.themeMode;
     final scheme = themeProvider.colorScheme;
+    // 自定义颜色方案：在构建主题前同步颜色值
+    if (scheme == AppColorScheme.custom) {
+      setCustomColorForTheme(themeProvider.customColor);
+    }
     final platformBrightness = MediaQuery.platformBrightnessOf(context);
     final useDark =
         mode == ThemeMode.dark ||
