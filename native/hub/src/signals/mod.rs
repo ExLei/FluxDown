@@ -23,6 +23,9 @@ pub struct CreateTask {
     /// Per-task user-agent override. Empty = use global UA setting.
     #[serde(default)]
     pub user_agent: String,
+    /// Named queue ID to assign this task to. Empty = default queue.
+    #[serde(default)]
+    pub queue_id: String,
 }
 
 /// Batch create multiple download tasks at once
@@ -39,6 +42,9 @@ pub struct BatchCreateTask {
     /// Empty = use global UA setting.
     #[serde(default)]
     pub user_agent: String,
+    /// Named queue ID to assign all tasks to. Empty = default queue.
+    #[serde(default)]
+    pub queue_id: String,
 }
 
 /// Control an existing task (pause/resume/cancel/delete)
@@ -124,6 +130,9 @@ pub struct ConfirmExternalDownload {
     /// Per-task user-agent override. Empty = use global UA setting.
     #[serde(default)]
     pub user_agent: String,
+    /// Named queue ID. Empty = default queue.
+    #[serde(default)]
+    pub queue_id: String,
 }
 
 // ========== Config signals ==========
@@ -166,6 +175,9 @@ pub struct TaskInfo {
     pub created_at: String, // Unix seconds timestamp
     /// Per-task proxy URL (empty = global proxy).
     pub proxy_url: String,
+    /// Named queue ID (empty = default queue).
+    #[serde(default)]
+    pub queue_id: String,
 }
 
 /// Notification that a dynamic segment split occurred (IDM-style coordinator).
@@ -361,4 +373,67 @@ pub struct QueuePositionsUpdate {
 pub struct QueuePosition {
     pub task_id: String,
     pub position: i32, // 1-based，0 = 不在队列
+}
+
+// ========== Named queue management signals ==========
+
+/// Create a new named download queue (Dart → Rust)
+#[derive(Deserialize, DartSignal)]
+pub struct CreateQueue {
+    pub name: String,
+    /// Speed limit in KB/s for this queue. 0 = no limit.
+    pub speed_limit_kbps: i64,
+    /// Max concurrent downloads for this queue. 0 = use global setting.
+    pub max_concurrent: i32,
+    /// Default save directory for tasks in this queue. Empty = use global default.
+    pub default_save_dir: String,
+}
+
+/// Update an existing queue's settings (Dart → Rust)
+#[derive(Deserialize, DartSignal)]
+pub struct UpdateQueue {
+    pub queue_id: String,
+    pub name: String,
+    pub speed_limit_kbps: i64,
+    pub max_concurrent: i32,
+    pub default_save_dir: String,
+}
+
+/// Delete a named queue (Dart → Rust). Tasks move to the default queue.
+#[derive(Deserialize, DartSignal)]
+pub struct DeleteQueue {
+    pub queue_id: String,
+}
+
+/// Move a task to a different queue (Dart → Rust)
+#[derive(Deserialize, DartSignal)]
+pub struct MoveTaskToQueue {
+    pub task_id: String,
+    /// Target queue ID. Empty string = move to default queue.
+    pub queue_id: String,
+}
+
+/// Request all named queues (Dart → Rust, sent on app startup)
+#[derive(Deserialize, DartSignal)]
+pub struct RequestAllQueues {}
+
+/// All named queues — sent on startup and after any queue change (Rust → Dart)
+#[derive(Serialize, RustSignal)]
+pub struct AllQueues {
+    pub queues: Vec<QueueInfo>,
+}
+
+/// Named queue metadata
+#[derive(Serialize, Deserialize, SignalPiece)]
+pub struct QueueInfo {
+    pub queue_id: String,
+    pub name: String,
+    /// Speed limit in KB/s. 0 = no limit.
+    pub speed_limit_kbps: i64,
+    /// Max concurrent downloads. 0 = use global setting.
+    pub max_concurrent: i32,
+    /// Default save directory. Empty = use global default.
+    pub default_save_dir: String,
+    /// Display order (lower = higher up).
+    pub position: i32,
 }

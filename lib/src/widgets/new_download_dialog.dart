@@ -18,6 +18,7 @@ import 'package:flutter/services.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import '../i18n/locale_provider.dart';
 import '../models/download_controller.dart';
+import '../models/download_queue.dart';
 import '../models/settings_provider.dart';
 import '../theme/app_colors.dart';
 import 'dir_picker_field.dart';
@@ -63,6 +64,9 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
   String? selectedThreads;
   String _selectedUaPreset = 'custom';
 
+  /// 选中的队列 ID（空字符串 = 默认队列）
+  String _selectedQueueId = '';
+
   /// 是否展开高级选项（含任务代理）
   bool _showAdvanced = false;
 
@@ -84,6 +88,9 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
     _saveDirController.text = widget.settingsProvider.defaultSaveDir;
     _urlController.addListener(_onUrlChanged);
     _pasteUrlFromClipboard();
+    // 如果侧边栏已选中某个队列，新建任务默认加入该队列
+    final qf = widget.controller.queueFilter;
+    if (qf != null) _selectedQueueId = qf;
   }
 
   void _onUrlChanged() {
@@ -306,6 +313,7 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
         segments: segments,
         proxyUrl: proxyUrl,
         userAgent: userAgent,
+        queueId: _selectedQueueId,
       );
     } else {
       // 多条 — 使用 BatchCreateTask
@@ -315,6 +323,7 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
         segments: segments,
         proxyUrl: proxyUrl,
         userAgent: userAgent,
+        queueId: _selectedQueueId,
       );
     }
 
@@ -794,10 +803,54 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
                   ),
                 ],
               ),
+              // 队列选择器（有命名队列时才显示）
+              _buildQueueSelector(s, c),
             ],
           ],
         ),
       ),
+    );
+  }
+
+  Widget _buildQueueSelector(S s, AppColors c) {
+    final queues = widget.controller.queues;
+    // 没有任何命名队列时不显示
+    if (queues.isEmpty) return const SizedBox.shrink();
+
+    final allOptions = <DownloadQueue>[
+      const DownloadQueue(
+        queueId: '',
+        name: '',
+        speedLimitKbps: 0,
+        maxConcurrent: 0,
+        defaultSaveDir: '',
+        position: -1,
+      ),
+      ...queues,
+    ];
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 10),
+        _SectionLabel(text: s.taskQueueLabel, c: c),
+        const SizedBox(height: 6),
+        ShadSelect<String>(
+          initialValue: _selectedQueueId,
+          options: allOptions.map((q) {
+            final label = q.queueId.isEmpty ? s.defaultQueue : q.name;
+            return ShadOption(value: q.queueId, child: Text(label));
+          }).toList(),
+          selectedOptionBuilder: (context, value) {
+            if (value.isEmpty) return Text(s.defaultQueue);
+            final q = queues.where((q) => q.queueId == value).firstOrNull;
+            return Text(q?.name ?? s.defaultQueue, overflow: TextOverflow.ellipsis, maxLines: 1);
+          },
+          onChanged: (v) {
+            if (v != null) setState(() => _selectedQueueId = v);
+          },
+        ),
+      ],
     );
   }
 }

@@ -211,6 +211,7 @@ class _QuickDownloadDialogContentState
         cookies: widget.cookies,
         proxyUrl: proxyUrl,
         userAgent: userAgent,
+        queueId: '',
       ).sendSignalToRust();
     } else {
       // 多条 — 使用 BatchCreateTask
@@ -220,6 +221,7 @@ class _QuickDownloadDialogContentState
         segments: segments,
         proxyUrl: proxyUrl,
         userAgent: userAgent,
+        queueId: '',
       ).sendSignalToRust();
     }
 

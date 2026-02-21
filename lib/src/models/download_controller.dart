@@ -7,6 +7,7 @@ import 'package:rinf/rinf.dart';
 import '../bindings/bindings.dart';
 import '../services/analytics_service.dart';
 import '../services/log_service.dart';
+import 'download_queue.dart';
 import 'download_task.dart';
 
 const _tag = 'DownloadCtrl';
@@ -20,6 +21,12 @@ class DownloadController extends ChangeNotifier {
   String? _selectedTaskId;
   FileCategory _categoryFilter = FileCategory.all;
   StatusTab _statusTab = StatusTab.all;
+
+  /// 命名队列列表（来自 Rust AllQueues 信号）
+  List<DownloadQueue> _queues = [];
+
+  /// 当前队列筛选 ID：null = 不过滤（显示全部），'' = 默认队列，非空 = 指定命名队列
+  String? _queueFilter;
 
   // 管理模式（多选）
   bool _isManageMode = false;
@@ -41,14 +48,16 @@ class DownloadController extends ChangeNotifier {
   StreamSubscription<RustSignalPack<SegmentSplitEvent>>? _splitSub;
   StreamSubscription<RustSignalPack<TaskMetaProbed>>? _metaProbedSub;
   StreamSubscription<RustSignalPack<QueuePositionsUpdate>>? _queuePosSub;
+  StreamSubscription<RustSignalPack<AllQueues>>? _allQueuesSub;
 
   bool _disposed = false;
 
   DownloadController() {
     logInfo(_tag, 'constructor — starting listeners');
     _startListening();
-    // 启动时请求所有持久化任务
+    // 启动时请求所有持久化任务和队列
     const RequestAllTasks().sendSignalToRust();
+    const RequestAllQueues().sendSignalToRust();
   }
 
   @override
@@ -61,6 +70,7 @@ class DownloadController extends ChangeNotifier {
     _splitSub?.cancel();
     _metaProbedSub?.cancel();
     _queuePosSub?.cancel();
+    _allQueuesSub?.cancel();
     super.dispose();
     logInfo(_tag, 'dispose done');
   }
@@ -118,10 +128,23 @@ class DownloadController extends ChangeNotifier {
   FileCategory get categoryFilter => _categoryFilter;
   StatusTab get statusTab => _statusTab;
 
-  /// 按文件类型过滤（侧边栏维度）
+  /// 命名队列列表（已按 position 排序）
+  List<DownloadQueue> get queues => _queues;
+
+  /// 当前队列筛选（null = 不过滤，'' = 默认队列，非空 = 指定命名队列）
+  String? get queueFilter => _queueFilter;
+
+  /// 按队列 ID 过滤
+  List<DownloadTask> get _queueFiltered {
+    if (_queueFilter == null) return _tasks;
+    return _tasks.where((t) => t.queueId == _queueFilter).toList();
+  }
+
+  /// 按文件类型过滤（在队列过滤基础上叠加）
   List<DownloadTask> get _categoryFiltered {
-    if (_categoryFilter == FileCategory.all) return _tasks;
-    return _tasks.where((t) => t.fileCategory == _categoryFilter).toList();
+    final byQueue = _queueFiltered;
+    if (_categoryFilter == FileCategory.all) return byQueue;
+    return byQueue.where((t) => t.fileCategory == _categoryFilter).toList();
   }
 
   /// 双维度组合过滤后的任务列表（侧边栏文件类型 + 顶部状态 Tab）
@@ -262,6 +285,12 @@ class DownloadController extends ChangeNotifier {
     };
   }
 
+  /// 指定队列中的任务数量（用于侧边栏队列计数）
+  /// [queueId] 为空字符串表示默认队列
+  int countForQueue(String queueId) {
+    return _tasks.where((t) => t.queueId == queueId).length;
+  }
+
   // ---------------------------------------------------------------------------
   // 管理模式（多选批量操作）
   // ---------------------------------------------------------------------------
@@ -382,10 +411,11 @@ class DownloadController extends ChangeNotifier {
     Uint8List? torrentFileBytes,
     String proxyUrl = '',
     String userAgent = '',
+    String queueId = '',
   }) {
     logInfo(
       _tag,
-      'createTask: url=$url, dir=$saveDir, file=$fileName, seg=$segments, cookies_len=${cookies.length}, torrent_bytes=${torrentFileBytes?.length ?? 0}',
+      'createTask: url=$url, dir=$saveDir, file=$fileName, seg=$segments, cookies_len=${cookies.length}, torrent_bytes=${torrentFileBytes?.length ?? 0}, queue=$queueId',
     );
     CreateTask(
       url: url,
@@ -396,6 +426,7 @@ class DownloadController extends ChangeNotifier {
       torrentFileBytes: torrentFileBytes ?? Uint8List(0),
       proxyUrl: proxyUrl,
       userAgent: userAgent,
+      queueId: queueId,
     ).sendSignalToRust();
     // 分析埋点
     final protocol = (torrentFileBytes != null && torrentFileBytes.isNotEmpty)
@@ -449,6 +480,7 @@ class DownloadController extends ChangeNotifier {
         torrentFileBytes: bytes,
         proxyUrl: proxyUrl,
         userAgent: '',
+        queueId: '',
       ).sendSignalToRust();
       AnalyticsService.instance.trackDownloadCreated('bt');
     } catch (e) {
@@ -463,10 +495,11 @@ class DownloadController extends ChangeNotifier {
     int segments = 0,
     String proxyUrl = '',
     String userAgent = '',
+    String queueId = '',
   }) {
     logInfo(
       _tag,
-      'batchCreateTask: ${urls.length} urls, dir=$saveDir, seg=$segments',
+      'batchCreateTask: ${urls.length} urls, dir=$saveDir, seg=$segments, queue=$queueId',
     );
     BatchCreateTask(
       urls: urls,
@@ -474,6 +507,7 @@ class DownloadController extends ChangeNotifier {
       segments: segments,
       proxyUrl: proxyUrl,
       userAgent: userAgent,
+      queueId: queueId,
     ).sendSignalToRust();
     for (final url in urls) {
       final protocol = url.toLowerCase().startsWith('ftp') ? 'ftp' : 'http';
@@ -544,6 +578,70 @@ class DownloadController extends ChangeNotifier {
     _safeNotifyListeners();
   }
 
+  /// 设置队列筛选。传入相同 ID 则切换回「不过滤」。
+  void setQueueFilter(String? queueId) {
+    if (_queueFilter == queueId) {
+      _queueFilter = null;
+    } else {
+      _queueFilter = queueId;
+    }
+    _safeNotifyListeners();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Queue CRUD — 发送信号到 Rust
+  // ---------------------------------------------------------------------------
+
+  void createQueue({
+    required String name,
+    int speedLimitKbps = 0,
+    int maxConcurrent = 0,
+    String defaultSaveDir = '',
+  }) {
+    logInfo(
+      _tag,
+      'createQueue: name=$name, speedLimit=$speedLimitKbps, maxConcurrent=$maxConcurrent',
+    );
+    CreateQueue(
+      name: name,
+      speedLimitKbps: speedLimitKbps,
+      maxConcurrent: maxConcurrent,
+      defaultSaveDir: defaultSaveDir,
+    ).sendSignalToRust();
+  }
+
+  void updateQueue({
+    required String queueId,
+    required String name,
+    int speedLimitKbps = 0,
+    int maxConcurrent = 0,
+    String defaultSaveDir = '',
+  }) {
+    logInfo(_tag, 'updateQueue: id=$queueId, name=$name');
+    UpdateQueue(
+      queueId: queueId,
+      name: name,
+      speedLimitKbps: speedLimitKbps,
+      maxConcurrent: maxConcurrent,
+      defaultSaveDir: defaultSaveDir,
+    ).sendSignalToRust();
+  }
+
+  void deleteQueue(String queueId) {
+    logInfo(_tag, 'deleteQueue: id=$queueId');
+    DeleteQueue(queueId: queueId).sendSignalToRust();
+    // 如果当前正在筛选该队列，取消筛选
+    if (_queueFilter == queueId) {
+      _queueFilter = null;
+      _safeNotifyListeners();
+    }
+  }
+
+  void moveTaskToQueue(String taskId, String queueId) {
+    logInfo(_tag, 'moveTaskToQueue: task=$taskId, queue=$queueId');
+    MoveTaskToQueue(taskId: taskId, queueId: queueId).sendSignalToRust();
+  }
+
   void pauseAll() {
     logInfo(_tag, 'pauseAll');
     for (final t in _tasks) {
@@ -588,6 +686,7 @@ class DownloadController extends ChangeNotifier {
     _metaProbedSub = TaskMetaProbed.rustSignalStream.listen(_onTaskMetaProbed);
     _queuePosSub =
         QueuePositionsUpdate.rustSignalStream.listen(_onQueuePositionsUpdate);
+    _allQueuesSub = AllQueues.rustSignalStream.listen(_onAllQueues);
   }
 
   void _onAllTasks(RustSignalPack<AllTasks> pack) {
@@ -750,5 +849,22 @@ class DownloadController extends ChangeNotifier {
       }
     }
     if (changed) _safeNotifyListeners();
+  }
+
+  void _onAllQueues(RustSignalPack<AllQueues> pack) {
+    if (_disposed) return;
+    final incoming = pack.message.queues;
+    logInfo(_tag, '_onAllQueues: ${incoming.length} queues');
+    _queues = incoming
+        .map(DownloadQueue.fromQueueInfo)
+        .toList()
+      ..sort((a, b) => a.position.compareTo(b.position));
+    // 如果当前筛选的队列已被删除，取消筛选
+    if (_queueFilter != null &&
+        _queueFilter!.isNotEmpty &&
+        !_queues.any((q) => q.queueId == _queueFilter)) {
+      _queueFilter = null;
+    }
+    _safeNotifyListeners();
   }
 }

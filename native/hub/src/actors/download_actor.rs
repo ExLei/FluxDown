@@ -12,11 +12,11 @@ use crate::protocol_registry;
 use crate::proxy_config::ProxyConfig;
 use crate::signals::{
     BatchCreateTask, CheckFileAssociation, CheckForUpdate, CheckUrlProtocol, ConfigEntry,
-    ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateTask, DetectSystemProxy,
-    DownloadUpdate, ExternalDownloadRequest, FileAssociationStatus, InstallUpdate,
-    ProxyTestResult, RequestAllTasks, RequestConfig, SaveConfig, SelectHlsQuality,
-    SetFileAssociation, SetUrlProtocol, SystemProxyInfo, TestProxyConnection,
-    UpdateCheckResult, UrlProtocolStatus,
+    ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateQueue, CreateTask, DeleteQueue,
+    DetectSystemProxy, DownloadUpdate, ExternalDownloadRequest, FileAssociationStatus,
+    InstallUpdate, MoveTaskToQueue, ProxyTestResult, RequestAllQueues, RequestAllTasks,
+    RequestConfig, SaveConfig, SelectHlsQuality, SetFileAssociation, SetUrlProtocol,
+    SystemProxyInfo, TestProxyConnection, UpdateCheckResult, UpdateQueue, UrlProtocolStatus,
 };
 use crate::updater;
 
@@ -152,6 +152,11 @@ pub async fn run(db_dir: PathBuf) {
     let batch_create_recv = BatchCreateTask::get_dart_signal_receiver();
     let control_recv = ControlTask::get_dart_signal_receiver();
     let all_recv = RequestAllTasks::get_dart_signal_receiver();
+    let create_queue_recv = CreateQueue::get_dart_signal_receiver();
+    let update_queue_recv = UpdateQueue::get_dart_signal_receiver();
+    let delete_queue_recv = DeleteQueue::get_dart_signal_receiver();
+    let move_task_queue_recv = MoveTaskToQueue::get_dart_signal_receiver();
+    let all_queues_recv = RequestAllQueues::get_dart_signal_receiver();
     let config_save_recv = SaveConfig::get_dart_signal_receiver();
     let config_req_recv = RequestConfig::get_dart_signal_receiver();
     let confirm_ext_recv = ConfirmExternalDownload::get_dart_signal_receiver();
@@ -186,7 +191,7 @@ pub async fn run(db_dir: PathBuf) {
             Some(signal) = create_recv.recv() => {
                 let msg = signal.message;
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, msg.torrent_file_bytes, msg.proxy_url, msg.user_agent)
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, msg.torrent_file_bytes, msg.proxy_url, msg.user_agent, msg.queue_id)
                     .await;
             }
             Some(signal) = batch_create_recv.recv() => {
@@ -197,7 +202,7 @@ pub async fn run(db_dir: PathBuf) {
                 );
                 for url in msg.urls {
                     manager
-                        .create_task(url, msg.save_dir.clone(), String::new(), msg.segments, String::new(), Vec::new(), msg.proxy_url.clone(), msg.user_agent.clone())
+                        .create_task(url, msg.save_dir.clone(), String::new(), msg.segments, String::new(), Vec::new(), msg.proxy_url.clone(), msg.user_agent.clone(), msg.queue_id.clone())
                         .await;
                 }
             }
@@ -214,6 +219,8 @@ pub async fn run(db_dir: PathBuf) {
             }
             Some(_) = all_recv.recv() => {
                 manager.load_and_send_all_tasks().await;
+                // Also send queue list so Dart sidebar can show named queues.
+                manager.send_all_queues().await;
             }
             Some(signal) = config_save_recv.recv() => {
                 let msg = signal.message;
@@ -334,8 +341,32 @@ pub async fn run(db_dir: PathBuf) {
                     msg.cookies.len()
                 );
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, Vec::new(), msg.proxy_url, msg.user_agent)
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, Vec::new(), msg.proxy_url, msg.user_agent, msg.queue_id)
                     .await;
+            }
+            // --- Named queue management ---
+            Some(signal) = create_queue_recv.recv() => {
+                let msg = signal.message;
+                rinf::debug_print!("[actor] CreateQueue: name={}", msg.name);
+                manager.create_queue(msg.name, msg.speed_limit_kbps, msg.max_concurrent, msg.default_save_dir).await;
+            }
+            Some(signal) = update_queue_recv.recv() => {
+                let msg = signal.message;
+                rinf::debug_print!("[actor] UpdateQueue: id={}", msg.queue_id);
+                manager.update_queue(msg.queue_id, msg.name, msg.speed_limit_kbps, msg.max_concurrent, msg.default_save_dir).await;
+            }
+            Some(signal) = delete_queue_recv.recv() => {
+                let msg = signal.message;
+                rinf::debug_print!("[actor] DeleteQueue: id={}", msg.queue_id);
+                manager.delete_queue(msg.queue_id).await;
+            }
+            Some(signal) = move_task_queue_recv.recv() => {
+                let msg = signal.message;
+                rinf::debug_print!("[actor] MoveTaskToQueue: task={}, queue={}", msg.task_id, msg.queue_id);
+                manager.move_task_to_queue(msg.task_id, msg.queue_id).await;
+            }
+            Some(_) = all_queues_recv.recv() => {
+                manager.send_all_queues().await;
             }
             Some(done) = done_rx.recv() => {
                 manager.on_task_done(&done.task_id, done.generation).await;

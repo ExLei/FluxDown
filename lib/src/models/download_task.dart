@@ -208,6 +208,9 @@ class DownloadTask {
   /// 在 pending_queue 中的排队位置（1-based）。-1 = 不在队列中。
   final int queuePosition;
 
+  /// 所属命名队列 ID（空字符串 = 默认队列）。
+  final String queueId;
+
   DownloadTask({
     required this.id,
     required this.url,
@@ -222,6 +225,7 @@ class DownloadTask {
     this.segments,
     this.recentSplits = const [],
     this.queuePosition = -1,
+    this.queueId = '',
     DateTime? createdAt,
   }) : createdAt = createdAt ?? DateTime.now();
 
@@ -237,6 +241,7 @@ class DownloadTask {
       downloadedBytes: info.downloadedBytes,
       totalBytes: info.totalBytes,
       errorMessage: info.errorMessage,
+      queueId: info.queueId,
       createdAt: seconds > 0
           ? DateTime.fromMillisecondsSinceEpoch(seconds * 1000)
           : DateTime.now(),
@@ -257,6 +262,7 @@ class DownloadTask {
     List<SegmentData>? segments,
     List<SplitEventData>? recentSplits,
     int? queuePosition,
+    String? queueId,
     DateTime? createdAt,
   }) {
     return DownloadTask(
@@ -273,6 +279,7 @@ class DownloadTask {
       segments: segments ?? this.segments,
       recentSplits: recentSplits ?? this.recentSplits,
       queuePosition: queuePosition ?? this.queuePosition,
+      queueId: queueId ?? this.queueId,
       createdAt: createdAt ?? this.createdAt,
     );
   }

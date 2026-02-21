@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import 'package:window_manager/window_manager.dart';
 import '../models/download_controller.dart';
+import '../models/download_queue.dart';
 import '../models/download_task.dart';
 import '../services/update_service.dart';
 import '../i18n/locale_provider.dart';
 import '../theme/app_colors.dart';
+import 'context_menu.dart';
 
 class Sidebar extends StatefulWidget {
   final DownloadController controller;
@@ -17,6 +19,9 @@ class Sidebar extends StatefulWidget {
 }
 
 class _SidebarState extends State<Sidebar> {
+  /// 队列区块是否展开（默认展开）
+  bool _queuesExpanded = true;
+
   /// 分类区块是否展开（默认折叠，降低视觉噪音）
   bool _categoryExpanded = false;
 
@@ -71,6 +76,8 @@ class _SidebarState extends State<Sidebar> {
               _buildLogo(c),
               const SizedBox(height: 10),
               _buildStatusSection(ctrl, s, c),
+              const SizedBox(height: 6),
+              _buildQueuesSection(ctrl, s, c),
               const SizedBox(height: 6),
               _buildCategorySection(ctrl, s, c),
               const Spacer(),
@@ -161,6 +168,130 @@ class _SidebarState extends State<Sidebar> {
   }
 
   // ─────────────────────────────────────────────
+  // 队列区块（可折叠，含新建按钮）
+  // ─────────────────────────────────────────────
+
+  Widget _buildQueuesSection(DownloadController ctrl, S s, AppColors c) {
+    final queues = ctrl.queues;
+    final queueFilter = ctrl.queueFilter;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _CollapsibleSectionHeader(
+          title: s.sidebarQueues,
+          expanded: _queuesExpanded,
+          c: c,
+          onToggle: () => setState(() => _queuesExpanded = !_queuesExpanded),
+          trailing: _QueueAddButton(c: c, onTap: () => _showCreateQueueDialog(context, ctrl, s, c)),
+        ),
+        if (_queuesExpanded) ...[
+          const SizedBox(height: 4),
+          // 默认队列
+          _NavItem(
+            icon: LucideIcons.inbox,
+            label: s.defaultQueue,
+            count: ctrl.countForQueue(''),
+            isSelected: queueFilter == '',
+            onTap: () => ctrl.setQueueFilter(''),
+          ),
+          // 命名队列
+          for (final queue in queues)
+            _QueueNavItem(
+              queue: queue,
+              count: ctrl.countForQueue(queue.queueId),
+              isSelected: queueFilter == queue.queueId,
+              c: c,
+              onTap: () => ctrl.setQueueFilter(queue.queueId),
+              onEdit: () => _showEditQueueDialog(context, ctrl, s, c, queue),
+              onDelete: () => _showDeleteQueueDialog(context, ctrl, s, c, queue),
+            ),
+        ],
+      ],
+    );
+  }
+
+  // 新建队列对话框
+  void _showCreateQueueDialog(BuildContext context, DownloadController ctrl, S s, AppColors c) {
+    final nameCtrl = TextEditingController();
+    showShadDialog(
+      context: context,
+      barrierColor: AppColors.of(context).dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => _QueueDialog(
+        title: s.createQueueAction,
+        nameCtrl: nameCtrl,
+        s: s,
+        c: c,
+        onConfirm: (name, speedLimit, maxConcurrent, saveDir) {
+          ctrl.createQueue(
+            name: name,
+            speedLimitKbps: speedLimit,
+            maxConcurrent: maxConcurrent,
+            defaultSaveDir: saveDir,
+          );
+        },
+      ),
+    );
+  }
+
+  // 编辑队列对话框
+  void _showEditQueueDialog(BuildContext context, DownloadController ctrl, S s, AppColors c, DownloadQueue queue) {
+    final nameCtrl = TextEditingController(text: queue.name);
+    showShadDialog(
+      context: context,
+      barrierColor: AppColors.of(context).dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => _QueueDialog(
+        title: s.editQueue,
+        nameCtrl: nameCtrl,
+        s: s,
+        c: c,
+        initialSpeedLimit: queue.speedLimitKbps,
+        initialMaxConcurrent: queue.maxConcurrent,
+        initialSaveDir: queue.defaultSaveDir,
+        onConfirm: (name, speedLimit, maxConcurrent, saveDir) {
+          ctrl.updateQueue(
+            queueId: queue.queueId,
+            name: name,
+            speedLimitKbps: speedLimit,
+            maxConcurrent: maxConcurrent,
+            defaultSaveDir: saveDir,
+          );
+        },
+      ),
+    );
+  }
+
+  // 删除队列确认对话框
+  void _showDeleteQueueDialog(BuildContext context, DownloadController ctrl, S s, AppColors c, DownloadQueue queue) {
+    showShadDialog(
+      context: context,
+      barrierColor: AppColors.of(context).dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => ShadDialog(
+        title: Text(s.deleteQueueAction),
+        description: Text(s.queueDeleteConfirmDesc(queue.name)),
+        actions: [
+          ShadButton.outline(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(s.cancel),
+          ),
+          ShadButton.destructive(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              ctrl.deleteQueue(queue.queueId);
+            },
+            child: Text(s.deleteQueueAction),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─────────────────────────────────────────────
   // 分类区块（可折叠）
   // ─────────────────────────────────────────────
 
@@ -224,12 +355,14 @@ class _CollapsibleSectionHeader extends StatefulWidget {
   final bool expanded;
   final AppColors c;
   final VoidCallback onToggle;
+  final Widget? trailing;
 
   const _CollapsibleSectionHeader({
     required this.title,
     required this.expanded,
     required this.c,
     required this.onToggle,
+    this.trailing,
   });
 
   @override
@@ -272,6 +405,10 @@ class _CollapsibleSectionHeaderState
                 size: 11,
                 color: _isHovered ? c.textSecondary : c.textMuted,
               ),
+              if (widget.trailing != null) ...[
+                const SizedBox(width: 4),
+                widget.trailing!,
+              ],
             ],
           ),
         ),
@@ -380,6 +517,361 @@ class _NavItemState extends State<_NavItem> {
               ],
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// Queue section helpers
+// =============================================================================
+
+/// "+" 按钮：新建队列
+class _QueueAddButton extends StatefulWidget {
+  final AppColors c;
+  final VoidCallback onTap;
+
+  const _QueueAddButton({required this.c, required this.onTap});
+
+  @override
+  State<_QueueAddButton> createState() => _QueueAddButtonState();
+}
+
+class _QueueAddButtonState extends State<_QueueAddButton> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 16,
+          height: 16,
+          decoration: BoxDecoration(
+            color: _isHovered ? c.hoverBg : Colors.transparent,
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: Icon(LucideIcons.plus, size: 11, color: c.textMuted),
+        ),
+      ),
+    );
+  }
+}
+
+/// 队列导航项（带右键或悬浮菜单的编辑/删除）
+class _QueueNavItem extends StatefulWidget {
+  final DownloadQueue queue;
+  final int count;
+  final bool isSelected;
+  final AppColors c;
+  final VoidCallback onTap;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+
+  const _QueueNavItem({
+    required this.queue,
+    required this.count,
+    required this.isSelected,
+    required this.c,
+    required this.onTap,
+    required this.onEdit,
+    required this.onDelete,
+  });
+
+  @override
+  State<_QueueNavItem> createState() => _QueueNavItemState();
+}
+
+class _QueueNavItemState extends State<_QueueNavItem> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.c;
+    final selected = widget.isSelected;
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        onSecondaryTapUp: (d) => _showContextMenu(context, d.globalPosition),
+        child: Container(
+          height: 32,
+          margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
+          decoration: BoxDecoration(
+            color: selected
+                ? c.accentBg
+                : _isHovered
+                ? c.hoverBg
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                LucideIcons.layers,
+                size: 14,
+                color: selected ? c.accent : c.textSecondary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  widget.queue.name,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: selected ? c.accent : c.textSecondary,
+                    fontWeight:
+                        selected ? FontWeight.w500 : FontWeight.normal,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (_isHovered && !selected) ...[
+                _QueueActionIcon(
+                  icon: LucideIcons.pencil,
+                  c: c,
+                  onTap: widget.onEdit,
+                ),
+                const SizedBox(width: 2),
+                _QueueActionIcon(
+                  icon: LucideIcons.trash2,
+                  c: c,
+                  onTap: widget.onDelete,
+                  isDestructive: true,
+                ),
+              ] else ...[
+                Text(
+                  widget.count.toString(),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: selected ? c.accent : c.textMuted,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showContextMenu(BuildContext context, Offset position) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    showContextMenu(
+      context,
+      position,
+      items: [
+        ContextMenuItem(
+          icon: LucideIcons.pencil,
+          label: s.editQueue,
+          color: c.textSecondary,
+          action: widget.onEdit,
+        ),
+        ContextMenuItem(
+          icon: LucideIcons.trash2,
+          label: s.deleteQueueAction,
+          color: AppColors.red,
+          action: widget.onDelete,
+        ),
+      ],
+    );
+  }
+}
+
+class _QueueActionIcon extends StatefulWidget {
+  final IconData icon;
+  final AppColors c;
+  final VoidCallback onTap;
+  final bool isDestructive;
+
+  const _QueueActionIcon({
+    required this.icon,
+    required this.c,
+    required this.onTap,
+    this.isDestructive = false,
+  });
+
+  @override
+  State<_QueueActionIcon> createState() => _QueueActionIconState();
+}
+
+class _QueueActionIconState extends State<_QueueActionIcon> {
+  bool _isHovered = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final color =
+        widget.isDestructive ? AppColors.red : widget.c.textSecondary;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _isHovered = true),
+      onExit: (_) => setState(() => _isHovered = false),
+      child: GestureDetector(
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: 18,
+          height: 18,
+          decoration: BoxDecoration(
+            color: _isHovered
+                ? color.withValues(alpha: 0.1)
+                : Colors.transparent,
+            borderRadius: BorderRadius.circular(3),
+          ),
+          child: Icon(widget.icon, size: 11, color: color),
+        ),
+      ),
+    );
+  }
+}
+
+/// 新建/编辑队列对话框
+class _QueueDialog extends StatefulWidget {
+  final String title;
+  final TextEditingController nameCtrl;
+  final S s;
+  final AppColors c;
+  final int initialSpeedLimit;
+  final int initialMaxConcurrent;
+  final String initialSaveDir;
+  final void Function(String name, int speedLimit, int maxConcurrent, String saveDir) onConfirm;
+
+  const _QueueDialog({
+    required this.title,
+    required this.nameCtrl,
+    required this.s,
+    required this.c,
+    this.initialSpeedLimit = 0,
+    this.initialMaxConcurrent = 0,
+    this.initialSaveDir = '',
+    required this.onConfirm,
+  });
+
+  @override
+  State<_QueueDialog> createState() => _QueueDialogState();
+}
+
+class _QueueDialogState extends State<_QueueDialog> {
+  late final TextEditingController _speedCtrl;
+  late final TextEditingController _concurrentCtrl;
+  late final TextEditingController _saveDirCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _speedCtrl = TextEditingController(
+      text: widget.initialSpeedLimit > 0 ? widget.initialSpeedLimit.toString() : '',
+    );
+    _concurrentCtrl = TextEditingController(
+      text: widget.initialMaxConcurrent > 0 ? widget.initialMaxConcurrent.toString() : '',
+    );
+    _saveDirCtrl = TextEditingController(text: widget.initialSaveDir);
+  }
+
+  @override
+  void dispose() {
+    _speedCtrl.dispose();
+    _concurrentCtrl.dispose();
+    _saveDirCtrl.dispose();
+    super.dispose();
+  }
+
+  void _confirm() {
+    final name = widget.nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final speedLimit = int.tryParse(_speedCtrl.text.trim()) ?? 0;
+    final maxConcurrent = int.tryParse(_concurrentCtrl.text.trim()) ?? 0;
+    final saveDir = _saveDirCtrl.text.trim();
+    Navigator.of(context).pop();
+    widget.onConfirm(name, speedLimit, maxConcurrent, saveDir);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = widget.s;
+    final c = widget.c;
+    return ShadDialog(
+      title: Text(widget.title),
+      actions: [
+        ShadButton.outline(
+          onPressed: () => Navigator.of(context).pop(),
+          child: Text(s.cancel),
+        ),
+        ShadButton(
+          onPressed: _confirm,
+          child: Text(s.confirm),
+        ),
+      ],
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              s.queueNameLabel,
+              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+            ),
+            const SizedBox(height: 6),
+            ShadInput(
+              controller: widget.nameCtrl,
+              placeholder: Text(s.queueNameHint),
+              autofocus: true,
+              onSubmitted: (_) => _confirm(),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        s.queueSpeedLimit,
+                        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+                      ),
+                      const SizedBox(height: 6),
+                      ShadInput(
+                        controller: _speedCtrl,
+                        placeholder: Text(s.queueSpeedLimitHint),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        s.queueMaxConcurrent,
+                        style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w500, color: c.textSecondary),
+                      ),
+                      const SizedBox(height: 6),
+                      ShadInput(
+                        controller: _concurrentCtrl,
+                        placeholder: Text(s.queueMaxConcurrentHint),
+                        keyboardType: TextInputType.number,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
       ),
     );

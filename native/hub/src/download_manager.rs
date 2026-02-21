@@ -18,8 +18,8 @@ use crate::ftp_downloader;
 use crate::hls_downloader;
 use crate::proxy_config::ProxyConfig;
 use crate::signals::{
-    AllTasks, QueuePosition, QueuePositionsUpdate, SegmentDetail, SegmentProgress, TaskMetaProbed,
-    TaskProgress,
+    AllQueues, AllTasks, QueueInfo, QueuePosition, QueuePositionsUpdate, SegmentDetail,
+    SegmentProgress, TaskMetaProbed, TaskProgress,
 };
 use crate::speed_limiter::SpeedLimiter;
 
@@ -125,6 +125,8 @@ struct QueuedTask {
     proxy_url: String,
     /// Per-task user-agent override. Empty = use global UA setting.
     user_agent: String,
+    /// Named queue ID this task belongs to. Empty = default queue.
+    queue_id: String,
 }
 
 pub struct DownloadManager {
@@ -512,6 +514,7 @@ impl DownloadManager {
         torrent_file_bytes: Vec<u8>,
         proxy_url: String,
         user_agent: String,
+        queue_id: String,
     ) {
         let task_id = Uuid::new_v4().to_string();
         // When segments <= 0 ("auto"), store 0 in DB and let the downloader
@@ -529,7 +532,7 @@ impl DownloadManager {
 
         if let Err(e) = self
             .db
-            .insert_task(&task_id, &db_url, &file_name, &save_dir, seg, 0, &proxy_url)
+            .insert_task(&task_id, &db_url, &file_name, &save_dir, seg, 0, &proxy_url, &queue_id)
             .await
         {
             rinf::debug_print!("insert_task error: {}", e);
@@ -570,6 +573,7 @@ impl DownloadManager {
             torrent_file_bytes,
             proxy_url,
             user_agent,
+            queue_id,
         };
         if is_bt || self.has_capacity() {
             self.do_start_task(queued).await;
@@ -625,6 +629,7 @@ impl DownloadManager {
             torrent_file_bytes,
             proxy_url,
             user_agent,
+            queue_id: _,
         } = queued;
         self.generation += 1;
         let spawn_gen = self.generation;
@@ -924,6 +929,7 @@ impl DownloadManager {
                     torrent_file_bytes: Vec::new(), // loaded from DB in do_resume_task
                     proxy_url: t.proxy_url,
                     user_agent: String::new(), // use global UA on resume
+                    queue_id: t.queue_id,
                 });
             }
         }
@@ -1313,6 +1319,90 @@ impl Drop for DownloadManager {
             // shutdown is best-effort on app exit.  The OS will reclaim
             // resources if it doesn't finish in time.
         }
+    }
+
+}
+
+impl DownloadManager {
+    // -----------------------------------------------------------------------
+    // Named queue management
+    // -----------------------------------------------------------------------
+
+    /// Broadcast the current list of named queues to Dart.
+    pub async fn send_all_queues(&self) {
+        match self.db.load_all_queues().await {
+            Ok(queues) => AllQueues { queues }.send_signal_to_dart(),
+            Err(e) => rinf::debug_print!("[manager] load_all_queues error: {}", e),
+        }
+    }
+
+    /// Create a new named queue and broadcast the updated list.
+    pub async fn create_queue(
+        &self,
+        name: String,
+        speed_limit_kbps: i64,
+        max_concurrent: i32,
+        default_save_dir: String,
+    ) {
+        let id = Uuid::new_v4().to_string();
+        let position = match self.db.queue_count().await {
+            Ok(n) => n,
+            Err(e) => {
+                rinf::debug_print!("[manager] queue_count error: {}", e);
+                0
+            }
+        };
+        if let Err(e) = self
+            .db
+            .insert_queue(&id, &name, speed_limit_kbps, max_concurrent, &default_save_dir, position)
+            .await
+        {
+            rinf::debug_print!("[manager] insert_queue error: {}", e);
+            return;
+        }
+        rinf::debug_print!("[manager] created queue: id={}, name={}", id, name);
+        self.send_all_queues().await;
+    }
+
+    /// Update an existing queue and broadcast the updated list.
+    pub async fn update_queue(
+        &self,
+        queue_id: String,
+        name: String,
+        speed_limit_kbps: i64,
+        max_concurrent: i32,
+        default_save_dir: String,
+    ) {
+        if let Err(e) = self
+            .db
+            .update_queue(&queue_id, &name, speed_limit_kbps, max_concurrent, &default_save_dir)
+            .await
+        {
+            rinf::debug_print!("[manager] update_queue error: {}", e);
+            return;
+        }
+        rinf::debug_print!("[manager] updated queue: {}", queue_id);
+        self.send_all_queues().await;
+    }
+
+    /// Delete a named queue (tasks move to default queue) and broadcast.
+    pub async fn delete_queue(&self, queue_id: String) {
+        if let Err(e) = self.db.delete_queue(&queue_id).await {
+            rinf::debug_print!("[manager] delete_queue error: {}", e);
+            return;
+        }
+        rinf::debug_print!("[manager] deleted queue: {}", queue_id);
+        self.send_all_queues().await;
+    }
+
+    /// Move a task to a different queue and broadcast the updated queue list.
+    pub async fn move_task_to_queue(&self, task_id: String, queue_id: String) {
+        if let Err(e) = self.db.move_task_to_queue(&task_id, &queue_id).await {
+            rinf::debug_print!("[manager] move_task_to_queue error: {}", e);
+            return;
+        }
+        rinf::debug_print!("[manager] moved task {} to queue '{}'", task_id, queue_id);
+        self.send_all_queues().await;
     }
 }
 

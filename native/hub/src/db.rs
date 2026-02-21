@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{Connection, params};
 use thiserror::Error;
 
-use crate::signals::TaskInfo;
+use crate::signals::{QueueInfo, TaskInfo};
 
 #[derive(Error, Debug)]
 pub enum DbError {
@@ -64,6 +64,14 @@ impl Db {
                 task_id TEXT PRIMARY KEY,
                 file_bytes BLOB NOT NULL,
                 FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS queues (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                speed_limit_kbps INTEGER NOT NULL DEFAULT 0,
+                max_concurrent INTEGER NOT NULL DEFAULT 0,
+                default_save_dir TEXT NOT NULL DEFAULT '',
+                position INTEGER NOT NULL DEFAULT 0
             );",
         )?;
 
@@ -74,6 +82,11 @@ impl Db {
         // so we silently ignore that specific error.
         let _ = conn.execute_batch(
             "ALTER TABLE tasks ADD COLUMN proxy_url TEXT NOT NULL DEFAULT '';"
+        );
+
+        // Phase 3: named queue assignment column
+        let _ = conn.execute_batch(
+            "ALTER TABLE tasks ADD COLUMN queue_id TEXT NOT NULL DEFAULT '';"
         );
 
         Ok(Self {
@@ -91,6 +104,7 @@ impl Db {
         segments: i32,
         total_bytes: i64,
         proxy_url: &str,
+        queue_id: &str,
     ) -> Result<(), DbError> {
         let conn = self.conn.clone();
         let id = id.to_owned();
@@ -98,13 +112,14 @@ impl Db {
         let file_name = file_name.to_owned();
         let save_dir = save_dir.to_owned();
         let proxy_url = proxy_url.to_owned();
+        let queue_id = queue_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
             let now = chrono_now();
             conn.execute(
-                "INSERT INTO tasks (id, url, file_name, save_dir, status, segments, total_bytes, created_at, proxy_url)
-                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8)",
-                params![id, url, file_name, save_dir, segments, total_bytes, now, proxy_url],
+                "INSERT INTO tasks (id, url, file_name, save_dir, status, segments, total_bytes, created_at, proxy_url, queue_id)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7, ?8, ?9)",
+                params![id, url, file_name, save_dir, segments, total_bytes, now, proxy_url, queue_id],
             )?;
             Ok(())
         })
@@ -205,7 +220,7 @@ impl Db {
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
             let mut stmt = conn.prepare(
-                "SELECT id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url
+                "SELECT id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url, queue_id
                  FROM tasks ORDER BY created_at DESC",
             )?;
             let rows = stmt.query_map([], |row| {
@@ -220,6 +235,7 @@ impl Db {
                     error_message: row.get(7)?,
                     created_at: row.get(8)?,
                     proxy_url: row.get::<_, String>(9).unwrap_or_default(),
+                    queue_id: row.get::<_, String>(10).unwrap_or_default(),
                 })
             })?;
             let mut tasks = Vec::new();
@@ -237,7 +253,7 @@ impl Db {
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
             match conn.query_row(
-                "SELECT id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url
+                "SELECT id, url, file_name, save_dir, status, downloaded_bytes, total_bytes, error_message, created_at, proxy_url, queue_id
                  FROM tasks WHERE id = ?1",
                 params![id],
                 |row| {
@@ -252,6 +268,7 @@ impl Db {
                         error_message: row.get(7)?,
                         created_at: row.get(8)?,
                         proxy_url: row.get::<_, String>(9).unwrap_or_default(),
+                        queue_id: row.get::<_, String>(10).unwrap_or_default(),
                     })
                 },
             ) {
@@ -690,6 +707,140 @@ impl Db {
                 |row| row.get(0),
             )?;
             Ok(seg)
+        })
+        .await?
+    }
+
+    // -----------------------------------------------------------------------
+    // Named queue CRUD
+    // -----------------------------------------------------------------------
+
+    /// Insert a new named download queue.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_queue(
+        &self,
+        id: &str,
+        name: &str,
+        speed_limit_kbps: i64,
+        max_concurrent: i32,
+        default_save_dir: &str,
+        position: i32,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let id = id.to_owned();
+        let name = name.to_owned();
+        let default_save_dir = default_save_dir.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute(
+                "INSERT INTO queues (id, name, speed_limit_kbps, max_concurrent, default_save_dir, position)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, name, speed_limit_kbps, max_concurrent, default_save_dir, position],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Update a queue's settings.
+    pub async fn update_queue(
+        &self,
+        id: &str,
+        name: &str,
+        speed_limit_kbps: i64,
+        max_concurrent: i32,
+        default_save_dir: &str,
+    ) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let id = id.to_owned();
+        let name = name.to_owned();
+        let default_save_dir = default_save_dir.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute(
+                "UPDATE queues SET name = ?1, speed_limit_kbps = ?2, max_concurrent = ?3, default_save_dir = ?4
+                 WHERE id = ?5",
+                params![name, speed_limit_kbps, max_concurrent, default_save_dir, id],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Delete a queue and move its tasks to the default queue (empty queue_id).
+    pub async fn delete_queue(&self, id: &str) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let id = id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let mut conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            let tx = conn.transaction()?;
+            // Reassign tasks in the deleted queue to the default queue.
+            tx.execute(
+                "UPDATE tasks SET queue_id = '' WHERE queue_id = ?1",
+                params![id],
+            )?;
+            tx.execute("DELETE FROM queues WHERE id = ?1", params![id])?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Load all named queues ordered by position.
+    pub async fn load_all_queues(&self) -> Result<Vec<QueueInfo>, DbError> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            let mut stmt = conn.prepare(
+                "SELECT id, name, speed_limit_kbps, max_concurrent, default_save_dir, position
+                 FROM queues ORDER BY position ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(QueueInfo {
+                    queue_id: row.get(0)?,
+                    name: row.get(1)?,
+                    speed_limit_kbps: row.get(2)?,
+                    max_concurrent: row.get(3)?,
+                    default_save_dir: row.get(4)?,
+                    position: row.get(5)?,
+                })
+            })?;
+            let mut queues = Vec::new();
+            for row in rows {
+                queues.push(row?);
+            }
+            Ok(queues)
+        })
+        .await?
+    }
+
+    /// Move a task to a different queue (empty queue_id = default queue).
+    pub async fn move_task_to_queue(&self, task_id: &str, queue_id: &str) -> Result<(), DbError> {
+        let conn = self.conn.clone();
+        let task_id = task_id.to_owned();
+        let queue_id = queue_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            conn.execute(
+                "UPDATE tasks SET queue_id = ?1 WHERE id = ?2",
+                params![queue_id, task_id],
+            )?;
+            Ok(())
+        })
+        .await?
+    }
+
+    /// Count the number of rows currently in the queues table.
+    pub async fn queue_count(&self) -> Result<i32, DbError> {
+        let conn = self.conn.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.lock().map_err(|_| DbError::LockPoisoned)?;
+            let count: i32 = conn.query_row(
+                "SELECT COUNT(*) FROM queues",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(count)
         })
         .await?
     }
