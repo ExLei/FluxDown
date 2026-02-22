@@ -49,6 +49,16 @@ class DownloadController extends ChangeNotifier {
   /// 下载完成回调 — 当任务状态从非 completed 变为 completed 时触发
   void Function(DownloadTask task)? onTaskCompleted;
 
+  /// 当前 Boost 优先任务 ID（空字符串 = 无优先任务）
+  String _priorityTaskId = '';
+
+  /// 因 Boost 自动暂停的任务数量（用于 Banner 显示）
+  int _boostAutoPausedCount = 0;
+
+  /// 因 Boost 被加入 _optimisticPausedIds 的任务 ID 集合。
+  /// 用于 boost 取消时精确清理守卫条目，避免遗漏或误删。
+  final Set<String> _boostAutoPausedIds = {};
+
   StreamSubscription<RustSignalPack<TaskProgress>>? _progressSub;
   StreamSubscription<RustSignalPack<AllTasks>>? _allTasksSub;
   StreamSubscription<RustSignalPack<SegmentProgress>>? _segmentSub;
@@ -56,6 +66,7 @@ class DownloadController extends ChangeNotifier {
   StreamSubscription<RustSignalPack<TaskMetaProbed>>? _metaProbedSub;
   StreamSubscription<RustSignalPack<QueuePositionsUpdate>>? _queuePosSub;
   StreamSubscription<RustSignalPack<AllQueues>>? _allQueuesSub;
+  StreamSubscription<RustSignalPack<PriorityTaskChanged>>? _prioritySub;
 
   bool _disposed = false;
 
@@ -80,6 +91,7 @@ class DownloadController extends ChangeNotifier {
     _metaProbedSub?.cancel();
     _queuePosSub?.cancel();
     _allQueuesSub?.cancel();
+    _prioritySub?.cancel();
     super.dispose();
     logInfo(_tag, 'dispose done');
   }
@@ -366,6 +378,7 @@ class DownloadController extends ChangeNotifier {
     );
     for (final id in ids) {
       _optimisticPausedIds.remove(id);
+      _boostAutoPausedIds.remove(id);
       final action = deleteFiles ? 3 : 4;
       ControlTask(taskId: id, action: action).sendSignalToRust();
       _deletedTaskIds.add(id);
@@ -384,6 +397,15 @@ class DownloadController extends ChangeNotifier {
     final idx = _tasks.indexWhere((t) => t.id == _selectedTaskId);
     return idx >= 0 ? _tasks[idx] : null;
   }
+
+  /// 当前 Boost 优先任务 ID（空字符串 = 无优先任务）
+  String get priorityTaskId => _priorityTaskId;
+
+  /// Boost 模式是否激活
+  bool get isBoostActive => _priorityTaskId.isNotEmpty;
+
+  /// 因 Boost 自动暂停的任务数量
+  int get boostAutoPausedCount => _boostAutoPausedCount;
 
   /// 统计数据
   int get downloadingCount =>
@@ -554,6 +576,7 @@ class DownloadController extends ChangeNotifier {
   void resumeTask(String taskId) {
     logInfo(_tag, 'resumeTask: $taskId');
     _optimisticPausedIds.remove(taskId);
+    _boostAutoPausedIds.remove(taskId);
     // 立即切换到 resuming 状态，让 UI 即时响应
     final idx = _tasks.indexWhere((t) => t.id == taskId);
     if (idx >= 0) {
@@ -572,6 +595,7 @@ class DownloadController extends ChangeNotifier {
   void deleteTask(String taskId, {bool deleteFiles = true}) {
     logInfo(_tag, 'deleteTask: $taskId, deleteFiles=$deleteFiles');
     _optimisticPausedIds.remove(taskId);
+    _boostAutoPausedIds.remove(taskId);
     final action = deleteFiles ? 3 : 4;
     ControlTask(taskId: taskId, action: action).sendSignalToRust();
     _deletedTaskIds.add(taskId);
@@ -670,13 +694,64 @@ class DownloadController extends ChangeNotifier {
     MoveTaskToQueue(taskId: taskId, queueId: queueId).sendSignalToRust();
   }
 
+  /// 设置或取消优先下载任务（Boost 模式）。
+  /// 传入当前优先任务 ID 则切换（取消），传入其他 ID 则设置为新优先任务。
+  ///
+  /// 在发送信号给 Rust 之前先做**乐观 UI 更新**：
+  /// 一次性将所有受影响任务设置到目标状态，避免 Rust 分批处理信号导致的抖动。
+  void setPriorityTask(String taskId) {
+    logInfo(_tag, 'setPriorityTask: $taskId');
+    final isCancel = taskId.isEmpty || taskId == _priorityTaskId;
+
+    // 先清除上一轮 boost 守卫（无论激活新任务还是取消都需要重置）
+    for (final id in _boostAutoPausedIds) {
+      _optimisticPausedIds.remove(id);
+    }
+    _boostAutoPausedIds.clear();
+
+    if (isCancel) {
+      // 乐观取消：重置 boost 状态，后续 Rust resume 信号将还原各任务 UI
+      _priorityTaskId = '';
+      _boostAutoPausedCount = 0;
+    } else {
+      // 乐观激活：立即将所有活跃/排队任务（除目标外）设为 paused，
+      // 避免 Rust 分批处理期间 UI 多次重建抖动，
+      // 同时为后续乱序到达的 status=1 信号建立守卫。
+      for (int i = 0; i < _tasks.length; i++) {
+        final t = _tasks[i];
+        if (t.id == taskId) continue;
+        if (!t.status.isActiveOrQueued) continue;
+        _boostAutoPausedIds.add(t.id);
+        _optimisticPausedIds.add(t.id);
+        _tasks[i] = t.copyWith(status: TaskStatus.paused, speed: 0);
+      }
+      _priorityTaskId = taskId;
+      // _boostAutoPausedCount 以 Rust 确认值为准，由 _onPriorityTaskChanged 更新
+    }
+
+    _safeNotifyListeners();
+    SetPriorityTask(taskId: isCancel ? '' : taskId).sendSignalToRust();
+  }
+
+  /// 取消 Boost 模式
+  void cancelBoost() {
+    logInfo(_tag, 'cancelBoost');
+    setPriorityTask('');
+  }
+
   void pauseAll() {
     logInfo(_tag, 'pauseAll');
     for (final t in _tasks) {
       if (t.status == TaskStatus.downloading ||
           t.status == TaskStatus.resuming ||
           t.status == TaskStatus.pending ||
-          t.status == TaskStatus.preparing) {
+          t.status == TaskStatus.preparing ||
+          // 修复：boost 结束后，部分任务在 Rust 侧已入 pending_queue，
+          // 但 Dart 侧仍显示 paused（未收到 status=0 信号）。
+          // queuePosition > 0 说明任务确实在 Rust 的队列里等待启动，
+          // 此时若不发送 pause 信号，pause_task 内的 drain_queue 会将它们提升为活跃，
+          // 导致点击"全部暂停"后任务继续下载。
+          (t.status == TaskStatus.paused && t.queuePosition > 0)) {
         pauseTask(t.id);
       }
     }
@@ -715,6 +790,8 @@ class DownloadController extends ChangeNotifier {
     _queuePosSub =
         QueuePositionsUpdate.rustSignalStream.listen(_onQueuePositionsUpdate);
     _allQueuesSub = AllQueues.rustSignalStream.listen(_onAllQueues);
+    _prioritySub =
+        PriorityTaskChanged.rustSignalStream.listen(_onPriorityTaskChanged);
   }
 
   void _onAllTasks(RustSignalPack<AllTasks> pack) {
@@ -749,13 +826,19 @@ class DownloadController extends ChangeNotifier {
     final idx = _tasks.indexWhere((t) => t.id == p.taskId);
     if (idx >= 0) {
       final oldStatus = _tasks[idx].status;
-      // 防止 Rust progress_reporter channel 中积压的 status=1 更新覆盖已
+      // 防止 Rust progress_reporter channel 中积压的 status=1/5 更新覆盖已
       // 乐观设置的 paused 状态。仅对用户主动暂停的任务生效（_optimisticPausedIds），
       // 避免 AllTasks 从 DB 加载的历史 paused 状态也触发此守卫，导致任务永远
       // 卡在「暂停」显示。
+      //
+      // 同时阻挡 preparing（status=5）：pauseAll 发出 pause 信号后，
+      // drain_queue 可能短暂将队列任务提升为活跃（发出 status=5），
+      // 随后该任务的 pause 信号到达 Rust 再次暂停并发出 status=2。
+      // 在此窗口期阻挡 status=5，防止 UI 从 paused 闪烁到 preparing 再回 paused。
       if (_optimisticPausedIds.contains(p.taskId) &&
           oldStatus == TaskStatus.paused &&
-          newStatus == TaskStatus.downloading) {
+          (newStatus == TaskStatus.downloading ||
+              newStatus == TaskStatus.preparing)) {
         return;
       }
       _tasks[idx] = _tasks[idx].applyProgress(p);
@@ -910,6 +993,34 @@ class DownloadController extends ChangeNotifier {
         !_queues.any((q) => q.queueId == _queueFilter)) {
       _queueFilter = null;
     }
+    _safeNotifyListeners();
+  }
+
+  void _onPriorityTaskChanged(RustSignalPack<PriorityTaskChanged> pack) {
+    if (_disposed) return;
+    final p = pack.message;
+    logInfo(
+      _tag,
+      '_onPriorityTaskChanged: priority=${p.priorityTaskId}, autoPaused=${p.autoPausedCount}',
+    );
+
+    if (p.priorityTaskId.isNotEmpty) {
+      // Boost 激活确认：守卫和乐观 UI 更新已由 setPriorityTask() 完成，
+      // 此处不能清空 _boostAutoPausedIds（否则守卫失效，乱序 status=1 会覆盖 UI）。
+      // 仅以 Rust 权威值更新优先任务 ID 和暂停数量。
+      _priorityTaskId = p.priorityTaskId;
+      _boostAutoPausedCount = p.autoPausedCount;
+    } else {
+      // Boost 取消（Rust 侧触发：优先任务完成、被手动暂停或删除等）。
+      // 若 Dart 侧已通过 setPriorityTask('') 提前清理，_boostAutoPausedIds 为空，此处为 no-op。
+      for (final id in _boostAutoPausedIds) {
+        _optimisticPausedIds.remove(id);
+      }
+      _boostAutoPausedIds.clear();
+      _priorityTaskId = '';
+      _boostAutoPausedCount = 0;
+    }
+
     _safeNotifyListeners();
   }
 }

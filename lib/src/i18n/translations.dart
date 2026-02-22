@@ -177,6 +177,13 @@ class S {
 
   String get pause => _t('暂停', 'Pause');
   String get resume => _t('继续', 'Resume');
+  String get boostDownload => _t('优先下载', 'Boost Download');
+  String get cancelBoost => _t('取消优先', 'Cancel Boost');
+  String boostBannerActive(String fileName, int count) => _t(
+    '⚡ 优先下载：$fileName — 完成后自动恢复 $count 个任务',
+    '⚡ Boost: $fileName — $count task(s) will resume on completion',
+  );
+  String get boostBannerCancel => _t('取消', 'Cancel');
   String get openFile => _t('打开文件', 'Open File');
   String get openFolder => _t('打开所在文件夹', 'Open Folder');
   String get copyUrl => _t('复制下载地址', 'Copy URL');

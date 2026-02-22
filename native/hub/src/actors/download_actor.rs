@@ -15,8 +15,9 @@ use crate::signals::{
     ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateQueue, CreateTask, DeleteQueue,
     DetectSystemProxy, DownloadUpdate, ExternalDownloadRequest, FileAssociationStatus,
     InstallUpdate, MoveTaskToQueue, ProxyTestResult, RequestAllQueues, RequestAllTasks,
-    RequestConfig, SaveConfig, SelectHlsQuality, SetFileAssociation, SetUrlProtocol,
-    SystemProxyInfo, TestProxyConnection, UpdateCheckResult, UpdateQueue, UrlProtocolStatus,
+    RequestConfig, SaveConfig, SelectHlsQuality, SetFileAssociation, SetPriorityTask,
+    SetUrlProtocol, SystemProxyInfo, TestProxyConnection, UpdateCheckResult, UpdateQueue,
+    UrlProtocolStatus,
 };
 use crate::updater;
 
@@ -180,6 +181,7 @@ pub async fn run(db_dir: PathBuf) {
     let select_hls_quality_recv = SelectHlsQuality::get_dart_signal_receiver();
     let set_url_proto_recv = SetUrlProtocol::get_dart_signal_receiver();
     let check_url_proto_recv = CheckUrlProtocol::get_dart_signal_receiver();
+    let set_priority_recv = SetPriorityTask::get_dart_signal_receiver();
 
     // Spawn the Native Messaging listener (reads from stdin in a blocking thread).
     // When the browser extension sends a download request, it arrives on this channel.
@@ -529,6 +531,12 @@ pub async fn run(db_dir: PathBuf) {
                     msg.selected_index,
                 );
                 manager.send_hls_quality_selection(&msg.task_id, msg.selected_index);
+            }
+            // --- Priority (Boost) download ---
+            Some(signal) = set_priority_recv.recv() => {
+                let task_id = signal.message.task_id;
+                rinf::debug_print!("[actor] SetPriorityTask: task_id={}", task_id);
+                manager.set_priority_task(task_id).await;
             }
             // --- Proxy connectivity test ---
             Some(signal) = test_proxy_recv.recv() => {

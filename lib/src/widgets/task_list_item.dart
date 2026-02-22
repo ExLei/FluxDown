@@ -17,6 +17,10 @@ class TaskListItem extends StatefulWidget {
   final VoidCallback onResume;
   final void Function({required bool deleteFiles}) onDelete;
 
+  /// Boost 优先下载相关
+  final bool isPriority;
+  final VoidCallback? onBoost;
+
   /// 管理模式相关
   final bool isManageMode;
   final bool isChecked;
@@ -30,6 +34,8 @@ class TaskListItem extends StatefulWidget {
     required this.onPause,
     required this.onResume,
     required this.onDelete,
+    this.isPriority = false,
+    this.onBoost,
     this.isManageMode = false,
     this.isChecked = false,
     this.onToggleChecked,
@@ -50,6 +56,8 @@ class _TaskListItemState extends State<TaskListItem> {
       onPause: widget.onPause,
       onResume: widget.onResume,
       onDelete: widget.onDelete,
+      isPriority: widget.isPriority,
+      onBoost: widget.onBoost,
     );
   }
 
@@ -126,6 +134,21 @@ class _TaskListItemState extends State<TaskListItem> {
     final task = widget.task;
     return Row(
       children: [
+        // 优先下载时显示闪电图标徽章
+        if (widget.isPriority) ...[
+          Container(
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              color: const Color(0xFFF59E0B), // amber-500
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: const Center(
+              child: Icon(LucideIcons.zap, size: 11, color: Colors.white),
+            ),
+          ),
+          const SizedBox(width: 6),
+        ],
         Container(
           width: 34,
           height: 34,
@@ -343,6 +366,8 @@ void showTaskContextMenu(
   required VoidCallback onPause,
   required VoidCallback onResume,
   required void Function({required bool deleteFiles}) onDelete,
+  bool isPriority = false,
+  VoidCallback? onBoost,
 }) {
   final c = AppColors.of(context);
   final s = LocaleScope.of(context);
@@ -377,7 +402,19 @@ void showTaskContextMenu(
       break;
   }
 
-  // 暂停/继续组后面加分隔线（如果有的话）
+  // --- 优先下载 / 取消优先（仅对非完成任务显示）---
+  if (task.status != TaskStatus.completed && onBoost != null) {
+    items.add(
+      ContextMenuItem(
+        icon: isPriority ? LucideIcons.zapOff : LucideIcons.zap,
+        label: isPriority ? s.cancelBoost : s.boostDownload,
+        color: isPriority ? c.textPrimary : const Color(0xFFF59E0B),
+        action: onBoost,
+      ),
+    );
+  }
+
+  // 暂停/继续/优先组后面加分隔线（如果有的话）
   if (items.isNotEmpty) {
     dividers.add(items.length - 1);
   }

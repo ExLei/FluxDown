@@ -132,6 +132,8 @@ class TaskList extends StatelessWidget {
                   onResume: () => controller.resumeTask(task.id),
                   onDelete: ({required bool deleteFiles}) =>
                       controller.deleteTask(task.id, deleteFiles: deleteFiles),
+                  isPriority: controller.priorityTaskId == task.id,
+                  onBoost: () => controller.setPriorityTask(task.id),
                   isManageMode: isManage,
                   isChecked: controller.checkedTaskIds.contains(task.id),
                   onToggleChecked: () => controller.toggleTaskChecked(task.id),

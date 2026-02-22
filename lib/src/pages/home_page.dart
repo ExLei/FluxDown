@@ -317,6 +317,30 @@ class _HomePageState extends State<HomePage> {
                       children: [
                         const SizedBox(height: 48),
                         TaskTabBar(controller: _controller),
+                        ListenableBuilder(
+                          listenable: _controller,
+                          builder: (context, _) {
+                            if (!_controller.isBoostActive) {
+                              return const SizedBox.shrink();
+                            }
+                            final tasks = _controller.tasks;
+                            if (tasks.isEmpty) return const SizedBox.shrink();
+                            final idx = tasks.indexWhere(
+                              (t) => t.id == _controller.priorityTaskId,
+                            );
+                            if (idx < 0) return const SizedBox.shrink();
+                            final s = LocaleScope.of(context);
+                            final c = AppColors.of(context);
+                            return _BoostBanner(
+                              fileName: tasks[idx].fileName,
+                              autoPausedCount:
+                                  _controller.boostAutoPausedCount,
+                              onCancel: _controller.cancelBoost,
+                              s: s,
+                              c: c,
+                            );
+                          },
+                        ),
                         Expanded(
                           child: TaskList(
                             controller: _controller,
@@ -443,6 +467,65 @@ class _ResizeHandleState extends State<_ResizeHandle> {
           width: isActive ? 3 : 1,
           color: isActive ? c.accent : widget.color,
         ),
+      ),
+    );
+  }
+}
+
+// =============================================================================
+// Boost Banner — 优先下载模式提示条
+// =============================================================================
+
+class _BoostBanner extends StatelessWidget {
+  final String fileName;
+  final int autoPausedCount;
+  final VoidCallback onCancel;
+  final S s;
+  final AppColors c;
+
+  const _BoostBanner({
+    required this.fileName,
+    required this.autoPausedCount,
+    required this.onCancel,
+    required this.s,
+    required this.c,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      color: const Color(0xFFF59E0B).withValues(alpha: 0.12),
+      child: Row(
+        children: [
+          const Icon(LucideIcons.zap, size: 14, color: Color(0xFFF59E0B)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              s.boostBannerActive(fileName, autoPausedCount),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12,
+                color: Color(0xFFF59E0B),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          GestureDetector(
+            onTap: onCancel,
+            child: Text(
+              s.boostBannerCancel,
+              style: TextStyle(
+                fontSize: 12,
+                color: c.textMuted,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

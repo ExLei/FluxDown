@@ -455,6 +455,26 @@ pub struct AllQueues {
     pub queues: Vec<QueueInfo>,
 }
 
+// ========== Priority (Boost) download signals ==========
+
+/// Set the priority download task — the selected task gets exclusive bandwidth
+/// while all other active downloads are auto-paused (Dart → Rust).
+/// Send `task_id = ""` to cancel boost mode.
+#[derive(Deserialize, DartSignal)]
+pub struct SetPriorityTask {
+    /// ID of the task to boost. Empty string = cancel boost mode.
+    pub task_id: String,
+}
+
+/// Notifies Dart that the boost-mode priority task has changed (Rust → Dart).
+#[derive(Serialize, RustSignal)]
+pub struct PriorityTaskChanged {
+    /// ID of the current priority task. Empty string = boost mode inactive.
+    pub priority_task_id: String,
+    /// Number of tasks that were automatically paused to free bandwidth.
+    pub auto_paused_count: i32,
+}
+
 /// Named queue metadata
 #[derive(Serialize, Deserialize, SignalPiece)]
 pub struct QueueInfo {

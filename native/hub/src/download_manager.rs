@@ -18,8 +18,8 @@ use crate::ftp_downloader;
 use crate::hls_downloader;
 use crate::proxy_config::ProxyConfig;
 use crate::signals::{
-    AllQueues, AllTasks, QueueInfo, QueuePosition, QueuePositionsUpdate, SegmentDetail,
-    SegmentProgress, TaskMetaProbed, TaskProgress,
+    AllQueues, AllTasks, PriorityTaskChanged, QueueInfo, QueuePosition, QueuePositionsUpdate,
+    SegmentDetail, SegmentProgress, TaskMetaProbed, TaskProgress,
 };
 use crate::speed_limiter::SpeedLimiter;
 
@@ -194,6 +194,11 @@ pub struct DownloadManager {
     /// 该矫正仅需在第一次 load_and_send_all_tasks 时执行一次，
     /// 后续由 create_task / batch_create 触发时不得重复重置。
     startup_reset_done: bool,
+    /// Boost 模式当前优先任务 ID（内存级，重启清空）。None = 无优先任务。
+    priority_task_id: Option<String>,
+    /// 因 Boost 模式自动暂停的任务 ID 集合（内存级，重启清空）。
+    /// 取消 Boost 时这些任务会自动恢复。
+    auto_paused_ids: HashSet<String>,
 }
 
 impl DownloadManager {
@@ -238,6 +243,8 @@ impl DownloadManager {
             queue_limiters: HashMap::new(),
             active_task_queue: HashMap::new(),
             startup_reset_done: false,
+            priority_task_id: None,
+            auto_paused_ids: HashSet::new(),
         })
     }
 
@@ -521,14 +528,27 @@ impl DownloadManager {
     /// Only removes the entry if the generation matches, preventing a stale
     /// `TaskDone` from an old spawn from accidentally removing a newer token.
     pub async fn on_task_done(&mut self, task_id: &str, generation: u64) {
-        if let Some((_, stored_gen)) = self.active_tokens.get(task_id)
-            && *stored_gen == generation {
-                self.active_tokens.remove(task_id);
-                self.active_handles.remove(task_id);
-                self.bt_task_ids.remove(task_id);
-                self.hls_quality_senders.remove(task_id);
-                self.active_task_queue.remove(task_id);
+        let generation_matched = if let Some((_, stored_gen)) = self.active_tokens.get(task_id) {
+            *stored_gen == generation
+        } else {
+            false
+        };
+
+        if generation_matched {
+            self.active_tokens.remove(task_id);
+            self.active_handles.remove(task_id);
+            self.bt_task_ids.remove(task_id);
+            self.hls_quality_senders.remove(task_id);
+            self.active_task_queue.remove(task_id);
+
+            // Boost 模式：优先任务完成后自动恢复其他任务。
+            // 仅在 generation 匹配时触发，防止旧 spawn 发来的 stale TaskDone
+            // 误将仍在运行的新 spawn 的 Boost 状态清除。
+            if self.priority_task_id.as_deref() == Some(task_id) {
+                self.clear_priority().await;
             }
+        }
+
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
         self.maybe_wal_checkpoint().await;
@@ -1015,6 +1035,11 @@ impl DownloadManager {
 
             // A slot freed up — try to start queued tasks.
             self.drain_queue().await;
+
+            // Boost 守卫：若用户手动暂停了当前优先任务，取消 Boost 并恢复其他任务
+            if self.priority_task_id.as_deref() == Some(task_id) {
+                self.clear_priority().await;
+            }
         }
     }
 
@@ -1100,7 +1125,26 @@ impl DownloadManager {
     async fn do_resume_task(&mut self, task_id: &str) {
         let task = match self.db.load_task_by_id(task_id).await {
             Ok(Some(t)) => t,
-            _ => return,
+            Ok(None) => {
+                rinf::debug_print!("[manager] do_resume_task: task {} not found in DB", task_id);
+                return;
+            }
+            Err(e) => {
+                rinf::debug_print!("[manager] do_resume_task: DB error for task {}: {}", task_id, e);
+                let _ = self
+                    .progress_tx
+                    .send(ProgressUpdate {
+                        task_id: task_id.to_string(),
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        status: 4,
+                        error_message: format!("database error: {e}"),
+                        file_name: String::new(),
+                        segment_details: None,
+                    })
+                    .await;
+                return;
+            }
         };
 
         // Read actual segment count from DB.  0 means "auto" — the downloader
@@ -1456,6 +1500,16 @@ impl DownloadManager {
 
         let _ = self.db.delete_task(task_id).await;
 
+        // Bug 4 修复：被删除的任务从 auto_paused_ids 中移除，
+        // 避免 clear_priority 之后徒劳地对已删除任务调用 resume_task，
+        // 产生无意义的 DB 查询或错误日志。
+        self.auto_paused_ids.remove(task_id);
+
+        // Boost 守卫：若优先任务被删除，取消 Boost 并恢复其他任务
+        if self.priority_task_id.as_deref() == Some(task_id) {
+            self.clear_priority().await;
+        }
+
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
         self.maybe_wal_checkpoint().await;
@@ -1608,6 +1662,163 @@ impl DownloadManager {
         }
         rinf::debug_print!("[manager] moved task {} to queue '{}'", task_id, queue_id);
         self.send_all_queues().await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Boost / Priority download
+    // -----------------------------------------------------------------------
+
+    /// Set or toggle the priority (Boost) download task.
+    ///
+    /// - If `task_id` is empty, or equals the current priority task → cancel boost.
+    /// - Otherwise: auto-pause all other active/queued tasks, ensure the target
+    ///   task is downloading, and broadcast the new state to Dart.
+    pub async fn set_priority_task(&mut self, task_id: String) {
+        // Toggle off if same task or empty
+        if task_id.is_empty() || self.priority_task_id.as_deref() == Some(task_id.as_str()) {
+            self.clear_priority().await;
+            return;
+        }
+
+        // 切换 boost 目标时，保留上一轮 boost 自动暂停的任务 ID，
+        // 使它们在新 boost 结束时也能一并被恢复，避免永久卡在暂停状态。
+        // 将新目标从集合中移除（它将被启动，不需要在结束时当作"恢复对象"）。
+        self.auto_paused_ids.remove(&task_id);
+        self.priority_task_id = None;
+
+        // Step 1: If the target task is currently waiting in pending_queue, extract it
+        // before we start pausing others.  This is critical: without this, two problems occur:
+        //   a) resume_task() has an early-return guard for tasks already in pending_queue,
+        //      so the target would never actually start.
+        //   b) drain_queue() called inside each pause_task() call below could promote
+        //      a different queued task to active, causing it to immediately get paused again.
+        // By removing the target first we guarantee it won't be touched by drain_queue.
+        let target_was_queued = self
+            .pending_queue
+            .iter()
+            .position(|q| q.task_id == task_id)
+            .map(|pos| { self.pending_queue.remove(pos); true })
+            .unwrap_or(false);
+
+        // Step 2: Auto-pause all currently active tasks (except the target itself,
+        // which may already be downloading).
+        // Note: each pause_task() call invokes drain_queue(), which could promote a
+        // queued task to active.  We collect active IDs first, then pause them.
+        let active_ids: Vec<String> = self
+            .active_tokens
+            .keys()
+            .filter(|id| id.as_str() != task_id.as_str())
+            .cloned()
+            .collect();
+        for id in active_ids {
+            self.auto_paused_ids.insert(id.clone());
+            self.pause_task(&id).await;
+        }
+
+        // Step 3: Pause all remaining tasks in the pending queue (excluding the target).
+        let queued_ids: Vec<String> = self
+            .pending_queue
+            .iter()
+            .filter(|t| t.task_id != task_id.as_str())
+            .map(|t| t.task_id.clone())
+            .collect();
+        for id in queued_ids {
+            self.auto_paused_ids.insert(id.clone());
+            self.pause_task(&id).await;
+        }
+
+        // Step 4: Mop up — drain_queue() calls in step 2/3 may have promoted additional
+        // tasks to active.  Pause anything that slipped through.
+        let stray_active: Vec<String> = self
+            .active_tokens
+            .keys()
+            .filter(|id| id.as_str() != task_id.as_str() && !self.auto_paused_ids.contains(*id))
+            .cloned()
+            .collect();
+        for id in stray_active {
+            self.auto_paused_ids.insert(id.clone());
+            self.pause_task(&id).await;
+        }
+
+        self.priority_task_id = Some(task_id.clone());
+
+        // Step 5: Ensure the target task is downloading.
+        // For a previously-queued target: it was removed from pending_queue in step 1
+        // so resume_task() will proceed normally (no early-return guard).
+        // For an already-active target: nothing to do.
+        if !self.active_tokens.contains_key(&task_id) {
+            // Remove from auto_paused_ids so clear_priority won't try to resume
+            // the task that's already running as priority.
+            self.auto_paused_ids.remove(&task_id);
+            if target_was_queued {
+                // Task was queued but never actually started (pending_queue slot) —
+                // call do_resume_task directly since we already verified capacity
+                // by pausing all other tasks above.
+                self.do_resume_task(&task_id).await;
+            } else {
+                // Task was paused/error — use the full resume path.
+                self.resume_task(&task_id).await;
+            }
+        }
+
+        // 验证目标任务是否真的启动成功。
+        // 若 do_resume_task / resume_task 内部出错（DB 读取失败、BT 初始化失败等），
+        // 任务不会出现在 active_tokens 中。此时必须取消 boost 并恢复已暂停的任务，
+        // 否则 Dart 侧会显示 boost 激活但实际无任务下载，产生莫名其妙的结果。
+        if !self.active_tokens.contains_key(&task_id) {
+            rinf::debug_print!(
+                "[manager] boost: target task {} failed to start — cancelling boost mode",
+                task_id
+            );
+            self.clear_priority().await;
+            return;
+        }
+
+        rinf::debug_print!(
+            "[manager] boost mode: priority={}, auto_paused={}",
+            task_id,
+            self.auto_paused_ids.len()
+        );
+
+        PriorityTaskChanged {
+            priority_task_id: task_id,
+            auto_paused_count: self.auto_paused_ids.len() as i32,
+        }
+        .send_signal_to_dart();
+    }
+
+    /// Cancel boost mode and resume all auto-paused tasks.
+    async fn clear_priority(&mut self) {
+        self.priority_task_id = None;
+        let to_resume: Vec<String> = self.auto_paused_ids.drain().collect();
+        rinf::debug_print!("[manager] boost cancelled, resuming {} tasks", to_resume.len());
+        for id in &to_resume {
+            // Bug 5 修复：跳过已完成的任务，避免 clear_priority 误重启已完成下载。
+            // 场景：boost 激活期间某任务恰好完成，clear_priority 时不应再 resume 它。
+            let is_completed = self
+                .db
+                .load_task_by_id(id)
+                .await
+                .ok()
+                .flatten()
+                .map(|t| t.status == 3)
+                .unwrap_or(false);
+            if is_completed {
+                rinf::debug_print!("[manager] clear_priority: skipping completed task {}", id);
+                continue;
+            }
+            self.resume_task(id).await;
+        }
+        // 在发出 PriorityTaskChanged 之前广播最新队列位置。
+        // resume_task 对于无空余槽的任务只是将其入队，不会主动广播。
+        // 此次广播确保 Dart 在收到 PriorityTaskChanged 时已知道哪些任务在队列中
+        // （queuePosition > 0），使 pauseAll 能正确识别并暂停它们。
+        self.broadcast_queue_positions();
+        PriorityTaskChanged {
+            priority_task_id: String::new(),
+            auto_paused_count: 0,
+        }
+        .send_signal_to_dart();
     }
 }
 
