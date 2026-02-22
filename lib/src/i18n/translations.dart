@@ -305,6 +305,11 @@ class S {
     '$active 活跃 · $paused 暂停 · $total 总计',
     '$active active · $paused paused · $total total',
   );
+  String get statusSpeedLimitOff => _t('无限制', 'Unlimited');
+  String get statusSpeedLimitKbs => _t('KB/s', 'KB/s');
+  String get statusSpeedLimitHint => _t('自定义速率', 'Custom rate');
+  String get speedLimitTitle => _t('全局限速', 'Global Speed Limit');
+  String get speedLimitCustom => _t('自定义', 'Custom');
 
   // ─────────────────────────────────────────────
   // Settings — 分类

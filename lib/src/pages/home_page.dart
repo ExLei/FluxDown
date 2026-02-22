@@ -352,7 +352,10 @@ class _HomePageState extends State<HomePage> {
                             ),
                           ),
                         ),
-                        StatusBar(controller: _controller),
+                        StatusBar(
+                          controller: _controller,
+                          settingsProvider: _settingsProvider,
+                        ),
                       ],
                     ),
                   ),
