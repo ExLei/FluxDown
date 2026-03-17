@@ -2,8 +2,8 @@ import type { APIRoute } from "astro";
 
 export const prerender = false;
 
-const GITHUB_REPO = import.meta.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = import.meta.env.GITHUB_TOKEN || "";
+const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 const ISSUE_TITLE = "[Vote] Community Platform Poll";
 const ISSUE_LABEL = "vote";

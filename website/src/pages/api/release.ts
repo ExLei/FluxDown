@@ -21,8 +21,8 @@ import type { APIRoute } from "astro";
 
 export const prerender = false;
 
-const GITHUB_REPO = import.meta.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = import.meta.env.GITHUB_TOKEN || "";
+const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // 缓存：避免每次请求都打 GitHub API（60 秒）
 let cache: { data: unknown; timestamp: number } | null = null;

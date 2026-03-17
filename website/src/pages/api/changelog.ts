@@ -23,8 +23,8 @@ import type { APIRoute } from "astro";
 
 export const prerender = false;
 
-const GITHUB_REPO = import.meta.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = import.meta.env.GITHUB_TOKEN || "";
+const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // ── 全量缓存：拉取 GitHub 所有 release 后缓存，分页在返回时切片 ──
 let allCache: { releases: FilteredRelease[]; timestamp: number } | null = null;

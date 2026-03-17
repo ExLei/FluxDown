@@ -21,8 +21,8 @@ import type { APIRoute } from "astro";
 
 export const prerender = false;
 
-const GITHUB_REPO = import.meta.env.GITHUB_REPO || "user/x_down";
-const GITHUB_TOKEN = import.meta.env.GITHUB_TOKEN || "";
+const GITHUB_REPO = process.env.GITHUB_REPO || "user/x_down";
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
 
 // ---------- Rate Limit（内存，Vercel Serverless 冷启动后重置） ----------
 

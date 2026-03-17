@@ -145,10 +145,6 @@ const ogImageUrl = `${SITE_URL}/logo.png`;
   </head>
   <body class="min-h-screen bg-dark-bg text-dark-text antialiased">
     <slot />
-    <script>
-      import { inject } from "@vercel/analytics";
-      inject();
-    </script>
     <script is:inline>
       // Theme persistence & toggle
       (function() {

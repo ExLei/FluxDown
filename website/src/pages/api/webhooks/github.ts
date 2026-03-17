@@ -20,11 +20,11 @@ import nodemailer from "nodemailer";
 
 export const prerender = false;
 
-const WEBHOOK_SECRET = import.meta.env.GITHUB_WEBHOOK_SECRET || "";
-const SMTP_HOST = import.meta.env.SMTP_HOST || "";
-const SMTP_PORT = parseInt(import.meta.env.SMTP_PORT || "465", 10);
-const SMTP_USER = import.meta.env.SMTP_USER || "";
-const SMTP_PASS = import.meta.env.SMTP_PASS || "";
+const WEBHOOK_SECRET = process.env.GITHUB_WEBHOOK_SECRET || "";
+const SMTP_HOST = process.env.SMTP_HOST || "";
+const SMTP_PORT = parseInt(process.env.SMTP_PORT || "465", 10);
+const SMTP_USER = process.env.SMTP_USER || "";
+const SMTP_PASS = process.env.SMTP_PASS || "";
 const SITE_URL = "https://fluxdown.zerx.dev";
 
 // ── 签名验证 ──
