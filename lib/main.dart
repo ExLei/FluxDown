@@ -9,6 +9,7 @@ import 'package:rinf/rinf.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
 import 'package:window_manager/window_manager.dart';
 import 'src/bindings/bindings.dart';
+import 'src/services/window_state_service.dart';
 import 'src/models/download_controller.dart';
 import 'src/models/settings_provider.dart';
 import 'src/pages/home_page.dart';
@@ -37,9 +38,6 @@ Future<void> main(List<String> args) async {
   // 不再创建独立子窗口/Isolate，彻底消除并发 Isolate 崩溃。
 
   // ===== 主窗口正常启动流程 =====
-
-  // 检测是否为免打扰启动（开机自启时带 --silentStart 参数）
-  final isSilentStart = args.contains('--silentStart');
 
   // 提取启动参数中的 .torrent 文件路径（文件关联双击打开）。
   // Linux 文件管理器通过 %U 传入 file:// URI，需解码为本地路径。
@@ -93,24 +91,26 @@ Future<void> main(List<String> args) async {
   logInfo('main', 'initializing windowManager...');
   await windowManager.ensureInitialized();
 
-  const windowOptions = WindowOptions(
-    size: Size(1280, 720),
-    minimumSize: Size(900, 500),
-    center: true,
-    titleBarStyle: TitleBarStyle.hidden,
+  // 从 SharedPreferences 读取上次保存的窗口状态（纯读取，不调用 windowManager API）
+  logInfo('main', 'loading saved window state...');
+  await WindowStateService.instance.loadState();
+
+  // 不使用 waitUntilReadyToShow —— 它的回调参数类型是 VoidCallback，
+  // async 回调中的 await 全部变成 fire-and-forget，与原生层 first_frame_cb
+  // 的 gtk_widget_show / Win32 Show() 竞争，导致窗口以默认大小先显示再跳变。
+  // 且其内部会无条件执行 unmaximize()，破坏已恢复的最大化状态。
+  //
+  // 改为在 runApp 之前直接 await 逐步设置窗口属性，
+  // 所有 method-channel 调用同步完成后才进入 Flutter 渲染循环，
+  // first_frame_cb 触发 show 时窗口属性已就位，不会闪烁跳变。
+  // 窗口显示由原生层 first_frame_cb 控制（已处理 silentStart 逻辑）。
+  await windowManager.setTitleBarStyle(
+    TitleBarStyle.hidden,
     windowButtonVisibility: false,
   );
-
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    logInfo('main', 'window ready to show, isSilentStart=$isSilentStart');
-    if (!isSilentStart) {
-      await windowManager.show();
-      await windowManager.focus();
-      logInfo('main', 'window shown and focused');
-    } else {
-      logInfo('main', 'silent start — window stays hidden, tray only');
-    }
-  });
+  await windowManager.setMinimumSize(const Size(900, 500));
+  await WindowStateService.instance.applyState();
+  logInfo('main', 'window state applied before runApp');
 
   // 初始化开机启动支持（注册时附带 --silentStart 参数，开机自启免打扰）
   // Windows 下路径加引号，防止含空格的安装路径（如 C:\Program Files\...）被 CreateProcess 截断解析失败。
@@ -302,6 +302,7 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     HlsQualityService.shutdown();
     ExternalDownloadService.shutdown();
     _settingsForExternal.dispose();
+    WindowStateService.instance.dispose();
     windowManager.removeListener(this);
     _localeNotifier.removeListener(_onLocaleChanged);
     themeProvider.removeListener(_onThemeChanged);
@@ -521,6 +522,9 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     _isExiting = true;
 
     try {
+      // 隐藏前保存窗口状态（托盘退出不经过 onWindowClose，需在此保存）
+      await WindowStateService.instance.saveNow();
+
       // 立即隐藏窗口，给用户「秒退」的视觉反馈
       logInfo('FluxDownApp', 'hiding window immediately...');
       await windowManager.hide();
@@ -558,6 +562,9 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
     // 已经在退出流程中，不再重复处理
     if (_isExiting) return;
 
+    // 隐藏/关闭前立即保存窗口状态，确保最新位置/大小被持久化
+    await WindowStateService.instance.saveNow();
+
     final closeToTray = SettingsProvider.globalInstance?.closeToTray ?? true;
     logInfo('FluxDownApp', 'closeToTray=$closeToTray');
 
@@ -589,6 +596,26 @@ class _FluxDownAppState extends State<FluxDownApp> with WindowListener {
   @override
   void onWindowMinimize() {
     logInfo('FluxDownApp', 'onWindowMinimize');
+  }
+
+  @override
+  void onWindowMoved() {
+    WindowStateService.instance.onMoved();
+  }
+
+  @override
+  void onWindowResized() {
+    WindowStateService.instance.onResized();
+  }
+
+  @override
+  void onWindowMaximize() {
+    WindowStateService.instance.onMaximized();
+  }
+
+  @override
+  void onWindowUnmaximize() {
+    WindowStateService.instance.onUnmaximized();
   }
 
   FluxThemeTokens _resolveTokens(BuildContext context) {
