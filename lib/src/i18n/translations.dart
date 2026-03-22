@@ -171,6 +171,7 @@ class S {
   String get colFileName => _t('文件名', 'File Name');
   String get colProgress => _t('进度', 'Progress');
   String get colSpeed => _t('速度', 'Speed');
+  String get colEta => _t('剩余时间', 'ETA');
   String get colStatus => _t('状态', 'Status');
 
   // ─────────────────────────────────────────────

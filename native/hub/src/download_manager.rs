@@ -107,14 +107,22 @@ pub struct TaskDone {
     pub generation: u64,
 }
 
-/// Per-task state tracked by the progress reporter for EMA speed smoothing.
+/// Per-task state tracked by the progress reporter for fixed-window speed
+/// sampling.
+///
+/// Uses a fixed time window (`SPEED_SAMPLE_INTERVAL_MS`) instead of
+/// per-update EMA: speed is computed once per window from the accumulated
+/// byte delta, which naturally aggregates multi-segment updates and
+/// eliminates noise from interleaved worker reports.
 struct TaskSpeedState {
-    /// Smoothed speed in bytes/sec (EMA).
+    /// EMA-smoothed speed in bytes/sec.
     ema_speed: f64,
-    /// Last known downloaded_bytes — for computing delta.
-    last_downloaded: i64,
-    /// Timestamp of last update.
-    last_time: std::time::Instant,
+    /// downloaded_bytes at the start of the current sampling window.
+    sample_bytes: i64,
+    /// Timestamp of the current sampling window start.
+    sample_time: std::time::Instant,
+    /// Latest downloaded_bytes seen (for non-monotonic detection).
+    latest_bytes: i64,
     /// Resolved file_name (latched from the first non-empty update).
     file_name: String,
     /// Cached segment snapshot — updated on every incoming update that
@@ -126,7 +134,7 @@ struct TaskSpeedState {
     last_sent_status: i32,
     /// Last raw status observed from downloader updates.
     last_raw_status: i32,
-    /// Number of downloading updates to skip speed calculation for.
+    /// Number of sampling windows to skip speed calculation for.
     /// Used as warmup after prepare/resume to avoid artificial speed spikes
     /// caused by baseline jumps (e.g. resume from non-zero downloaded bytes).
     speed_warmup_remaining: u8,
@@ -2433,10 +2441,23 @@ impl DownloadManager {
     }
 }
 
-/// EMA smoothing factor.  α = 0.15 gives ~85 % weight to history.
-/// With updates every ~200 ms this means ~6 ticks (≈ 1.2 s) to converge,
-/// producing a visually smooth speed display.
-const EMA_ALPHA: f64 = 0.15;
+/// EMA smoothing factor.  α = 0.4 gives a good balance between
+/// responsiveness and smoothness when combined with the 1-second fixed
+/// sampling window below.  With one sample per second the speed converges
+/// to ~90 % of a step change within 3–4 samples.
+const EMA_ALPHA: f64 = 0.4;
+
+/// Fixed speed sampling window (ms).  Instead of computing instant speed on
+/// every incoming `ProgressUpdate` (which can arrive every few ms when
+/// multiple segment workers interleave), we accumulate downloaded bytes and
+/// compute `delta_bytes / delta_time` only once per window.  This eliminates
+/// the noise caused by uneven update spacing in multi-segment downloads.
+const SPEED_SAMPLE_INTERVAL_MS: u128 = 1_000;
+
+/// Decay factor applied to EMA when no new bytes arrive during a full
+/// sampling window.  0.5 per window means speed halves every second during
+/// a stall, reaching <1 KB/s in ~10 windows (~10 s) for a 1 MB/s baseline.
+const SPEED_DECAY_FACTOR: f64 = 0.5;
 
 /// Minimum interval between forwarding progress to Dart (per task) to avoid
 /// flooding the signal channel when many segments report simultaneously.
@@ -2456,8 +2477,9 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
         let state = states.entry(update.task_id.clone()).or_insert_with(|| {
             TaskSpeedState {
                 ema_speed: 0.0,
-                last_downloaded: update.downloaded_bytes,
-                last_time: now,
+                sample_bytes: update.downloaded_bytes,
+                sample_time: now,
+                latest_bytes: update.downloaded_bytes,
                 file_name: String::new(),
                 cached_segments: None,
                 last_sent_status: -1, // never sent yet
@@ -2475,64 +2497,79 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
             state.cached_segments = update.segment_details.clone();
         }
 
-        // Compute EMA speed from downloaded delta.
+        // -----------------------------------------------------------------
+        // Fixed-window speed calculation
+        //
+        // Instead of computing instant speed on every incoming update
+        // (which is noisy for multi-segment downloads where dt can be as
+        // short as 5 ms due to interleaved worker reports), we accumulate
+        // bytes and compute speed once per SPEED_SAMPLE_INTERVAL_MS.
         //
         // Resume / status-transition handling:
         // - Entering downloading (5/2 -> 1) may carry baseline jumps.
         // - Some sources send an initial status=1 with downloaded=0, then
         //   quickly jump to resumed bytes on the next update.
-        // We therefore apply a short warmup window and skip speed calc until
-        // baseline is stable, preventing large transient spikes.
+        // - A warmup window skips the first sample to prevent spikes.
+        // -----------------------------------------------------------------
         let entered_downloading = update.status == 1 && state.last_raw_status != 1;
         if entered_downloading {
             state.ema_speed = 0.0;
-            state.speed_warmup_remaining = if update.downloaded_bytes > 0 { 1 } else { 2 };
+            state.sample_bytes = update.downloaded_bytes;
+            state.sample_time = now;
+            state.speed_warmup_remaining = 1;
         }
 
-        let dt = now.duration_since(state.last_time).as_secs_f64();
         if update.status == 1 {
-            let delta_i64 = update.downloaded_bytes - state.last_downloaded;
-            if delta_i64 < 0 {
-                // Non-monotonic fallback: reset baseline and hold one sample.
+            // Non-monotonic check (e.g. server reset, re-probe).
+            if update.downloaded_bytes < state.latest_bytes {
                 state.ema_speed = 0.0;
+                state.sample_bytes = update.downloaded_bytes;
+                state.sample_time = now;
                 state.speed_warmup_remaining = 1;
-            } else if state.speed_warmup_remaining > 0 {
-                state.speed_warmup_remaining -= 1;
-            } else if dt > 0.01 {
-                if delta_i64 > 0 {
-                    let instant_speed = delta_i64 as f64 / dt;
-                    state.ema_speed =
-                        EMA_ALPHA * instant_speed + (1.0 - EMA_ALPHA) * state.ema_speed;
+            }
+
+            state.latest_bytes = update.downloaded_bytes;
+
+            // Only compute speed when the sampling window expires.
+            let window_elapsed_ms = now.duration_since(state.sample_time).as_millis();
+            if window_elapsed_ms >= SPEED_SAMPLE_INTERVAL_MS {
+                let dt = now.duration_since(state.sample_time).as_secs_f64();
+                let delta = update.downloaded_bytes - state.sample_bytes;
+
+                if state.speed_warmup_remaining > 0 {
+                    // Warmup: just advance baseline, skip speed calc.
+                    state.speed_warmup_remaining -= 1;
+                } else if delta > 0 && dt > 0.01 {
+                    let window_speed = delta as f64 / dt;
+                    if state.ema_speed == 0.0 {
+                        // First valid sample — adopt directly for instant feedback.
+                        state.ema_speed = window_speed;
+                    } else {
+                        state.ema_speed =
+                            EMA_ALPHA * window_speed + (1.0 - EMA_ALPHA) * state.ema_speed;
+                    }
                 } else {
-                    // No new bytes in this tick.  Gently decay the EMA so the
-                    // UI reflects actual throughput when a connection stalls,
-                    // instead of holding a stale value indefinitely.
-                    //
-                    // Previously the speed was held constant (no decay), which
-                    // caused the UI to display "a few MB/s" even when the TCP
-                    // connection had effectively stopped transmitting.  Now the
-                    // chunk-level stall timeout (CHUNK_STALL_TIMEOUT) handles
-                    // hard stalls by killing and retrying the connection, so we
-                    // no longer need to hide stalls from the ETA calculation.
-                    //
-                    // Decay factor 0.8 per tick: at ~500 ms intervals the speed
-                    // halves in ~1.5 s and drops below 10 % within 5 s —
-                    // responsive enough for stall visibility without causing
-                    // ETA jitter on brief inter-chunk gaps.
-                    state.ema_speed *= 0.8;
-                    // Clamp to zero below 1 KB/s to avoid showing tiny residual
-                    // values (e.g. "1 B/s") during the tail of the decay curve.
+                    // No new bytes in this window — connection may be stalling.
+                    // Decay aggressively so the UI reflects actual throughput.
+                    state.ema_speed *= SPEED_DECAY_FACTOR;
                     if state.ema_speed < 1024.0 {
                         state.ema_speed = 0.0;
                     }
                 }
+
+                // Advance sampling window baseline.
+                state.sample_bytes = update.downloaded_bytes;
+                state.sample_time = now;
             }
+            // Within the window: just accumulate bytes, no speed recalc.
         } else {
+            // Non-downloading state: reset everything.
             state.ema_speed = 0.0;
             state.speed_warmup_remaining = 0;
+            state.sample_bytes = update.downloaded_bytes;
+            state.sample_time = now;
+            state.latest_bytes = update.downloaded_bytes;
         }
-        state.last_downloaded = update.downloaded_bytes;
-        state.last_time = now;
         state.last_raw_status = update.status;
 
         let smoothed_speed = state.ema_speed as i64;

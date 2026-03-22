@@ -121,7 +121,8 @@ class _TaskListItemState extends State<TaskListItem> {
               ],
               Expanded(child: _buildFileInfo(c)),
               SizedBox(width: 150, child: _buildProgress(c)),
-              SizedBox(width: 100, child: _buildSpeed(c)),
+              SizedBox(width: 90, child: _buildSpeed(c)),
+              SizedBox(width: 80, child: _buildEta(c)),
               SizedBox(width: 60, child: _buildStatus(c)),
             ],
           ),
@@ -270,6 +271,21 @@ class _TaskListItemState extends State<TaskListItem> {
         style: TextStyle(
           fontSize: 12,
           color: isActive ? AppColors.green : c.textMuted,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEta(AppColors c) {
+    final task = widget.task;
+    final isActive = task.status == TaskStatus.downloading;
+    return Center(
+      child: Text(
+        task.etaText,
+        style: TextStyle(
+          fontSize: 12,
+          color: isActive ? c.textSecondary : c.textMuted,
           fontFeatures: const [FontFeature.tabularFigures()],
         ),
       ),
@@ -709,9 +725,7 @@ class _DeleteConfirmDialogContentState
               mainAxisSize: MainAxisSize.min,
               children: [
                 Icon(
-                  widget.isDeleteFiles
-                      ? LucideIcons.fileX
-                      : LucideIcons.trash2,
+                  widget.isDeleteFiles ? LucideIcons.fileX : LucideIcons.trash2,
                   size: 13,
                   color: Colors.white,
                 ),
@@ -767,8 +781,7 @@ class _BatchDeleteDialogContent extends StatefulWidget {
       _BatchDeleteDialogContentState();
 }
 
-class _BatchDeleteDialogContentState
-    extends State<_BatchDeleteDialogContent> {
+class _BatchDeleteDialogContentState extends State<_BatchDeleteDialogContent> {
   late final FocusNode _focusNode;
 
   @override

@@ -286,28 +286,18 @@ class DownloadTask {
 
   /// 根据 TaskProgress 信号增量更新
   DownloadTask applyProgress(TaskProgress p) {
-    // Dart-side EMA smoothing for speed display (α = 0.3).
-    // Rust already sends EMA-smoothed speed; this second pass further damps
-    // any residual jitter from multi-segment reporting.
     final newStatus = taskStatusFromInt(p.status);
-    final int smoothedSpeed;
-    if (newStatus == TaskStatus.downloading && p.speed > 0) {
-      if (speed > 0) {
-        smoothedSpeed = (0.3 * p.speed + 0.7 * speed).round();
-      } else {
-        smoothedSpeed = p.speed; // first update — use raw value
-      }
-    } else {
-      // Non-downloading states: force speed to 0 defensively,
-      // even if Rust accidentally sends a non-zero value.
-      smoothedSpeed = 0;
-    }
+    // Rust 端已通过固定窗口采样 + 单层 EMA 充分平滑，Dart 直接使用。
+    // 非下载状态强制归零，防止残留值。
+    final int displaySpeed = newStatus == TaskStatus.downloading
+        ? p.speed.clamp(0, p.speed)
+        : 0;
 
     return copyWith(
       status: newStatus,
       downloadedBytes: p.downloadedBytes,
       totalBytes: p.totalBytes > 0 ? p.totalBytes : null,
-      speed: smoothedSpeed,
+      speed: displaySpeed,
       fileName: p.fileName.isNotEmpty ? p.fileName : null,
       saveDir: p.saveDir.isNotEmpty ? p.saveDir : null,
       errorMessage: p.errorMessage,
@@ -385,8 +375,9 @@ class DownloadTask {
       case TaskStatus.error:
         return '$proto · $sizeText · ${errorMessage.isEmpty ? s.subtitleError : errorMessage}';
       case TaskStatus.pending:
-        final queueStr =
-            queuePosition > 0 ? ' · ${s.subtitleQueued(queuePosition)}' : '';
+        final queueStr = queuePosition > 0
+            ? ' · ${s.subtitleQueued(queuePosition)}'
+            : '';
         if (totalBytes > 0) return '$proto · $sizeText$queueStr';
         return '$proto · ${s.subtitlePending}$queueStr';
       case TaskStatus.preparing:

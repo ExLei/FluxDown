@@ -131,13 +131,14 @@ class TaskList extends StatelessWidget {
                     onTap: () => onTaskTap?.call(task.id),
                     onPause: () => controller.pauseTask(task.id),
                     onResume: () => controller.resumeTask(task.id),
-                    onDelete: ({required bool deleteFiles}) =>
-                        controller.deleteTask(task.id, deleteFiles: deleteFiles),
+                    onDelete: ({required bool deleteFiles}) => controller
+                        .deleteTask(task.id, deleteFiles: deleteFiles),
                     isPriority: controller.priorityTaskId == task.id,
                     onBoost: () => controller.setPriorityTask(task.id),
                     isManageMode: isManage,
                     isChecked: controller.checkedTaskIds.contains(task.id),
-                    onToggleChecked: () => controller.toggleTaskChecked(task.id),
+                    onToggleChecked: () =>
+                        controller.toggleTaskChecked(task.id),
                   ),
                 );
               }, childCount: group.tasks.length),
@@ -234,10 +235,23 @@ class TaskList extends StatelessWidget {
             ),
           ),
           SizedBox(
-            width: 100,
+            width: 90,
             child: Center(
               child: Text(
                 s.colSpeed,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                  color: c.textMuted,
+                ),
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 80,
+            child: Center(
+              child: Text(
+                s.colEta,
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w500,
