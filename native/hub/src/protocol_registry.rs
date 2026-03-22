@@ -12,9 +12,10 @@
 
 #[cfg(target_os = "windows")]
 mod inner {
+    use crate::logger::log_info;
     use std::io;
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 
     const PROTOCOL: &str = "fluxdown";
     const PROTOCOL_DESC: &str = "URL:FluxDown Protocol";
@@ -78,7 +79,7 @@ mod inner {
         // Notify the shell about the change
         notify_shell();
 
-        rinf::debug_print!("[protocol_registry] registered fluxdown:// protocol (exe={exe})");
+        log_info!("[protocol_registry] registered fluxdown:// protocol (exe={exe})");
         Ok(())
     }
 
@@ -88,7 +89,7 @@ mod inner {
 
         // Only remove if currently registered (don't break other app's registration)
         if !is_registered() {
-            rinf::debug_print!("[protocol_registry] not registered to FluxDown, skipping removal");
+            log_info!("[protocol_registry] not registered to FluxDown, skipping removal");
             return Ok(());
         }
 
@@ -99,7 +100,7 @@ mod inner {
         // Notify the shell about the change
         notify_shell();
 
-        rinf::debug_print!("[protocol_registry] removed fluxdown:// protocol registration");
+        log_info!("[protocol_registry] removed fluxdown:// protocol registration");
         Ok(())
     }
 

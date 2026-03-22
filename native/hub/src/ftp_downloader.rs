@@ -27,6 +27,7 @@ use crate::downloader::{
     ProgressUpdate, SegmentProgressInfo, TEMP_EXT, dedup_filename, extract_from_url,
     sanitize_filename,
 };
+use crate::logger::log_info;
 use crate::proxy_config::{self, ProxyConfig};
 use crate::speed_limiter::SpeedLimiter;
 
@@ -154,7 +155,7 @@ fn ftp_connect_sync_with_proxy(
     let default_proxy = ProxyConfig::default();
     let mut stream = if should_proxy {
         let proxy = proxy.unwrap_or(&default_proxy);
-        rinf::debug_print!(
+        log_info!(
             "[ftp-connect] using {} proxy {}:{} for {}:{}",
             proxy.proxy_type.as_str(),
             proxy.host,
@@ -235,7 +236,7 @@ pub async fn resolve_ftp_file_info(
         match result {
             Ok(info) => return Ok(info),
             Err(e) => {
-                rinf::debug_print!(
+                log_info!(
                     "[ftp-resolve] attempt {}/{} failed: {}",
                     attempt + 1,
                     PROBE_MAX_RETRIES,
@@ -259,7 +260,7 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
     let total_bytes = match ftp.size(&ftp_url.path) {
         Ok(size) => size as i64,
         Err(e) => {
-            rinf::debug_print!("[ftp-resolve] SIZE failed: {}, assuming unknown", e);
+            log_info!("[ftp-resolve] SIZE failed: {}, assuming unknown", e);
             0
         }
     };
@@ -277,7 +278,7 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
 
     let _ = ftp.quit();
 
-    rinf::debug_print!(
+    log_info!(
         "[ftp-resolve] path={}, name={}, size={}, range={}",
         ftp_url.path,
         file_name,
@@ -404,7 +405,7 @@ pub async fn run_ftp_download(params: DownloadParams) {
 
     match result {
         Ok(total) => {
-            rinf::debug_print!(
+            log_info!(
                 "[ftp-download] task {} completed, total={} bytes",
                 task_id_log,
                 total
@@ -424,18 +425,18 @@ pub async fn run_ftp_download(params: DownloadParams) {
                 .await;
         }
         Err(DownloadError::Cancelled) => {
-            rinf::debug_print!("[ftp-download] task {} cancelled", task_id_log);
+            log_info!("[ftp-download] task {} cancelled", task_id_log);
         }
         Err(e) => {
             let msg = e.to_string();
-            rinf::debug_print!("[ftp-download] task {} error: {}", task_id_log, msg);
+            log_info!("[ftp-download] task {} error: {}", task_id_log, msg);
             let _ = params.db.update_task_status(&params.task_id, 4, &msg).await;
 
             // Preserve actual progress from DB so the UI doesn't jump back to 0%.
             let (dl, total) = match params.db.load_task_by_id(&params.task_id).await {
                 Ok(Some(t)) => (t.downloaded_bytes, t.total_bytes),
                 other => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[ftp-download] task {} warning: failed to read progress from DB: {:?}",
                         task_id_log,
                         other.err()
@@ -468,7 +469,7 @@ async fn compute_ftp_segments(p: &DownloadParams, info: &FileInfo) -> i32 {
     };
 
     let static_advice = advise_static(&advisor_input);
-    rinf::debug_print!(
+    log_info!(
         "[ftp-download] task {} static advice: segments={}, reason={}",
         p.task_id,
         static_advice.segments,
@@ -479,7 +480,7 @@ async fn compute_ftp_segments(p: &DownloadParams, info: &FileInfo) -> i32 {
         match probe_ftp_bandwidth(&p.url, &p.cancel_token, &p.proxy_config).await {
             Some(bw) => {
                 let bw_advice = advise_with_bandwidth(&advisor_input, bw);
-                rinf::debug_print!(
+                log_info!(
                     "[ftp-download] task {} bandwidth: {:.1} KB/s → segments={}",
                     p.task_id,
                     bw / 1024.0,
@@ -494,7 +495,7 @@ async fn compute_ftp_segments(p: &DownloadParams, info: &FileInfo) -> i32 {
     };
 
     if let Err(e) = p.db.update_task_segments(&p.task_id, result).await {
-        rinf::debug_print!(
+        log_info!(
             "[ftp-download] task {} failed to persist segment count: {}",
             p.task_id,
             e
@@ -505,7 +506,7 @@ async fn compute_ftp_segments(p: &DownloadParams, info: &FileInfo) -> i32 {
 }
 
 async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
-    rinf::debug_print!("[ftp-download] task {} starting, url={}", p.task_id, p.url);
+    log_info!("[ftp-download] task {} starting, url={}", p.task_id, p.url);
 
     // Transition to status=5 (preparing) — probing FTP server, resolving file info
     let _ = p.db.update_task_status(&p.task_id, 5, "").await;
@@ -523,7 +524,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         .await;
 
     let info = resolve_ftp_file_info(&p.url, &p.proxy_config).await?;
-    rinf::debug_print!(
+    log_info!(
         "[ftp-download] task {} resolved: name={}, size={}, range={}",
         p.task_id,
         info.file_name,
@@ -602,7 +603,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
 
     let use_segments = info.supports_range && info.total_bytes > 1_048_576 && segments > 1;
 
-    rinf::debug_print!(
+    log_info!(
         "[ftp-download] task {} mode={}, segments={}",
         p.task_id,
         if use_segments {
@@ -656,7 +657,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
                     if attempts >= MAX_RETRIES {
                         return Err(e);
                     }
-                    rinf::debug_print!(
+                    log_info!(
                         "[ftp-download] task {} single-thread attempt {}/{} failed: {}",
                         p.task_id,
                         attempts,
@@ -716,7 +717,7 @@ async fn run_ftp_download_inner(p: &DownloadParams) -> Result<i64, DownloadError
         match tokio::fs::metadata(&temp_path).await {
             Ok(m) => m.len() as i64,
             Err(e) => {
-                rinf::debug_print!(
+                log_info!(
                     "[ftp-download] task {} warning: cannot read temp file size: {}",
                     p.task_id,
                     e
@@ -842,7 +843,7 @@ async fn ftp_download_single(
                 .get_ref()
                 .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))
             {
-                rinf::debug_print!("[ftp-single] set_read_timeout failed: {}", e);
+                log_info!("[ftp-single] set_read_timeout failed: {}", e);
             }
 
             let mut buf = vec![0u8; 64 * 1024];
@@ -1305,7 +1306,7 @@ async fn ftp_do_segment(
                 .get_ref()
                 .set_read_timeout(Some(FTP_DATA_READ_TIMEOUT))
             {
-                rinf::debug_print!("[ftp-seg {}] set_read_timeout failed: {}", seg_idx, e);
+                log_info!("[ftp-seg {}] set_read_timeout failed: {}", seg_idx, e);
             }
 
             let mut buf = vec![0u8; 64 * 1024];

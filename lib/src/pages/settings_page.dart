@@ -13,6 +13,7 @@ import '../i18n/locale_provider.dart';
 import '../models/download_controller.dart';
 import '../models/download_queue.dart';
 import '../models/settings_provider.dart';
+import '../services/log_service.dart';
 import '../services/update_service.dart';
 import '../theme/app_colors.dart';
 import '../theme/flux_theme_tokens.dart';
@@ -196,6 +197,13 @@ List<SettingsSearchItem> get settingsSearchItems {
       description: s.proxySettingsDesc,
       keywords: s.searchKeywordsProxy,
       icon: LucideIcons.globe,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.about,
+      label: s.logExport,
+      description: s.logExportDesc,
+      keywords: s.searchKeywordsLogExport,
+      icon: LucideIcons.fileText,
     ),
   ];
 }
@@ -3717,6 +3725,9 @@ class _AboutContent extends StatelessWidget {
                 ],
               ),
             ),
+            const SizedBox(height: 10),
+            // Log export card
+            _LogExportCard(colors: c),
           ],
         );
       },
@@ -3991,5 +4002,155 @@ class _AboutContent extends StatelessWidget {
     final dt = DateTime.tryParse(isoDate);
     if (dt == null) return isoDate;
     return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+  }
+}
+
+// ─────────────────────────────────────────────
+// 日志导出卡片
+// ─────────────────────────────────────────────
+
+class _LogExportCard extends StatefulWidget {
+  final AppColors colors;
+  const _LogExportCard({required this.colors});
+
+  @override
+  State<_LogExportCard> createState() => _LogExportCardState();
+}
+
+class _LogExportCardState extends State<_LogExportCard> {
+  bool _exporting = false;
+
+  Future<void> _exportLogs() async {
+    if (_exporting) return;
+    setState(() => _exporting = true);
+    try {
+      final s = LocaleScope.of(context);
+      final now = DateTime.now();
+      final datePart =
+          '${now.year}${now.month.toString().padLeft(2, '0')}${now.day.toString().padLeft(2, '0')}';
+      final result = await FilePicker.platform.saveFile(
+        dialogTitle: s.logSelectExportDir,
+        fileName: 'fluxdown_logs_$datePart.zip',
+        type: FileType.custom,
+        allowedExtensions: ['zip'],
+      );
+      if (result == null || !mounted) {
+        if (mounted) setState(() => _exporting = false);
+        return;
+      }
+      final savePath = result.endsWith('.zip') ? result : '$result.zip';
+      final count = await LogService.instance.exportLogs(savePath);
+      if (!mounted) return;
+      if (count > 0) {
+        ShadSonner.of(context).show(
+          ShadToast(
+            title: Text(s.logExportSuccess(count)),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      } else {
+        ShadSonner.of(context).show(
+          ShadToast(
+            title: Text(s.logExportEmpty),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ShadSonner.of(context).show(
+          ShadToast.destructive(
+            title: Text(LocaleScope.of(context).logExportFailed),
+            description: Text(e.toString()),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _exporting = false);
+    }
+  }
+
+  void _openLogDir() {
+    final path = LogService.instance.logDir.path;
+    if (Platform.isWindows) {
+      Process.run('explorer', [path]);
+    } else {
+      Process.run('xdg-open', [path]);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = widget.colors;
+    final s = LocaleScope.of(context);
+    final fileCount = LogService.instance.logFileCount;
+    final sizeBytes = LogService.instance.logDirSizeBytes;
+    final sizeText = UpdateService.formatBytes(sizeBytes);
+
+    return _SettingCard(
+      label: s.logExport,
+      description: s.logExportDesc,
+      vertical: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            s.logExportInfo(fileCount, sizeText),
+            style: TextStyle(fontSize: 12, color: c.textMuted),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              ShadButton.outline(
+                size: ShadButtonSize.sm,
+                enabled: !_exporting,
+                onPressed: _exportLogs,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_exporting) ...[
+                      SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 1.5,
+                          color: c.textSecondary,
+                        ),
+                      ),
+                    ] else ...[
+                      Icon(
+                        LucideIcons.fileDown,
+                        size: 13,
+                        color: c.textSecondary,
+                      ),
+                    ],
+                    const SizedBox(width: 6),
+                    Text(s.logExportButton),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              ShadButton.outline(
+                size: ShadButtonSize.sm,
+                onPressed: _openLogDir,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      LucideIcons.folderOpen,
+                      size: 13,
+                      color: c.textSecondary,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(s.logOpenDirButton),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
   }
 }

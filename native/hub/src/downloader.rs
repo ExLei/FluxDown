@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
+use crate::logger::log_info;
 use crate::speed_limiter::SpeedLimiter;
 
 // ---------------------------------------------------------------------------
@@ -232,7 +233,7 @@ pub fn build_client(
             match detect_system_proxy() {
                 Ok(Some(sys_proxy)) => {
                     if let Some(url) = sys_proxy.to_proxy_url() {
-                        rinf::debug_print!("[build_client] system proxy detected: {}", url);
+                        log_info!("[build_client] system proxy detected: {}", url);
                         match reqwest::Proxy::all(&url) {
                             Ok(mut proxy) => {
                                 if !sys_proxy.username.is_empty() {
@@ -247,29 +248,24 @@ pub fn build_client(
                                 builder = builder.proxy(proxy);
                             }
                             Err(e) => {
-                                rinf::debug_print!(
-                                    "[build_client] failed to parse system proxy URL: {}",
-                                    e
-                                );
+                                log_info!("[build_client] failed to parse system proxy URL: {}", e);
                             }
                         }
                     } else {
-                        rinf::debug_print!(
-                            "[build_client] system proxy enabled but no URL resolved"
-                        );
+                        log_info!("[build_client] system proxy enabled but no URL resolved");
                     }
                 }
                 Ok(None) => {
-                    rinf::debug_print!("[build_client] system proxy: not configured");
+                    log_info!("[build_client] system proxy: not configured");
                 }
                 Err(e) => {
-                    rinf::debug_print!("[build_client] system proxy detection error: {}", e);
+                    log_info!("[build_client] system proxy detection error: {}", e);
                 }
             }
         }
         ProxyMode::Manual => {
             if let Some(url) = proxy_config.to_proxy_url() {
-                rinf::debug_print!("[build_client] manual proxy: {}", url);
+                log_info!("[build_client] manual proxy: {}", url);
                 match reqwest::Proxy::all(&url) {
                     Ok(mut proxy) => {
                         if !proxy_config.username.is_empty() {
@@ -284,11 +280,11 @@ pub fn build_client(
                         builder = builder.proxy(proxy);
                     }
                     Err(e) => {
-                        rinf::debug_print!("[build_client] failed to create proxy from URL: {}", e);
+                        log_info!("[build_client] failed to create proxy from URL: {}", e);
                     }
                 }
             } else {
-                rinf::debug_print!("[build_client] manual proxy: incomplete config, using direct");
+                log_info!("[build_client] manual proxy: incomplete config, using direct");
                 builder = builder.no_proxy();
             }
         }
@@ -332,7 +328,7 @@ pub async fn resolve_file_info(
         match resolve_file_info_once(client, url, cookies, referrer, extra_headers).await {
             Ok(info) => return Ok(info),
             Err(e) => {
-                rinf::debug_print!(
+                log_info!(
                     "[resolve] probe attempt {}/{} failed: {}",
                     attempt + 1,
                     PROBE_MAX_RETRIES,
@@ -410,7 +406,7 @@ async fn resolve_file_info_once(
             Some((h, u))
         }
         Ok(r) => {
-            rinf::debug_print!(
+            log_info!(
                 "[resolve] HEAD failed: status={}, url={}, cookies_len={}",
                 r.status(),
                 r.url(),
@@ -419,7 +415,7 @@ async fn resolve_file_info_once(
             None
         }
         Err(e) => {
-            rinf::debug_print!(
+            log_info!(
                 "[resolve] HEAD network error: {}{}, cookies_len={}",
                 e,
                 format_error_chain(e.source()),
@@ -439,7 +435,7 @@ async fn resolve_file_info_once(
             Some((h, u, got_206))
         }
         Ok(r) => {
-            rinf::debug_print!(
+            log_info!(
                 "[resolve] GET failed: status={}, url={}, cookies_len={}",
                 r.status(),
                 r.url(),
@@ -448,7 +444,7 @@ async fn resolve_file_info_once(
             None
         }
         Err(e) => {
-            rinf::debug_print!(
+            log_info!(
                 "[resolve] GET network error: {}{}, cookies_len={}",
                 e,
                 format_error_chain(e.source()),
@@ -523,7 +519,7 @@ async fn resolve_file_info_once(
         .to_string();
 
     let file_name = extract_filename(&headers, final_url.as_str());
-    rinf::debug_print!(
+    log_info!(
         "[resolve] url={} → name={}, size={}, range={}, ct={}",
         url,
         file_name,
@@ -807,7 +803,7 @@ pub async fn run_download(params: DownloadParams) {
 
     match result {
         Ok(total) => {
-            rinf::debug_print!(
+            log_info!(
                 "[download] task {} completed, total={} bytes",
                 task_id_log,
                 total
@@ -827,14 +823,14 @@ pub async fn run_download(params: DownloadParams) {
                 .await;
         }
         Err(DownloadError::Cancelled) => {
-            rinf::debug_print!("[download] task {} cancelled", task_id_log);
+            log_info!("[download] task {} cancelled", task_id_log);
             // pause / cancel already handled upstream — nothing to do
         }
         Err(e) => {
             let msg = e.to_string();
             // checksum 失败时所有字节均已下载完毕（只是校验未通过），需特殊处理进度。
             let is_checksum_fail = matches!(e, DownloadError::ChecksumMismatch(_));
-            rinf::debug_print!("[download] task {} error: {}", task_id_log, msg);
+            log_info!("[download] task {} error: {}", task_id_log, msg);
             let _ = params.db.update_task_status(&params.task_id, 4, &msg).await;
 
             // Preserve actual progress from DB so the UI doesn't jump back to 0%.
@@ -850,7 +846,7 @@ pub async fn run_download(params: DownloadParams) {
                     (dl, t.total_bytes)
                 }
                 other => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[download] task {} warning: failed to read progress from DB: {:?}",
                         task_id_log,
                         other.err()
@@ -987,7 +983,7 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
 
     // Phase 1: static recommendation (file size + CPU cores).
     let static_advice = advise_static(&advisor_input);
-    rinf::debug_print!(
+    log_info!(
         "[download] task {} static advice: segments={}, reason={}",
         p.task_id,
         static_advice.segments,
@@ -1003,7 +999,7 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
         // actual download.  Static advice (file size + CPU cores) is a good
         // enough estimate in this case.
         if p.hint_file_size > 0 {
-            rinf::debug_print!(
+            log_info!(
                 "[download] task {} hint mode: skipping bandwidth probe, using static advice (segments={})",
                 p.task_id,
                 static_advice.segments
@@ -1023,7 +1019,7 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
             {
                 Some(bw) => {
                     let bw_advice = advise_with_bandwidth(&advisor_input, bw);
-                    rinf::debug_print!(
+                    log_info!(
                         "[download] task {} bandwidth probe: {:.1} KB/s → segments={}, reason={}",
                         p.task_id,
                         bw / 1024.0,
@@ -1033,7 +1029,7 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
                     bw_advice.segments
                 }
                 None => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[download] task {} bandwidth probe failed/cancelled, using static advice",
                         p.task_id
                     );
@@ -1048,7 +1044,7 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
     // Persist to DB so resume_task can skip the advisor.
     // If this write fails, the advisor will re-run on resume — acceptable.
     if let Err(e) = p.db.update_task_segments(&p.task_id, result).await {
-        rinf::debug_print!(
+        log_info!(
             "[download] task {} failed to persist segment count to DB: {}",
             p.task_id,
             e
@@ -1059,7 +1055,7 @@ async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i
 }
 
 async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
-    rinf::debug_print!("[download] task {} starting, url={}", p.task_id, p.url);
+    log_info!("[download] task {} starting, url={}", p.task_id, p.url);
 
     // Transition to status=5 (preparing) — probing server, resolving file info
     let _ = p.db.update_task_status(&p.task_id, 5, "").await;
@@ -1102,7 +1098,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         } else {
             0
         };
-        rinf::debug_print!(
+        log_info!(
             "[download] task {} using hint: name={}, size={} (probe skipped, hint={})",
             p.task_id,
             name,
@@ -1124,10 +1120,10 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             content_type: String::new(),
         }
     } else {
-        rinf::debug_print!("[download] task {} resolving file info...", p.task_id);
+        log_info!("[download] task {} resolving file info...", p.task_id);
         let info =
             resolve_file_info(client, &p.url, &p.cookies, &p.referrer, &p.extra_headers).await?;
-        rinf::debug_print!(
+        log_info!(
             "[download] task {} resolved: name={}, size={}, range={}",
             p.task_id,
             info.file_name,
@@ -1234,7 +1230,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             let existing = p.db.load_segments(&p.task_id).await.unwrap_or_default();
             if !existing.is_empty() {
                 let n = existing.len() as i32;
-                rinf::debug_print!(
+                log_info!(
                     "[download] task {} resume: reusing {} existing segment(s) from DB",
                     p.task_id,
                     n
@@ -1256,7 +1252,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     // file is > 1 MB, and we asked for more than 1 segment.
     let use_segments = info.supports_range && info.total_bytes > 1_048_576 && segments > 1;
 
-    rinf::debug_print!(
+    log_info!(
         "[download] task {} mode={}, segments={}, temp={}, dest={}",
         p.task_id,
         if use_segments {
@@ -1352,7 +1348,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         match tokio::fs::metadata(&temp_path).await {
             Ok(m) => m.len() as i64,
             Err(e) => {
-                rinf::debug_print!(
+                log_info!(
                     "[download] task {} warning: cannot read temp file size: {}",
                     p.task_id,
                     e
@@ -1364,13 +1360,13 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
 
     // Checksum verification — runs after size integrity check, before rename.
     if !p.checksum.is_empty() {
-        rinf::debug_print!(
+        log_info!(
             "[download] task {} verifying checksum: {}",
             p.task_id,
             p.checksum
         );
         verify_checksum(&temp_path, &p.checksum).await?;
-        rinf::debug_print!("[download] task {} checksum ok", p.task_id);
+        log_info!("[download] task {} checksum ok", p.task_id);
     }
 
     // All data verified — rename temp file to final destination.
@@ -1386,7 +1382,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             ))
         })?;
 
-    rinf::debug_print!(
+    log_info!(
         "[download] task {} renamed {} → {}",
         p.task_id,
         temp_path.display(),
@@ -1467,7 +1463,7 @@ async fn download_single(
             .headers()
             .contains_key(reqwest::header::CONTENT_DISPOSITION)
     {
-        rinf::debug_print!(
+        log_info!(
             "[download-single] got better name from response: {}",
             resp_name
         );
@@ -1608,7 +1604,7 @@ async fn download_multi_segment(
         if let Some(last) = last_seg {
             let expected_end = total_bytes - 1;
             if last.end_byte != expected_end {
-                rinf::debug_print!(
+                log_info!(
                     "[download] task {} total_bytes changed: segment end_byte={}, expected={}. Discarding old segments.",
                     task_id,
                     last.end_byte,

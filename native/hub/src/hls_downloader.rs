@@ -24,6 +24,7 @@ use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT, dedup_filename,
     extract_from_url,
 };
+use crate::logger::log_info;
 use crate::signals::{HlsQualityOption, HlsQualityOptions};
 
 // ---------------------------------------------------------------------------
@@ -393,7 +394,7 @@ pub async fn run_hls_download(mut params: DownloadParams) {
 
     match result {
         Ok(total) => {
-            rinf::debug_print!(
+            log_info!(
                 "[hls-download] task {} completed, total={} bytes",
                 task_id_log,
                 total
@@ -413,17 +414,17 @@ pub async fn run_hls_download(mut params: DownloadParams) {
                 .await;
         }
         Err(DownloadError::Cancelled) => {
-            rinf::debug_print!("[hls-download] task {} cancelled", task_id_log);
+            log_info!("[hls-download] task {} cancelled", task_id_log);
         }
         Err(e) => {
             let msg = e.to_string();
-            rinf::debug_print!("[hls-download] task {} error: {}", task_id_log, msg);
+            log_info!("[hls-download] task {} error: {}", task_id_log, msg);
             let _ = params.db.update_task_status(&params.task_id, 4, &msg).await;
 
             let (dl, total) = match params.db.load_task_by_id(&params.task_id).await {
                 Ok(Some(t)) => (t.downloaded_bytes, t.total_bytes),
                 other => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[hls-download] task {} warning: failed to read progress from DB: {:?}",
                         task_id_log,
                         other.err()
@@ -466,7 +467,7 @@ async fn select_variant(
             .iter()
             .max_by_key(|v| v.bandwidth)
             .ok_or_else(|| DownloadError::Other("no variants in master playlist".to_string()))?;
-        rinf::debug_print!(
+        log_info!(
             "[hls-download] task {} auto-selected variant: bandwidth={}, resolution={:?}",
             task_id,
             best.bandwidth,
@@ -478,7 +479,7 @@ async fn select_variant(
     if let Some(rx) = quality_rx {
         // Skip dialog when there is only one variant — no point asking.
         if variants.len() <= 1 {
-            rinf::debug_print!(
+            log_info!(
                 "[hls-download] task {} only {} variant(s), skipping quality dialog",
                 task_id,
                 variants.len()
@@ -506,7 +507,7 @@ async fn select_variant(
         }
         .send_signal_to_dart();
 
-        rinf::debug_print!(
+        log_info!(
             "[hls-download] task {} sent {} quality options to Dart, waiting for selection (timeout={}s)",
             task_id,
             variants.len(),
@@ -529,7 +530,7 @@ async fn select_variant(
                                 variants.len()
                             ))
                         })?;
-                        rinf::debug_print!(
+                        log_info!(
                             "[hls-download] task {} user selected variant {}: bandwidth={}, resolution={:?}",
                             task_id,
                             idx,
@@ -540,7 +541,7 @@ async fn select_variant(
                     }
                     Ok(Err(_)) => {
                         // Channel closed (sender dropped) — auto-select best.
-                        rinf::debug_print!(
+                        log_info!(
                             "[hls-download] task {} quality channel closed, auto-selecting best",
                             task_id
                         );
@@ -548,7 +549,7 @@ async fn select_variant(
                     }
                     Err(_) => {
                         // Timeout — auto-select best.
-                        rinf::debug_print!(
+                        log_info!(
                             "[hls-download] task {} quality selection timed out ({}s), auto-selecting best",
                             task_id,
                             QUALITY_SELECTION_TIMEOUT_SECS
@@ -571,7 +572,7 @@ async fn run_hls_download_inner(
     p: &DownloadParams,
     quality_rx: Option<tokio::sync::oneshot::Receiver<i32>>,
 ) -> Result<i64, DownloadError> {
-    rinf::debug_print!("[hls-download] task {} starting, url={}", p.task_id, p.url);
+    log_info!("[hls-download] task {} starting, url={}", p.task_id, p.url);
 
     // Transition to status=5 (preparing)
     let _ = p.db.update_task_status(&p.task_id, 5, "").await;
@@ -623,7 +624,7 @@ async fn run_hls_download_inner(
     };
 
     let segment_count = segments.len();
-    rinf::debug_print!(
+    log_info!(
         "[hls-download] task {} found {} segments, media_sequence={}",
         p.task_id,
         segment_count,
@@ -785,7 +786,7 @@ async fn run_hls_download_inner(
             last_db_save = std::time::Instant::now();
         }
 
-        rinf::debug_print!(
+        log_info!(
             "[hls-download] task {} segment {}/{} done, {} bytes total",
             p.task_id,
             seg_idx + 1,
@@ -813,7 +814,7 @@ async fn run_hls_download_inner(
             ))
         })?;
 
-    rinf::debug_print!(
+    log_info!(
         "[hls-download] task {} renamed {} -> {}",
         p.task_id,
         temp_path.display(),
@@ -854,7 +855,7 @@ async fn run_hls_download_inner(
                 return Ok(mp4_size);
             }
             Err(e) => {
-                rinf::debug_print!(
+                log_info!(
                     "[hls] task {} DB update failed after remux: {}, removing orphan mp4 at {}",
                     p.task_id,
                     e,
@@ -888,7 +889,7 @@ async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<Pat
         Err(_) => return None,
     };
     if file_len > MAX_REMUX_BYTES {
-        rinf::debug_print!(
+        log_info!(
             "[hls] task {} skipping remux: {} bytes exceeds limit",
             task_id,
             file_len
@@ -926,11 +927,11 @@ async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<Pat
     .await
     {
         Ok(Ok(())) => {
-            rinf::debug_print!("[hls] task {} remuxed TS -> MP4", task_id);
+            log_info!("[hls] task {} remuxed TS -> MP4", task_id);
             Some(mp4_path)
         }
         Ok(Err(e)) => {
-            rinf::debug_print!(
+            log_info!(
                 "[hls] task {} MP4 remux failed: {}, keeping .ts",
                 task_id,
                 e
@@ -939,7 +940,7 @@ async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<Pat
             None
         }
         Err(e) => {
-            rinf::debug_print!(
+            log_info!(
                 "[hls] task {} MP4 remux join error: {}, keeping .ts",
                 task_id,
                 e
@@ -978,7 +979,7 @@ async fn download_segment_with_retry(
                         seg_idx, MAX_RETRIES, e
                     )));
                 }
-                rinf::debug_print!(
+                log_info!(
                     "[hls-download] task {} segment {} attempt {}/{} failed: {}",
                     task_id,
                     seg_idx,

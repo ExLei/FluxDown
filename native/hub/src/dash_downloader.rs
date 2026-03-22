@@ -11,6 +11,7 @@ use crate::downloader::{
     DB_SAVE_INTERVAL_SECS, DownloadError, DownloadParams, ProgressUpdate, TEMP_EXT, dedup_filename,
     extract_from_url,
 };
+use crate::logger::log_info;
 use crate::signals::{HlsQualityOption, HlsQualityOptions};
 
 fn is_same_origin(base_url: &str, target_url: &str) -> bool {
@@ -79,7 +80,7 @@ pub async fn run_dash_download(mut params: DownloadParams) {
 
     match result {
         Ok(total) => {
-            rinf::debug_print!(
+            log_info!(
                 "[dash-download] task {} completed, total={} bytes",
                 task_id_log,
                 total
@@ -99,17 +100,17 @@ pub async fn run_dash_download(mut params: DownloadParams) {
                 .await;
         }
         Err(DownloadError::Cancelled) => {
-            rinf::debug_print!("[dash-download] task {} cancelled", task_id_log);
+            log_info!("[dash-download] task {} cancelled", task_id_log);
         }
         Err(e) => {
             let msg = e.to_string();
-            rinf::debug_print!("[dash-download] task {} error: {}", task_id_log, msg);
+            log_info!("[dash-download] task {} error: {}", task_id_log, msg);
             let _ = params.db.update_task_status(&params.task_id, 4, &msg).await;
 
             let (dl, total) = match params.db.load_task_by_id(&params.task_id).await {
                 Ok(Some(t)) => (t.downloaded_bytes, t.total_bytes),
                 other => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[dash-download] task {} warning: failed to read progress from DB: {:?}",
                         task_id_log,
                         other.err()
@@ -137,7 +138,7 @@ async fn run_dash_download_inner(
     p: &DownloadParams,
     quality_rx: Option<tokio::sync::oneshot::Receiver<i32>>,
 ) -> Result<i64, DownloadError> {
-    rinf::debug_print!("[dash-download] task {} starting, url={}", p.task_id, p.url);
+    log_info!("[dash-download] task {} starting, url={}", p.task_id, p.url);
 
     let _ = p.db.update_task_status(&p.task_id, 5, "").await;
     let _ = p
@@ -381,7 +382,7 @@ async fn select_representation(
             .max_by_key(|(_, r)| r.bandwidth.unwrap_or(0))
             .map(|(i, _)| i)
             .ok_or_else(|| DownloadError::Other("no representations".to_string()))?;
-        rinf::debug_print!(
+        log_info!(
             "[dash-download] task {} auto-selected representation index {}",
             task_id,
             best
@@ -391,7 +392,7 @@ async fn select_representation(
 
     if let Some(rx) = quality_rx {
         if representations.len() <= 1 {
-            rinf::debug_print!(
+            log_info!(
                 "[dash-download] task {} only {} representation(s), skipping quality dialog",
                 task_id,
                 representations.len()
@@ -420,7 +421,7 @@ async fn select_representation(
         }
         .send_signal_to_dart();
 
-        rinf::debug_print!(
+        log_info!(
             "[dash-download] task {} sent {} quality options to Dart, waiting for selection (timeout={}s)",
             task_id,
             representations.len(),
@@ -443,7 +444,7 @@ async fn select_representation(
                                 representations.len()
                             ))
                         })?;
-                        rinf::debug_print!(
+                        log_info!(
                             "[dash-download] task {} user selected representation {}",
                             task_id,
                             idx
@@ -451,14 +452,14 @@ async fn select_representation(
                         Ok(idx as usize)
                     }
                     Ok(Err(_)) => {
-                        rinf::debug_print!(
+                        log_info!(
                             "[dash-download] task {} quality channel closed, auto-selecting best",
                             task_id
                         );
                         auto_select_best()
                     }
                     Err(_) => {
-                        rinf::debug_print!(
+                        log_info!(
                             "[dash-download] task {} quality selection timed out ({}s), auto-selecting best",
                             task_id,
                             QUALITY_SELECTION_TIMEOUT_SECS
@@ -1126,7 +1127,7 @@ async fn download_segment_with_retry(
                         seg_idx, MAX_RETRIES, e
                     )));
                 }
-                rinf::debug_print!(
+                log_info!(
                     "[dash-download] task {} segment {} attempt {}/{} failed: {}",
                     ctx.task_id,
                     seg_idx,

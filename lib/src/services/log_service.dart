@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 
 /// 文件日志服务 — 将日志写入 exe 同级 logs/ 目录，按日期分文件。
 ///
@@ -20,8 +23,14 @@ class LogService {
   /// 自上次 flush 以来是否有新数据写入
   bool _dirty = false;
 
-  /// 日志目录 — exe 同级 logs/
+  /// 日志保留天数
+  static const int _retentionDays = 7;
+
+  /// 日志目录
   late final Directory _logDir;
+
+  /// 暴露日志目录路径，供导出日志等功能使用。
+  Directory get logDir => _logDir;
 
   /// 初始化日志服务。应在 main() 最开始调用。
   void init() {
@@ -34,6 +43,9 @@ class LogService {
     }
 
     _rotateSink();
+
+    // 启动时清理 7 天前的旧日志文件
+    _cleanupOldLogs();
 
     // 每 2 秒刷盘一次，确保崩溃前有足够日志。
     // 仅在有新数据写入时才调用 flushSync，避免空闲时无谓的磁盘 I/O。
@@ -79,6 +91,64 @@ class LogService {
       _raf?.flushSync();
       _dirty = false;
     } catch (_) {}
+  }
+
+  /// 将所有日志文件打包为 ZIP 压缩包保存到 [zipPath]。
+  ///
+  /// 打包前会先刷盘，确保最新日志已写入文件。
+  /// 返回打包的文件数量。
+  Future<int> exportLogs(String zipPath) async {
+    // 先刷盘，确保最新日志已写入
+    try {
+      _raf?.flushSync();
+      _dirty = false;
+    } catch (_) {}
+
+    if (!_logDir.existsSync()) return 0;
+
+    final logFiles = <File>[];
+    for (final entity in _logDir.listSync()) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path);
+      if (!name.startsWith('fluxdown_') || !name.endsWith('.log')) continue;
+      logFiles.add(entity);
+    }
+    if (logFiles.isEmpty) return 0;
+
+    // 按文件名排序（即按日期排序）
+    logFiles.sort((a, b) => p.basename(a.path).compareTo(p.basename(b.path)));
+
+    final zipBytes = _buildZip(logFiles);
+    await File(zipPath).writeAsBytes(zipBytes);
+    return logFiles.length;
+  }
+
+  /// 计算日志目录的总大小（字节）。
+  int get logDirSizeBytes {
+    if (!_logDir.existsSync()) return 0;
+    int total = 0;
+    for (final entity in _logDir.listSync()) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path);
+      if (!name.startsWith('fluxdown_') || !name.endsWith('.log')) continue;
+      try {
+        total += entity.lengthSync();
+      } catch (_) {}
+    }
+    return total;
+  }
+
+  /// 日志文件数量。
+  int get logFileCount {
+    if (!_logDir.existsSync()) return 0;
+    int count = 0;
+    for (final entity in _logDir.listSync()) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path);
+      if (!name.startsWith('fluxdown_') || !name.endsWith('.log')) continue;
+      count++;
+    }
+    return count;
   }
 
   /// 关闭日志服务
@@ -138,6 +208,29 @@ class LogService {
     return Directory('$exeDir${Platform.pathSeparator}logs');
   }
 
+  /// 清理超过 [_retentionDays] 天的 fluxdown_*.log 文件。
+  void _cleanupOldLogs() {
+    try {
+      if (!_logDir.existsSync()) return;
+      final cutoff = DateTime.now().subtract(Duration(days: _retentionDays));
+      for (final entity in _logDir.listSync()) {
+        if (entity is! File) continue;
+        final name = entity.uri.pathSegments.last;
+        if (!name.startsWith('fluxdown_') || !name.endsWith('.log')) continue;
+        try {
+          final modified = entity.lastModifiedSync();
+          if (modified.isBefore(cutoff)) {
+            entity.deleteSync();
+          }
+        } catch (_) {
+          // 单个文件清理失败不影响其他文件
+        }
+      }
+    } catch (_) {
+      // 清理失败不影响日志服务正常运行
+    }
+  }
+
   static String _pad2(int n) => n.toString().padLeft(2, '0');
   static String _pad3(int n) => n.toString().padLeft(3, '0');
 }
@@ -148,3 +241,143 @@ void logInfo(String tag, String message) =>
 
 void logError(String tag, String message, [Object? err, StackTrace? stack]) =>
     LogService.instance.error(tag, message, err, stack);
+
+// ══════════════════════════════════════════════════
+//  ZIP 构建（纯 Dart 标准库，零外部依赖）
+// ══════════════════════════════════════════════════
+
+final List<int> _crc32Table = () {
+  final table = List<int>.filled(256, 0);
+  for (int i = 0; i < 256; i++) {
+    int c = i;
+    for (int j = 0; j < 8; j++) {
+      c = (c & 1) != 0 ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c;
+  }
+  return table;
+}();
+
+int _crc32(List<int> data) {
+  int crc = 0xFFFFFFFF;
+  for (final b in data) {
+    crc = _crc32Table[(crc ^ b) & 0xFF] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF;
+}
+
+void _writeU16(BytesBuilder b, int v) {
+  b.addByte(v & 0xFF);
+  b.addByte((v >> 8) & 0xFF);
+}
+
+void _writeU32(BytesBuilder b, int v) {
+  b.addByte(v & 0xFF);
+  b.addByte((v >> 8) & 0xFF);
+  b.addByte((v >> 16) & 0xFF);
+  b.addByte((v >> 24) & 0xFF);
+}
+
+class _ZipCentralEntry {
+  final List<int> nameBytes;
+  final int crc;
+  final int compressedSize;
+  final int uncompressedSize;
+  final int localOffset;
+  final int dosTime;
+  final int dosDate;
+
+  _ZipCentralEntry({
+    required this.nameBytes,
+    required this.crc,
+    required this.compressedSize,
+    required this.uncompressedSize,
+    required this.localOffset,
+    required this.dosTime,
+    required this.dosDate,
+  });
+}
+
+Uint8List _buildZip(List<File> files) {
+  final out = BytesBuilder(copy: false);
+  final centralEntries = <_ZipCentralEntry>[];
+
+  for (final file in files) {
+    final name = p.basename(file.path);
+    final nameBytes = utf8.encode(name);
+    final rawData = file.readAsBytesSync();
+    final crc = _crc32(rawData);
+    final compressed = ZLibEncoder(raw: true, level: 6).convert(rawData);
+
+    // DOS 日期时间
+    final mod = file.lastModifiedSync();
+    final dosTime = (mod.hour << 11) | (mod.minute << 5) | (mod.second ~/ 2);
+    final dosDate = ((mod.year - 1980) << 9) | (mod.month << 5) | mod.day;
+
+    final localOffset = out.length;
+
+    // Local file header
+    _writeU32(out, 0x04034b50); // signature
+    _writeU16(out, 20); // version needed
+    _writeU16(out, 0); // flags
+    _writeU16(out, 8); // compression: deflate
+    _writeU16(out, dosTime);
+    _writeU16(out, dosDate);
+    _writeU32(out, crc);
+    _writeU32(out, compressed.length);
+    _writeU32(out, rawData.length);
+    _writeU16(out, nameBytes.length);
+    _writeU16(out, 0); // extra length
+    out.add(nameBytes);
+    out.add(compressed);
+
+    centralEntries.add(
+      _ZipCentralEntry(
+        nameBytes: nameBytes,
+        crc: crc,
+        compressedSize: compressed.length,
+        uncompressedSize: rawData.length,
+        localOffset: localOffset,
+        dosTime: dosTime,
+        dosDate: dosDate,
+      ),
+    );
+  }
+
+  final centralStart = out.length;
+
+  for (final e in centralEntries) {
+    _writeU32(out, 0x02014b50); // signature
+    _writeU16(out, 20); // version made by
+    _writeU16(out, 20); // version needed
+    _writeU16(out, 0); // flags
+    _writeU16(out, 8); // compression: deflate
+    _writeU16(out, e.dosTime);
+    _writeU16(out, e.dosDate);
+    _writeU32(out, e.crc);
+    _writeU32(out, e.compressedSize);
+    _writeU32(out, e.uncompressedSize);
+    _writeU16(out, e.nameBytes.length);
+    _writeU16(out, 0); // extra length
+    _writeU16(out, 0); // comment length
+    _writeU16(out, 0); // disk number
+    _writeU16(out, 0); // internal attributes
+    _writeU32(out, 0); // external attributes
+    _writeU32(out, e.localOffset);
+    out.add(e.nameBytes);
+  }
+
+  final centralSize = out.length - centralStart;
+
+  // End of central directory
+  _writeU32(out, 0x06054b50);
+  _writeU16(out, 0); // disk number
+  _writeU16(out, 0); // central dir start disk
+  _writeU16(out, centralEntries.length);
+  _writeU16(out, centralEntries.length);
+  _writeU32(out, centralSize);
+  _writeU32(out, centralStart);
+  _writeU16(out, 0); // comment length
+
+  return out.toBytes();
+}

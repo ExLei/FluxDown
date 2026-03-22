@@ -297,6 +297,12 @@ CREATE TABLE queues (
 - HEAD 请求 → GET Range:0-0 降级 → 文件名解析（URL / Content-Disposition）
 - 检测 Accept-Ranges 支持
 
+### logger.rs — 全局文件日志
+- 与 Dart 端 `LogService` 写入同一目录、同一文件（`fluxdown_YYYY-MM-DD.log`）
+- 启动时自动清理 7 天前的日志文件
+- 提供 `log_info!` / `log_error!` 宏，用法同 `format!()`
+- 使用前需在文件顶部 `use crate::logger::log_info;`
+
 ## 浏览器扩展（fluxDown/）
 
 ### 通信架构
@@ -379,7 +385,7 @@ NMH 注册：
 | `update_service.dart` | GitHub Releases 检查，启动后 5s 静默检查，弹窗展示 changelog |
 | `analytics_service.dart` | GA4 匿名埋点：启动/退出/创建/完成/失败/视图切换 |
 | `feedback_service.dart` | POST GitHub Issues API 提交反馈（含 OS/版本/语言系统信息） |
-| `log_service.dart` | 日志写入 `logs/flux_down.log`，10MB 轮转，保留最近 3 个文件 |
+| `log_service.dart` | 按日期写入 `fluxdown_YYYY-MM-DD.log`，启动时清理 7 天前日志，提供 `logInfo()`/`logError()` 全局函数 |
 | `open_folder.dart` | 跨平台打开文件夹（调用系统文件管理器） |
 | `windows_toast_helper.dart` | Windows Toast 通知底层辅助（win32_toast 封装） |
 
@@ -460,6 +466,50 @@ NMH 注册：
 - **框架**: WXT 0.20+，TypeScript（strict: true, target: ESNext）
 - **通信方式**: Native Messaging Host（NMH）协议，stdin/stdout 与 IPC 通信（Windows Named Pipe / Linux Unix socket）
 - **存储**: chrome.storage.sync（设置）+ chrome.storage.local（统计/主题）
+
+## 日志系统
+
+Dart 和 Rust 两端写入同一目录、同一日志文件，统一格式。
+
+| 项目 | 说明 |
+|------|------|
+| 目录 | Linux `~/.local/share/fluxdown/logs/`，Windows exe 同级 `logs/` |
+| 文件名 | `fluxdown_YYYY-MM-DD.log`（按日期自动分割） |
+| 清理 | 两端启动时各自清理 7 天前的 `fluxdown_*.log` |
+| 格式 | `HH:MM:SS.mmm [Tag] message` |
+
+### Dart 端用法
+
+```dart
+import '../services/log_service.dart';
+
+const _tag = 'MyModule';
+
+logInfo(_tag, 'something happened: $value');
+logError(_tag, 'failed', error, stackTrace);
+```
+
+### Rust 端用法
+
+```rust
+use crate::logger::log_info;
+
+log_info!("[my-module] something happened: {}", value);
+log_error!("[my-module] failed: {}", e);  // 立即刷盘
+```
+
+> **注意**: Rust 2024 edition 不支持 `#[macro_use]`，每个文件需显式 `use crate::logger::log_info;`。
+
+### 日志导出
+
+设置页「关于」分类中有导出按钮，打包为 ZIP 压缩包（纯 Dart 标准库实现，零外部依赖）：
+
+```dart
+// 导出为 zip（返回打包的文件数量）
+final count = await LogService.instance.exportLogs('/path/to/fluxdown_logs.zip');
+final sizeBytes = LogService.instance.logDirSizeBytes;
+final fileCount = LogService.instance.logFileCount;
+```
 
 ## 禁止事项（Anti-Patterns）
 

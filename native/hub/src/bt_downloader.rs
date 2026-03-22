@@ -20,24 +20,25 @@
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent,
-    PeerConnectionOptions, Session, SessionOptions, SessionPersistenceConfig,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ManagedTorrent, PeerConnectionOptions,
+    Session, SessionOptions, SessionPersistenceConfig,
 };
 
 /// Alias for librqbit's `BtHandle` (`Arc<ManagedTorrent>`).
 /// The upstream type is not re-exported, so we define it locally.
 pub type BtHandle = Arc<ManagedTorrent>;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::db::Db;
 use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo};
+use crate::logger::log_info;
 
 // ---------------------------------------------------------------------------
 // Public helpers
@@ -372,49 +373,51 @@ impl SharedBtSession {
         let enable_upnp = bt_config.enable_upnp;
 
         let save_dir = default_save_dir.to_owned();
-        let session = rt.block_on(async {
-            let opts = SessionOptions {
-                disable_dht: !enable_dht,
-                disable_dht_persistence: !enable_dht,
-                listen_port_range: Some(port_start..port_end.saturating_add(1)),
-                enable_upnp_port_forwarding: enable_upnp,
-                trackers,
-                ratelimits: librqbit::limits::LimitsConfig {
-                    download_bps,
-                    upload_bps: None,
-                },
-                // Optimised peer connection parameters.
-                peer_opts: Some(PeerConnectionOptions {
-                    // Slightly shorter connect timeout — drop unresponsive
-                    // peers faster so we can try others sooner.
-                    connect_timeout: Some(Duration::from_secs(10)),
-                    // Generous read/write timeout to avoid dropping slow
-                    // but otherwise healthy peers.
-                    read_write_timeout: Some(Duration::from_secs(20)),
+        let session = rt
+            .block_on(async {
+                let opts = SessionOptions {
+                    disable_dht: !enable_dht,
+                    disable_dht_persistence: !enable_dht,
+                    listen_port_range: Some(port_start..port_end.saturating_add(1)),
+                    enable_upnp_port_forwarding: enable_upnp,
+                    trackers,
+                    ratelimits: librqbit::limits::LimitsConfig {
+                        download_bps,
+                        upload_bps: None,
+                    },
+                    // Optimised peer connection parameters.
+                    peer_opts: Some(PeerConnectionOptions {
+                        // Slightly shorter connect timeout — drop unresponsive
+                        // peers faster so we can try others sooner.
+                        connect_timeout: Some(Duration::from_secs(10)),
+                        // Generous read/write timeout to avoid dropping slow
+                        // but otherwise healthy peers.
+                        read_write_timeout: Some(Duration::from_secs(20)),
+                        ..Default::default()
+                    }),
+                    // Enable persistence so that session.json and per-torrent
+                    // .bitv (piece bitfield) files are written to disk.
+                    persistence: Some(SessionPersistenceConfig::Json {
+                        folder: Some(persistence_folder),
+                    }),
+                    // Fast-resume: persist piece completion state so that
+                    // paused/restarted torrents can skip re-verification.
+                    // Requires `persistence` to be set to take effect.
+                    fastresume: true,
+                    // Buffer writes in memory before flushing to disk.  Reduces
+                    // I/O contention from many small pieces.  64 MiB is enough
+                    // for high-speed connections while keeping RSS reasonable
+                    // (was 128 — saved ~64 MB of potential RSS).
+                    defer_writes_up_to: Some(64),
+                    // Limit concurrent torrent initialisation to 3 to prevent
+                    // DHT/tracker storms when many BT tasks start at once.
+                    concurrent_init_limit: Some(3),
                     ..Default::default()
-                }),
-                // Enable persistence so that session.json and per-torrent
-                // .bitv (piece bitfield) files are written to disk.
-                persistence: Some(SessionPersistenceConfig::Json {
-                    folder: Some(persistence_folder),
-                }),
-                // Fast-resume: persist piece completion state so that
-                // paused/restarted torrents can skip re-verification.
-                // Requires `persistence` to be set to take effect.
-                fastresume: true,
-                // Buffer writes in memory before flushing to disk.  Reduces
-                // I/O contention from many small pieces.  64 MiB is enough
-                // for high-speed connections while keeping RSS reasonable
-                // (was 128 — saved ~64 MB of potential RSS).
-                defer_writes_up_to: Some(64),
-                // Limit concurrent torrent initialisation to 3 to prevent
-                // DHT/tracker storms when many BT tasks start at once.
-                concurrent_init_limit: Some(3),
-                ..Default::default()
-            };
+                };
 
-            Session::new_with_opts(save_dir.into(), opts).await
-        }).map_err(|e| DownloadError::Other(format!("BT session init failed: {e}")))?;
+                Session::new_with_opts(save_dir.into(), opts).await
+            })
+            .map_err(|e| DownloadError::Other(format!("BT session init failed: {e}")))?;
 
         // Startup cleanup: remove any finished torrents that were
         // retained in persistence from a previous app session.
@@ -432,12 +435,16 @@ impl SharedBtSession {
         {
             let finished_ids: Vec<usize> = session.with_torrents(|iter| {
                 iter.filter_map(|(id, handle)| {
-                    if handle.stats().finished { Some(id) } else { None }
+                    if handle.stats().finished {
+                        Some(id)
+                    } else {
+                        None
+                    }
                 })
                 .collect()
             });
             if !finished_ids.is_empty() {
-                rinf::debug_print!(
+                log_info!(
                     "[BT] startup cleanup: removing {} finished torrent(s) from persistence",
                     finished_ids.len()
                 );
@@ -447,7 +454,7 @@ impl SharedBtSession {
             }
         }
 
-        rinf::debug_print!(
+        log_info!(
             "[BT] shared session created (DHT={}, UPnP={}, ports={}-{}, {} trackers, speed_limit={} B/s, worker_threads={}, persistence=on)",
             enable_dht,
             enable_upnp,
@@ -473,7 +480,7 @@ impl SharedBtSession {
     pub fn set_speed_limit(&self, bps: u64) {
         let limit = NonZeroU32::new(bps.min(u32::MAX as u64) as u32);
         self.session.ratelimits.set_download_bps(limit);
-        rinf::debug_print!("[BT] shared session speed limit updated to {} B/s", bps);
+        log_info!("[BT] shared session speed limit updated to {} B/s", bps);
     }
 
     /// Get an `Arc<Session>` handle for adding torrents.
@@ -488,7 +495,10 @@ impl SharedBtSession {
 
     /// Store a torrent handle for a task so it can be paused/resumed later.
     pub async fn store_handle(&self, task_id: &str, handle: BtHandle) {
-        self.handles.lock().await.insert(task_id.to_string(), handle);
+        self.handles
+            .lock()
+            .await
+            .insert(task_id.to_string(), handle);
     }
 
     /// Pause a BT torrent by task_id.  The handle stays cached so that
@@ -500,11 +510,12 @@ impl SharedBtSession {
         if let Some(handle) = handle {
             // If already paused or initializing, ignore silently.
             if !handle.is_paused() {
-                self.session.pause(&handle).await.map_err(|e| {
-                    DownloadError::Other(format!("BT pause failed: {e}"))
-                })?;
+                self.session
+                    .pause(&handle)
+                    .await
+                    .map_err(|e| DownloadError::Other(format!("BT pause failed: {e}")))?;
             }
-            rinf::debug_print!("[BT] task={} paused via session API", short_id(task_id));
+            log_info!("[BT] task={} paused via session API", short_id(task_id));
         }
         Ok(())
     }
@@ -517,10 +528,11 @@ impl SharedBtSession {
         let handle = self.handles.lock().await.get(task_id).cloned();
         if let Some(handle) = handle {
             if handle.is_paused() {
-                self.session.unpause(&handle).await.map_err(|e| {
-                    DownloadError::Other(format!("BT unpause failed: {e}"))
-                })?;
-                rinf::debug_print!("[BT] task={} resumed via session API", short_id(task_id));
+                self.session
+                    .unpause(&handle)
+                    .await
+                    .map_err(|e| DownloadError::Other(format!("BT unpause failed: {e}")))?;
+                log_info!("[BT] task={} resumed via session API", short_id(task_id));
             }
             Ok(Some(handle))
         } else {
@@ -533,7 +545,7 @@ impl SharedBtSession {
     /// Pauses all active torrents, then shuts down the runtime with a timeout.
     /// Called when the application exits to ensure clean resource release.
     pub fn shutdown(&self) {
-        rinf::debug_print!("[BT] shutting down shared session...");
+        log_info!("[BT] shutting down shared session...");
         // Use the runtime to gracefully close the session.  The session's
         // drop will attempt to persist DHT state and piece bitfields.
         // We give it a generous timeout to allow disk writes to complete.
@@ -547,13 +559,17 @@ impl SharedBtSession {
                 if !handle.is_paused()
                     && let Err(e) = self.session.pause(handle).await
                 {
-                    rinf::debug_print!("[BT] shutdown: failed to pause task {}: {}", short_id(tid), e);
+                    log_info!(
+                        "[BT] shutdown: failed to pause task {}: {}",
+                        short_id(tid),
+                        e
+                    );
                 }
             }
         });
         // The Runtime::drop will be called after this, which blocks until
         // all spawned tasks finish (or the runtime forces them to stop).
-        rinf::debug_print!("[BT] shared session shutdown complete");
+        log_info!("[BT] shared session shutdown complete");
     }
 
     /// Permanently delete a torrent from the session, removing persistence
@@ -570,9 +586,17 @@ impl SharedBtSession {
         if let Some(handle) = handle {
             let torrent_id = handle.id();
             if let Err(e) = self.session.delete(torrent_id.into(), delete_files).await {
-                rinf::debug_print!("[BT] task={} session.delete error: {}", short_id(task_id), e);
+                log_info!(
+                    "[BT] task={} session.delete error: {}",
+                    short_id(task_id),
+                    e
+                );
             } else {
-                rinf::debug_print!("[BT] task={} deleted from session (delete_files={})", short_id(task_id), delete_files);
+                log_info!(
+                    "[BT] task={} deleted from session (delete_files={})",
+                    short_id(task_id),
+                    delete_files
+                );
             }
             true
         } else {
@@ -588,7 +612,7 @@ impl SharedBtSession {
             .lock()
             .await
             .insert(task_id.to_string(), delete_files);
-        rinf::debug_print!(
+        log_info!(
             "[BT] task={} pending delete registered (delete_files={})",
             short_id(task_id),
             delete_files
@@ -672,7 +696,10 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
     let task_id = params.task_id.clone();
 
     // 1. Switch to "preparing" status
-    let _ = params.db.update_task_status(&task_id, STATUS_PREPARING, "").await;
+    let _ = params
+        .db
+        .update_task_status(&task_id, STATUS_PREPARING, "")
+        .await;
     let _ = params
         .progress_tx
         .send(ProgressUpdate {
@@ -686,7 +713,10 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
         })
         .await;
 
-    rinf::debug_print!("[BT] task={} starting bt download (shared session)...", short_id(&task_id));
+    log_info!(
+        "[BT] task={} starting bt download (shared session)...",
+        short_id(&task_id)
+    );
 
     // 2. Run the actual BT download on the shared multi-thread runtime.
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -728,17 +758,18 @@ pub async fn run_bt_download(params: BtDownloadParams) -> Result<(), DownloadErr
         shared_bt,
         existing_handle,
     };
-    let result = bt_runtime.spawn(async move {
-        bt_download_inner(inner_params).await
-    })
-    .await;
+    let result = bt_runtime
+        .spawn(async move { bt_download_inner(inner_params).await })
+        .await;
 
     cancel_watcher.abort();
 
     match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e),
-        Err(join_err) => Err(DownloadError::Other(format!("BT task panicked: {join_err}"))),
+        Err(join_err) => Err(DownloadError::Other(format!(
+            "BT task panicked: {join_err}"
+        ))),
     }
 }
 
@@ -936,8 +967,7 @@ fn build_piece_scatter_segments(
         //
         // The perturbation ensures segments don't all show the same %.
         let perturbation = ((i as f64 + 1.0) * 0.618033988749895).fract() - 0.5;
-        let seg_ratio = (completion_ratio + perturbation * 0.3)
-            .clamp(0.0, 1.0);
+        let seg_ratio = (completion_ratio + perturbation * 0.3).clamp(0.0, 1.0);
 
         // Snap to exact 0 or 1 when close to boundaries
         let seg_dl_pieces = if completion_ratio <= 0.001 {
@@ -948,8 +978,8 @@ fn build_piece_scatter_segments(
             (seg_total_pieces as f64 * seg_ratio).round()
         };
 
-        let dl = ((seg_dl_pieces / seg_total_pieces.max(1) as f64) * seg_size as f64)
-            .round() as i64;
+        let dl =
+            ((seg_dl_pieces / seg_total_pieces.max(1) as f64) * seg_size as f64).round() as i64;
 
         segs.push(SegmentProgressInfo {
             index: i,
@@ -970,11 +1000,9 @@ fn build_piece_scatter_segments(
         let mut remaining = diff.abs();
         for seg in &mut segs {
             let seg_size = seg.end_byte - seg.start_byte + 1;
-            let share = ((seg_size as f64 / total_bytes as f64) * abs_diff)
-                .round() as i64;
+            let share = ((seg_size as f64 / total_bytes as f64) * abs_diff).round() as i64;
             let adj = share.min(remaining);
-            seg.downloaded_bytes = (seg.downloaded_bytes + direction * adj)
-                .clamp(0, seg_size);
+            seg.downloaded_bytes = (seg.downloaded_bytes + direction * adj).clamp(0, seg_size);
             remaining -= adj;
             if remaining <= 0 {
                 break;
@@ -1048,7 +1076,10 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     // -----------------------------------------------------------------------
 
     let handle = if let Some(h) = existing_handle {
-        rinf::debug_print!("[BT] task={} reusing existing handle (resume)", short_id(&task_id));
+        log_info!(
+            "[BT] task={} reusing existing handle (resume)",
+            short_id(&task_id)
+        );
         // Handle was already unpaused by SharedBtSession::resume_task,
         // so we can go straight to the progress loop.
         h
@@ -1059,7 +1090,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             ..Default::default()
         };
 
-        rinf::debug_print!(
+        log_info!(
             "[BT] task={} adding torrent to shared session (metadata resolution may take a while)...",
             short_id(&task_id)
         );
@@ -1082,9 +1113,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     AddTorrent::from_bytes(Bytes::from(bytes.clone()))
                 }
             };
-            let result = session_for_add
-                .add_torrent(add_input, Some(add_opts))
-                .await;
+            let result = session_for_add.add_torrent(add_input, Some(add_opts)).await;
             // If delete_task was called while we were waiting for metadata
             // (handle not yet in `handles`, run_bt_download already returned
             // Err(Cancelled)), apply the pending delete now that we have the
@@ -1097,11 +1126,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     _ => None,
                 };
                 if let Some(id) = torrent_id {
-                    if let Some(del_files) =
-                        shared_bt_for_add.take_pending_delete(&task_id_for_add).await
+                    if let Some(del_files) = shared_bt_for_add
+                        .take_pending_delete(&task_id_for_add)
+                        .await
                     {
                         let _ = session_for_add.delete(id.into(), del_files).await;
-                        rinf::debug_print!(
+                        log_info!(
                             "[BT] task={} pending delete applied after add_torrent (delete_files={})",
                             short_id(&task_id_for_add),
                             del_files
@@ -1134,11 +1164,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                         .map_err(|e| DownloadError::Other(format!("BT add torrent failed: {e}")))?;
                     let h = match resp {
                         AddTorrentResponse::Added(_id, handle) => {
-                            rinf::debug_print!("[BT] task={} torrent added, id={}", short_id(&task_id), _id);
+                            log_info!("[BT] task={} torrent added, id={}", short_id(&task_id), _id);
                             handle
                         }
                         AddTorrentResponse::AlreadyManaged(_id, handle) => {
-                            rinf::debug_print!("[BT] task={} torrent already in session, id={}", short_id(&task_id), _id);
+                            log_info!("[BT] task={} torrent already in session, id={}", short_id(&task_id), _id);
                             // Unpause if it was paused from a previous session
                             if handle.is_paused() {
                                 let _ = session.unpause(&handle).await;
@@ -1154,7 +1184,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     break h;
                 }
                 _ = tokio::time::sleep(Duration::from_secs(2)) => {
-                    rinf::debug_print!("[BT] task={} still resolving metadata...", short_id(&task_id));
+                    log_info!("[BT] task={} still resolving metadata...", short_id(&task_id));
                     let _ = progress_tx
                         .send(ProgressUpdate {
                             task_id: task_id.clone(),
@@ -1188,9 +1218,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         }
     });
 
-    rinf::debug_print!(
+    log_info!(
         "[BT] task={} metadata resolved: name={}, total={} bytes",
-        short_id(&task_id), &resolved_name, total_bytes
+        short_id(&task_id),
+        &resolved_name,
+        total_bytes
     );
 
     // Extract file layout info and piece count from torrent metadata.
@@ -1207,7 +1239,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         })
         .unwrap_or_else(|_| (Vec::new(), 0));
 
-    rinf::debug_print!(
+    log_info!(
         "[BT] task={} files={}, total_pieces={}",
         short_id(&task_id),
         file_offsets.len(),
@@ -1217,7 +1249,9 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
     let _ = db
         .update_task_file_info(&task_id, &resolved_name, total_bytes)
         .await;
-    let _ = db.update_task_status(&task_id, STATUS_DOWNLOADING, "").await;
+    let _ = db
+        .update_task_status(&task_id, STATUS_DOWNLOADING, "")
+        .await;
 
     // Notify Dart of the transition to "downloading" with resolved info
     let init_progress = stats.progress_bytes as i64;
@@ -1258,7 +1292,10 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
         // so we only need to exit the loop here.  This avoids a double-pause
         // race where both the inner loop and the manager call session.pause().
         if cancelled.load(Ordering::SeqCst) {
-            rinf::debug_print!("[BT] task={} cancelled → exiting download loop", short_id(&task_id));
+            log_info!(
+                "[BT] task={} cancelled → exiting download loop",
+                short_id(&task_id)
+            );
             return Err(DownloadError::Cancelled);
         }
 
@@ -1278,12 +1315,13 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             .as_ref()
             .map(|l| l.snapshot.fetched_bytes as i64)
             .unwrap_or(0);
-        let progress = compute_bt_display_progress(checked_progress, fetched, total, stats.finished);
+        let progress =
+            compute_bt_display_progress(checked_progress, fetched, total, stats.finished);
 
         // Check for error — keep the handle cached so user can retry.
         if let Some(ref err) = stats.error {
             let msg = format!("BT error: {err}");
-            rinf::debug_print!("[BT] task={} error: {}", short_id(&task_id), &msg);
+            log_info!("[BT] task={} error: {}", short_id(&task_id), &msg);
             let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
             let _ = progress_tx
                 .send(ProgressUpdate {
@@ -1301,7 +1339,7 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
         // Check if finished
         if stats.finished {
-            rinf::debug_print!("[BT] task={} finished! total={}", short_id(&task_id), total);
+            log_info!("[BT] task={} finished! total={}", short_id(&task_id), total);
 
             let final_total = if total > 0 { total } else { progress };
             let _ = db.update_task_status(&task_id, STATUS_COMPLETED, "").await;
@@ -1381,12 +1419,23 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 librqbit::TorrentStatsState::Error => STATUS_ERROR,
             };
 
-            rinf::debug_print!(
+            log_info!(
                 "[BT] task={} state={:?} progress={}/{} (checked={}, fetched={}) pieces={}/{} down={} B/s up={} B/s peers(live={} connecting={} queued={} seen={} dead={})",
-                short_id(&task_id), stats.state, progress, total,
-                checked_progress, fetched,
-                downloaded_pieces, total_pieces, speed_bps, upload_speed_bps,
-                peers_live, peers_connecting, peers_queued, peers_seen, peers_dead
+                short_id(&task_id),
+                stats.state,
+                progress,
+                total,
+                checked_progress,
+                fetched,
+                downloaded_pieces,
+                total_pieces,
+                speed_bps,
+                upload_speed_bps,
+                peers_live,
+                peers_connecting,
+                peers_queued,
+                peers_seen,
+                peers_dead
             );
 
             let seg_details = build_bt_segments(
@@ -1462,8 +1511,8 @@ mod tests {
     /// enclosing tokio::spawn closure panics before the natural end.
     #[tokio::test]
     async fn inflight_guard_decrements_on_task_panic() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Minimal stand-in for SharedBtSession: just the counter.
         let counter = Arc::new(AtomicUsize::new(0));
@@ -1503,8 +1552,8 @@ mod tests {
     /// Verify normal (non-panic) path: guard also decrements on clean exit.
     #[tokio::test]
     async fn inflight_guard_decrements_on_normal_exit() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
 
         let counter = Arc::new(AtomicUsize::new(0));
 

@@ -8,6 +8,7 @@ use crate::bt_downloader::{self, BtConfig};
 use crate::db::Db;
 use crate::download_manager::{self, DownloadManager, DownloadManagerConfig, TaskDone};
 use crate::file_association;
+use crate::logger::log_info;
 use crate::native_messaging::{self};
 use crate::protocol_registry;
 use crate::proxy_config::ProxyConfig;
@@ -103,14 +104,14 @@ pub async fn run(db_dir: PathBuf) {
     let db = match Db::open(&db_dir) {
         Ok(db) => db,
         Err(e) => {
-            rinf::debug_print!("Failed to open database: {}", e);
+            log_info!("Failed to open database: {}", e);
             return;
         }
     };
 
     // Initialize default config values in DB (no-op if already set)
     if let Err(e) = db.init_default_config(&default_save_dir()).await {
-        rinf::debug_print!("Failed to init default config: {}", e);
+        log_info!("Failed to init default config: {}", e);
     }
 
     // Load persisted config to initialize the manager with correct limits.
@@ -123,7 +124,7 @@ pub async fn run(db_dir: PathBuf) {
         user_agent,
         default_segments,
     ) = load_initial_config(&db).await;
-    rinf::debug_print!(
+    log_info!(
         "[actor] proxy config: mode={}, type={}, host={}, port={}",
         proxy_config.mode.as_str(),
         proxy_config.proxy_type.as_str(),
@@ -135,11 +136,11 @@ pub async fn run(db_dir: PathBuf) {
     if bt_config.custom_trackers.trim().is_empty() {
         let defaults = bt_downloader::default_tracker_list();
         if let Err(e) = db.set_config("bt_custom_trackers", &defaults).await {
-            rinf::debug_print!("[actor] failed to save default trackers: {}", e);
+            log_info!("[actor] failed to save default trackers: {}", e);
         }
         bt_config.custom_trackers = defaults;
     }
-    rinf::debug_print!(
+    log_info!(
         "[actor] init config: max_concurrent={}, speed_limit_bps={}, save_dir={}, bt_config={:?}",
         max_concurrent,
         speed_limit_bps,
@@ -162,7 +163,7 @@ pub async fn run(db_dir: PathBuf) {
     ) {
         Ok(m) => m,
         Err(e) => {
-            rinf::debug_print!("Failed to create download manager: {}", e);
+            log_info!("Failed to create download manager: {}", e);
             return;
         }
     };
@@ -182,6 +183,15 @@ pub async fn run(db_dir: PathBuf) {
         Some(rx) => rx,
         None => {
             // Should never happen — take_done_rx returns Some on first call
+            let (_tx, rx) = mpsc::channel(1);
+            rx
+        }
+    };
+
+    // Channel for delayed auto-retry of failed tasks (stall / network errors).
+    let mut retry_rx: mpsc::Receiver<String> = match manager.take_retry_rx() {
+        Some(rx) => rx,
+        None => {
             let (_tx, rx) = mpsc::channel(1);
             rx
         }
@@ -220,10 +230,10 @@ pub async fn run(db_dir: PathBuf) {
     tokio::task::spawn_blocking(|| {
         if !protocol_registry::is_registered() {
             if let Err(e) = protocol_registry::register() {
-                rinf::debug_print!("[actor] auto-register fluxdown:// protocol failed: {}", e);
+                log_info!("[actor] auto-register fluxdown:// protocol failed: {}", e);
             }
         } else {
-            rinf::debug_print!("[actor] fluxdown:// protocol already registered");
+            log_info!("[actor] fluxdown:// protocol already registered");
         }
     });
 
@@ -231,11 +241,11 @@ pub async fn run(db_dir: PathBuf) {
     // Only re-registers when the registry is missing, incomplete, or stale (exe path changed).
     tokio::task::spawn_blocking(|| {
         if !crate::nmh_registry::needs_update() {
-            rinf::debug_print!("[actor] NMH already registered and up to date");
+            log_info!("[actor] NMH already registered and up to date");
             return;
         }
         if let Err(e) = crate::nmh_registry::register() {
-            rinf::debug_print!("[actor] NMH registration failed: {}", e);
+            log_info!("[actor] NMH registration failed: {}", e);
         }
     });
 
@@ -256,7 +266,7 @@ pub async fn run(db_dir: PathBuf) {
             }
             Some(signal) = batch_create_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!(
+                log_info!(
                     "[actor] batch create: {} entries, save_dir={}, segments={}",
                     msg.entries.len(), msg.save_dir, msg.segments,
                 );
@@ -281,7 +291,7 @@ pub async fn run(db_dir: PathBuf) {
             }
             Some(signal) = batch_control_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!(
+                log_info!(
                     "[actor] batch control: {} tasks, action={}",
                     msg.task_ids.len(), msg.action,
                 );
@@ -302,31 +312,31 @@ pub async fn run(db_dir: PathBuf) {
                 let msg = signal.message;
                 // Persist to DB first.
                 if let Err(e) = db.set_config(&msg.key, &msg.value).await {
-                    rinf::debug_print!("Failed to save config: {}", e);
+                    log_info!("Failed to save config: {}", e);
                 }
                 // Notify DownloadManager for runtime-effective settings.
                 match msg.key.as_str() {
                     "max_concurrent_tasks" => {
                         if let Ok(v) = msg.value.parse::<usize>() {
-                            rinf::debug_print!("[actor] updating max_concurrent to {}", v);
+                            log_info!("[actor] updating max_concurrent to {}", v);
                             manager.set_max_concurrent(v).await;
                         }
                     }
                     "speed_limit_bytes" => {
                         if let Ok(v) = msg.value.parse::<u64>() {
-                            rinf::debug_print!("[actor] updating speed_limit to {} B/s", v);
+                            log_info!("[actor] updating speed_limit to {} B/s", v);
                             manager.set_speed_limit(v);
                         }
                     }
                     "default_save_dir" => {
-                        rinf::debug_print!("[actor] updating default_save_dir to {}", msg.value);
+                        log_info!("[actor] updating default_save_dir to {}", msg.value);
                         manager.set_default_save_dir(msg.value);
                     }
                     // BT config keys — update in-memory BtConfig and invalidate
                     // the current session so the next BT download picks up changes.
                     "bt_enable_dht" | "bt_enable_upnp" | "bt_port_start"
                     | "bt_port_end" | "bt_custom_trackers" => {
-                        rinf::debug_print!("[actor] BT config changed: {}={}", msg.key, msg.value);
+                        log_info!("[actor] BT config changed: {}={}", msg.key, msg.value);
                         // Reload the full BT config from DB to stay consistent.
                         let all_cfg = db.get_all_config().await.unwrap_or_default();
                         let new_bt = BtConfig {
@@ -360,22 +370,22 @@ pub async fn run(db_dir: PathBuf) {
                     // and rebuild the HTTP client.
                     "proxy_mode" | "proxy_type" | "proxy_host" | "proxy_port"
                     | "proxy_username" | "proxy_password" | "proxy_no_list" => {
-                        rinf::debug_print!("[actor] proxy config changed: {}={}", msg.key, msg.value);
+                        log_info!("[actor] proxy config changed: {}={}", msg.key, msg.value);
                         let all_cfg = db.get_all_config().await.unwrap_or_default();
                         let new_proxy = ProxyConfig::from_config_map(&all_cfg);
                         if let Err(e) = manager.set_proxy_config(new_proxy) {
-                            rinf::debug_print!("[actor] failed to apply proxy config: {}", e);
+                            log_info!("[actor] failed to apply proxy config: {}", e);
                         }
                     }
                     "global_user_agent" => {
-                        rinf::debug_print!("[actor] user_agent changed: {}", msg.value);
+                        log_info!("[actor] user_agent changed: {}", msg.value);
                         if let Err(e) = manager.set_user_agent(msg.value) {
-                            rinf::debug_print!("[actor] failed to apply user_agent: {}", e);
+                            log_info!("[actor] failed to apply user_agent: {}", e);
                         }
                     }
                     "default_segments" => {
                         if let Ok(v) = msg.value.parse::<i32>() {
-                            rinf::debug_print!("[actor] updating default_segments to {}", v);
+                            log_info!("[actor] updating default_segments to {}", v);
                             manager.set_default_segments(v);
                         }
                     }
@@ -392,13 +402,13 @@ pub async fn run(db_dir: PathBuf) {
                         ConfigLoaded { entries }.send_signal_to_dart();
                     }
                     Err(e) => {
-                        rinf::debug_print!("Failed to load config: {}", e);
+                        log_info!("Failed to load config: {}", e);
                     }
                 }
             }
             // --- Native Messaging: browser extension download requests ---
             Some(req) = native_msg_rx.recv() => {
-                rinf::debug_print!(
+                log_info!(
                     "[actor] external download request from browser: url={}, cookies_len={}, headers={:?}",
                     req.url,
                     req.cookies.len(),
@@ -426,7 +436,7 @@ pub async fn run(db_dir: PathBuf) {
                 let msg = signal.message;
                 // 取出缓存的额外请求头
                 let extra_headers = ext_headers_cache.remove(&msg.url).unwrap_or_default();
-                rinf::debug_print!(
+                log_info!(
                     "[actor] user confirmed external download: url={}, cookies_len={}, extra_headers={}",
                     msg.url,
                     msg.cookies.len(),
@@ -441,22 +451,22 @@ pub async fn run(db_dir: PathBuf) {
             // --- Named queue management ---
             Some(signal) = create_queue_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!("[actor] CreateQueue: name={}", msg.name);
+                log_info!("[actor] CreateQueue: name={}", msg.name);
                 manager.create_queue(msg.name, msg.speed_limit_kbps, msg.max_concurrent, msg.default_save_dir, msg.default_segments, msg.default_user_agent).await;
             }
             Some(signal) = update_queue_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!("[actor] UpdateQueue: id={}", msg.queue_id);
+                log_info!("[actor] UpdateQueue: id={}", msg.queue_id);
                 manager.update_queue(msg.queue_id, msg.name, msg.speed_limit_kbps, msg.max_concurrent, msg.default_save_dir, msg.default_segments, msg.default_user_agent).await;
             }
             Some(signal) = delete_queue_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!("[actor] DeleteQueue: id={}", msg.queue_id);
+                log_info!("[actor] DeleteQueue: id={}", msg.queue_id);
                 manager.delete_queue(msg.queue_id).await;
             }
             Some(signal) = move_task_queue_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!("[actor] MoveTaskToQueue: task={}, queue={}", msg.task_id, msg.queue_id);
+                log_info!("[actor] MoveTaskToQueue: task={}, queue={}", msg.task_id, msg.queue_id);
                 manager.move_task_to_queue(msg.task_id, msg.queue_id).await;
             }
             Some(_) = all_queues_recv.recv() => {
@@ -464,6 +474,17 @@ pub async fn run(db_dir: PathBuf) {
             }
             Some(done) = done_rx.recv() => {
                 manager.on_task_done(&done.task_id, done.generation).await;
+            }
+            // --- Auto-retry for stalled/failed tasks ---
+            Some(task_id) = retry_rx.recv() => {
+                // 安全检查：仅在任务仍处于 error 状态时才自动恢复。
+                // 如果用户已手动暂停、恢复或删除了该任务，跳过重试。
+                if manager.is_task_in_error(&task_id).await {
+                    log_info!("[actor] auto-retry: resuming task {}", task_id);
+                    manager.resume_task(&task_id).await;
+                } else {
+                    log_info!("[actor] auto-retry: skipping task {} (no longer in error state)", task_id);
+                }
             }
             // --- Auto-update signals ---
             Some(signal) = check_update_recv.recv() => {
@@ -473,7 +494,7 @@ pub async fn run(db_dir: PathBuf) {
                         updater::check(&version)
                     );
                     if futures_util::FutureExt::catch_unwind(result).await.is_err() {
-                        rinf::debug_print!("[updater] check panicked for version={}", version);
+                        log_info!("[updater] check panicked for version={}", version);
                         UpdateCheckResult {
                             has_update: false,
                             latest_version: String::new(),
@@ -497,7 +518,7 @@ pub async fn run(db_dir: PathBuf) {
                 let path = signal.message.installer_path;
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = updater::install(&path) {
-                        rinf::debug_print!("[updater] install error: {}", e);
+                        log_info!("[updater] install error: {}", e);
                         // Report the error back to the UI so the user can retry
                         // (e.g. they cancelled the pkexec password dialog).
                         crate::signals::UpdateDownloadProgress {
@@ -517,14 +538,14 @@ pub async fn run(db_dir: PathBuf) {
             Some(signal) = set_file_assoc_recv.recv() => {
                 let enable = signal.message.enable;
                 tokio::task::spawn_blocking(move || {
-                    rinf::debug_print!("[actor] set_file_association enable={}", enable);
+                    log_info!("[actor] set_file_association enable={}", enable);
                     let result = if enable {
                         file_association::associate()
                     } else {
                         file_association::disassociate()
                     };
                     if let Err(e) = result {
-                        rinf::debug_print!("[actor] file association error: {}", e);
+                        log_info!("[actor] file association error: {}", e);
                     }
                     // Report current status back to Dart
                     FileAssociationStatus {
@@ -545,14 +566,14 @@ pub async fn run(db_dir: PathBuf) {
             Some(signal) = set_url_proto_recv.recv() => {
                 let enable = signal.message.enable;
                 tokio::task::spawn_blocking(move || {
-                    rinf::debug_print!("[actor] set_url_protocol enable={}", enable);
+                    log_info!("[actor] set_url_protocol enable={}", enable);
                     let result = if enable {
                         protocol_registry::register()
                     } else {
                         protocol_registry::unregister()
                     };
                     if let Err(e) = result {
-                        rinf::debug_print!("[actor] url protocol error: {}", e);
+                        log_info!("[actor] url protocol error: {}", e);
                     }
                     UrlProtocolStatus {
                         is_registered: protocol_registry::is_registered(),
@@ -591,7 +612,7 @@ pub async fn run(db_dir: PathBuf) {
                             }.send_signal_to_dart();
                         }
                         Err(e) => {
-                            rinf::debug_print!("[actor] system proxy detection error: {}", e);
+                            log_info!("[actor] system proxy detection error: {}", e);
                             SystemProxyInfo {
                                 detected: false,
                                 proxy_type: String::new(),
@@ -606,7 +627,7 @@ pub async fn run(db_dir: PathBuf) {
             // --- HLS quality selection ---
             Some(signal) = select_hls_quality_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!(
+                log_info!(
                     "[actor] HLS quality selected: task={}, index={}",
                     msg.task_id,
                     msg.selected_index,
@@ -616,13 +637,13 @@ pub async fn run(db_dir: PathBuf) {
             // --- Priority (Boost) download ---
             Some(signal) = set_priority_recv.recv() => {
                 let task_id = signal.message.task_id;
-                rinf::debug_print!("[actor] SetPriorityTask: task_id={}", task_id);
+                log_info!("[actor] SetPriorityTask: task_id={}", task_id);
                 manager.set_priority_task(task_id).await;
             }
             // --- Proxy connectivity test ---
             Some(signal) = test_proxy_recv.recv() => {
                 let msg = signal.message;
-                rinf::debug_print!(
+                log_info!(
                     "[actor] proxy test: type={}, host={}, port={}",
                     msg.proxy_type, msg.proxy_host, msg.proxy_port,
                 );

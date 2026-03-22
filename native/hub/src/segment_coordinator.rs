@@ -45,6 +45,7 @@ use rinf::RustSignal;
 
 use crate::db::Db;
 use crate::downloader::{DownloadError, ProgressUpdate, SegmentProgressInfo};
+use crate::logger::log_info;
 use crate::signals::SegmentSplitEvent;
 use crate::speed_limiter::SpeedLimiter;
 
@@ -74,7 +75,12 @@ const DB_SAVE_INTERVAL_SECS: u64 = 3;
 const UI_REPORT_INTERVAL_MS: u128 = 200;
 
 /// Retry constants for segment downloads.
-const MAX_RETRIES: u32 = 3;
+///
+/// 大文件下载（>1GB）最多 32 个分段并发，每个分段独立受 stall 检测。
+/// 网络抖动时任何一个分段重试耗尽都会导致整个任务失败。
+/// 5 次重试（含指数退避：2s/4s/8s/16s）给予充足的恢复窗口，
+/// 总容忍时间从 ~36s 提升到 ~80s，大幅降低大文件下载因瞬时网络问题而中断的概率。
+const MAX_RETRIES: u32 = 5;
 const RETRY_BASE_DELAY: Duration = Duration::from_secs(2);
 
 /// 单个 chunk 的读取超时（stall detection）。如果超过此时间没有收到任何数据，
@@ -238,7 +244,7 @@ pub async fn run_coordinated_download(
 
     // Verify the invariant: segment ranges must cover [0, total_bytes-1] exactly.
     if let Err(msg) = validate_coverage(&segments, total_bytes) {
-        rinf::debug_print!(
+        log_info!(
             "[coordinator] task {} segment coverage invalid: {}. Resetting all segments.",
             task_id,
             msg
@@ -260,7 +266,7 @@ pub async fn run_coordinated_download(
             Err(_) => 0,
         };
         if db_downloaded > 0 && (file_len == 0 || file_len < db_downloaded) {
-            rinf::debug_print!(
+            log_info!(
                 "[coordinator] task {} file integrity mismatch: file_len={}, db_downloaded={}. Resetting.",
                 task_id,
                 file_len,
@@ -533,7 +539,7 @@ pub async fn run_coordinated_download(
         .map(|s| (s.index, s.downloaded_bytes))
         .collect();
     if let Err(e) = db.flush_segments_progress(task_id, flush_updates).await {
-        rinf::debug_print!(
+        log_info!(
             "[coordinator] task {} final flush failed (non-fatal): {}",
             task_id,
             e
@@ -743,7 +749,7 @@ fn try_split_largest(
 
     segments.insert(new_index, new_seg);
 
-    rinf::debug_print!(
+    log_info!(
         "[coordinator] split segment {} → new segment {} at byte {} (parent remaining: {}→{})",
         best_idx,
         new_index,
@@ -830,7 +836,7 @@ fn try_proactive_split(
 
     segments.insert(new_index, new_seg);
 
-    rinf::debug_print!(
+    log_info!(
         "[coordinator] proactive split: segment {} → new pending segment {} at byte {}",
         best_idx,
         new_index,
@@ -940,7 +946,7 @@ async fn persist_segment_change(
                 )
                 .await
             {
-                rinf::debug_print!(
+                log_info!(
                     "[coordinator] persist_split failed: task={}, child={}, parent={}, err={}",
                     task_id,
                     seg.index,
@@ -960,7 +966,7 @@ async fn persist_segment_change(
                 )
                 .await
             {
-                rinf::debug_print!(
+                log_info!(
                     "[coordinator] upsert_segment failed: task={}, seg={}, err={}",
                     task_id,
                     seg.index,
@@ -980,7 +986,7 @@ async fn persist_segment_change(
             )
             .await
         {
-            rinf::debug_print!(
+            log_info!(
                 "[coordinator] upsert_segment failed: task={}, seg={}, err={}",
                 task_id,
                 seg.index,
@@ -1021,7 +1027,7 @@ fn send_split_event(
     }
     .send_signal_to_dart();
 
-    rinf::debug_print!(
+    log_info!(
         "[coordinator] split event sent: parent={} new_end={}, child={} [{}, {}], proactive={}, total={}",
         parent_idx,
         parent.end_byte,
@@ -1248,7 +1254,7 @@ async fn do_segment(
     {
         let resp_name = crate::downloader::extract_filename(resp.headers(), resp.url().as_str());
         if !resp_name.is_empty() && resp_name != "download" {
-            rinf::debug_print!(
+            log_info!(
                 "[coordinator-seg0] got better name from response: {} (cd={:?})",
                 resp_name,
                 cd

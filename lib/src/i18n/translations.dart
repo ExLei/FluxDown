@@ -643,6 +643,23 @@ class S {
       _t('访问官网获取更多信息', 'Visit website for more information');
 
   // ─────────────────────────────────────────────
+  // Settings — 日志导出
+  // ─────────────────────────────────────────────
+
+  String get logExport => _t('导出日志', 'Export Logs');
+  String get logExportDesc =>
+      _t('导出运行日志，方便提交反馈时附带', 'Export logs to attach when submitting feedback');
+  String logExportInfo(int count, String size) =>
+      _t('$count 个日志文件，共 $size', '$count log file(s), $size total');
+  String get logExportButton => _t('导出日志', 'Export Logs');
+  String get logOpenDirButton => _t('打开目录', 'Open Folder');
+  String logExportSuccess(int count) =>
+      _t('已导出 $count 个日志文件', 'Exported $count log file(s)');
+  String get logExportEmpty => _t('没有可导出的日志文件', 'No log files to export');
+  String get logExportFailed => _t('日志导出失败', 'Failed to export logs');
+  String get logSelectExportDir => _t('选择日志导出目录', 'Select Export Directory');
+
+  // ─────────────────────────────────────────────
   // 更新日志弹窗
   // ─────────────────────────────────────────────
 
@@ -708,6 +725,10 @@ class S {
     '代理,HTTP,SOCKS,SOCKS5,SOCKS4,网络代理,代理服务器',
     'proxy,HTTP,SOCKS,SOCKS5,SOCKS4,network,server',
   ).split(',')..addAll(['proxy', 'socks', 'http']);
+  List<String> get searchKeywordsLogExport => _t(
+    '日志,导出,反馈,调试,排查,log',
+    'log,export,feedback,debug,diagnostic',
+  ).split(',')..addAll(['log', 'export', 'debug']);
 
   // ─────────────────────────────────────────────
   // Feedback

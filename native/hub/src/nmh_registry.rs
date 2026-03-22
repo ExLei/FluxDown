@@ -13,11 +13,12 @@
 
 #[cfg(target_os = "windows")]
 mod inner {
+    use crate::logger::log_info;
     use serde::Serialize;
     use std::io;
     use std::path::{Path, PathBuf};
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 
     const NMH_NAME: &str = "com.fluxdown.nmh";
     const NMH_DESCRIPTION: &str = "FluxDown Native Messaging Host";
@@ -79,7 +80,7 @@ mod inner {
             if let Some(dir) = canonical.parent() {
                 let candidate = dir.join(NMH_EXE_NAME);
                 if candidate.exists() {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh_registry] found NMH exe next to app: {}",
                         candidate.display()
                     );
@@ -92,15 +93,13 @@ mod inner {
         // CARGO_MANIFEST_DIR is baked in at compile time for the hub crate.
         // hub crate is at <workspace>/native/hub, so workspace root is 2 levels up.
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let workspace_root = Path::new(manifest_dir)
-            .parent()
-            .and_then(|p| p.parent());
+        let workspace_root = Path::new(manifest_dir).parent().and_then(|p| p.parent());
 
         if let Some(ws) = workspace_root {
             for profile in &["debug", "release"] {
                 let candidate = ws.join("target").join(profile).join(NMH_EXE_NAME);
                 if candidate.exists() {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh_registry] found NMH exe in cargo target: {}",
                         candidate.display()
                     );
@@ -171,13 +170,13 @@ mod inner {
             let full_path = format!("{}\\{}", reg_path, NMH_NAME);
             let (key, _) = hkcu.create_subkey_with_flags(&full_path, KEY_WRITE)?;
             key.set_value("", &chromium_manifest)?;
-            rinf::debug_print!("[nmh_registry] registered at HKCU\\{}", full_path);
+            log_info!("[nmh_registry] registered at HKCU\\{}", full_path);
         }
 
         let firefox_reg = format!("{}\\{}", r"Software\Mozilla\NativeMessagingHosts", NMH_NAME);
         let (key, _) = hkcu.create_subkey_with_flags(&firefox_reg, KEY_WRITE)?;
         key.set_value("", &firefox_manifest)?;
-        rinf::debug_print!("[nmh_registry] registered at HKCU\\{}", firefox_reg);
+        log_info!("[nmh_registry] registered at HKCU\\{}", firefox_reg);
 
         Ok(())
     }
@@ -211,23 +210,19 @@ mod inner {
         if let Some(exe_dir) = &current_exe_dir {
             let chrome_reg = format!(
                 "{}\\{}",
-                r"Software\Google\Chrome\NativeMessagingHosts",
-                NMH_NAME
+                r"Software\Google\Chrome\NativeMessagingHosts", NMH_NAME
             );
             if let Ok(key) = hkcu.open_subkey_with_flags(&chrome_reg, KEY_READ) {
                 if let Ok(manifest_str) = key.get_value::<String, _>("") {
                     if let Ok(content) = std::fs::read_to_string(&manifest_str) {
-                        if let Ok(json) =
-                            serde_json::from_str::<serde_json::Value>(&content)
-                        {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
                             if let Some(registered_str) = json["path"].as_str() {
-                                let registered_dir =
-                                    Path::new(registered_str).parent();
+                                let registered_dir = Path::new(registered_str).parent();
                                 if registered_dir
                                     .map(|d| d != exe_dir.as_path())
                                     .unwrap_or(true)
                                 {
-                                    rinf::debug_print!(
+                                    log_info!(
                                         "[nmh_registry] exe dir changed: registered NMH dir={:?}, current exe dir={:?} → needs update",
                                         registered_dir,
                                         exe_dir
@@ -270,11 +265,7 @@ mod inner {
         }
 
         // Firefox 是可选浏览器：注册表项不存在时跳过，不触发重新注册。
-        let firefox_reg = format!(
-            "{}\\{}",
-            r"Software\Mozilla\NativeMessagingHosts",
-            NMH_NAME
-        );
+        let firefox_reg = format!("{}\\{}", r"Software\Mozilla\NativeMessagingHosts", NMH_NAME);
         if let Ok(key) = hkcu.open_subkey_with_flags(&firefox_reg, KEY_READ) {
             let Ok(manifest_str): Result<String, _> = key.get_value("") else {
                 return true;
@@ -310,7 +301,7 @@ mod inner {
         let firefox_str = strip_unc_prefix(&firefox_path.to_string_lossy());
         let nmh_str = strip_unc_prefix(&nmh_exe.to_string_lossy());
         register_registry(&chromium_str, &firefox_str)?;
-        rinf::debug_print!(
+        log_info!(
             "[nmh_registry] NMH registered: exe={}, chromium_manifest={}, firefox_manifest={}",
             nmh_str,
             chromium_str,
@@ -346,7 +337,7 @@ mod inner {
             let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_FIREFOX));
         }
 
-        rinf::debug_print!("[nmh_registry] NMH registration removed");
+        log_info!("[nmh_registry] NMH registration removed");
         Ok(())
     }
 }
@@ -354,6 +345,7 @@ mod inner {
 // Linux: write NMH manifest files to XDG browser directories.
 #[cfg(target_os = "linux")]
 mod inner {
+    use crate::logger::log_info;
     use serde::Serialize;
     use std::io;
     use std::path::{Path, PathBuf};
@@ -419,7 +411,7 @@ mod inner {
             if let Some(dir) = canonical.parent() {
                 let candidate = dir.join(NMH_EXE_NAME);
                 if candidate.exists() {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh_registry] found NMH exe next to app: {}",
                         candidate.display()
                     );
@@ -430,15 +422,13 @@ mod inner {
 
         // 2. Cargo workspace target directory (development)
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let workspace_root = Path::new(manifest_dir)
-            .parent()
-            .and_then(|p| p.parent());
+        let workspace_root = Path::new(manifest_dir).parent().and_then(|p| p.parent());
 
         if let Some(ws) = workspace_root {
             for profile in &["debug", "release"] {
                 let candidate = ws.join("target").join(profile).join(NMH_EXE_NAME);
                 if candidate.exists() {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh_registry] found NMH exe in cargo target: {}",
                         candidate.display()
                     );
@@ -516,8 +506,11 @@ mod inner {
                 };
                 if let Some(registered_str) = json["path"].as_str() {
                     let registered_dir = Path::new(registered_str).parent();
-                    if registered_dir.map(|d| d != exe_dir.as_path()).unwrap_or(true) {
-                        rinf::debug_print!(
+                    if registered_dir
+                        .map(|d| d != exe_dir.as_path())
+                        .unwrap_or(true)
+                    {
+                        log_info!(
                             "[nmh_registry] exe dir changed: registered NMH dir={:?}, current exe dir={:?} → needs update",
                             registered_dir,
                             exe_dir
@@ -560,13 +553,10 @@ mod inner {
         for dir in chromium_nmh_dirs() {
             match write_chromium_manifest(&nmh_exe, &dir) {
                 Ok(path) => {
-                    rinf::debug_print!(
-                        "[nmh_registry] Chromium manifest: {}",
-                        path.display()
-                    );
+                    log_info!("[nmh_registry] Chromium manifest: {}", path.display());
                 }
                 Err(e) => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh_registry] Chromium manifest error ({}): {}",
                         dir.display(),
                         e
@@ -578,21 +568,15 @@ mod inner {
         if let Some(dir) = firefox_nmh_dir() {
             match write_firefox_manifest(&nmh_exe, &dir) {
                 Ok(path) => {
-                    rinf::debug_print!(
-                        "[nmh_registry] Firefox manifest: {}",
-                        path.display()
-                    );
+                    log_info!("[nmh_registry] Firefox manifest: {}", path.display());
                 }
                 Err(e) => {
-                    rinf::debug_print!("[nmh_registry] Firefox manifest error: {}", e);
+                    log_info!("[nmh_registry] Firefox manifest error: {}", e);
                 }
             }
         }
 
-        rinf::debug_print!(
-            "[nmh_registry] NMH registered: exe={}",
-            nmh_exe.display()
-        );
+        log_info!("[nmh_registry] NMH registered: exe={}", nmh_exe.display());
         Ok(())
     }
 
@@ -604,7 +588,7 @@ mod inner {
         if let Some(dir) = firefox_nmh_dir() {
             let _ = std::fs::remove_file(dir.join(MANIFEST_FILENAME_FIREFOX));
         }
-        rinf::debug_print!("[nmh_registry] NMH registration removed");
+        log_info!("[nmh_registry] NMH registration removed");
         Ok(())
     }
 }

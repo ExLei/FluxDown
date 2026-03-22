@@ -12,9 +12,10 @@
 
 #[cfg(target_os = "windows")]
 mod inner {
+    use crate::logger::log_info;
     use std::io;
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 
     const PROG_ID: &str = "FluxDown.TorrentFile";
     const PROG_DESC: &str = "BitTorrent File";
@@ -91,7 +92,7 @@ mod inner {
         // Notify the shell about the change
         notify_shell();
 
-        rinf::debug_print!("[file_assoc] associated .torrent with FluxDown (exe={exe})");
+        log_info!("[file_assoc] associated .torrent with FluxDown (exe={exe})");
         Ok(())
     }
 
@@ -101,7 +102,7 @@ mod inner {
 
         // Only remove if currently associated to us (don't break other app's association)
         if !is_associated() {
-            rinf::debug_print!("[file_assoc] not associated to FluxDown, skipping removal");
+            log_info!("[file_assoc] not associated to FluxDown, skipping removal");
             return Ok(());
         }
 
@@ -115,7 +116,7 @@ mod inner {
         // Notify the shell about the change
         notify_shell();
 
-        rinf::debug_print!("[file_assoc] removed .torrent association");
+        log_info!("[file_assoc] removed .torrent association");
         Ok(())
     }
 
@@ -185,11 +186,10 @@ mod inner {
         use std::io::{BufRead, Write};
 
         // Locate ~/.config/mimeapps.list (XDG spec default).
-        let config_dir = std::env::var("XDG_CONFIG_HOME")
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_default();
-                format!("{home}/.config")
-            });
+        let config_dir = std::env::var("XDG_CONFIG_HOME").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_default();
+            format!("{home}/.config")
+        });
         let path = std::path::PathBuf::from(&config_dir).join("mimeapps.list");
 
         if !path.exists() {
@@ -206,8 +206,7 @@ mod inner {
             .iter()
             .filter(|l| {
                 let lower = l.to_lowercase();
-                !(lower.starts_with("application/x-bittorrent=")
-                    && lower.contains("fluxdown"))
+                !(lower.starts_with("application/x-bittorrent=") && lower.contains("fluxdown"))
             })
             .map(|l| l.as_str())
             .collect();

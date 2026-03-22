@@ -79,6 +79,7 @@ mod server {
     use tokio::sync::mpsc;
 
     use super::{DownloadRequest, MAX_MESSAGE_SIZE, PIPE_NAME, PipeMessage, PipeResponse};
+    use crate::logger::log_info;
 
     /// Read a 4-byte LE length-prefixed message from the pipe.
     async fn read_framed_message(
@@ -119,7 +120,7 @@ mod server {
             let raw = match read_framed_message(&mut pipe).await {
                 Ok(data) => data,
                 Err(e) => {
-                    rinf::debug_print!("[nmh-pipe] read error: {}", e);
+                    log_info!("[nmh-pipe] read error: {}", e);
                     break;
                 }
             };
@@ -127,7 +128,7 @@ mod server {
             let msg: PipeMessage = match serde_json::from_slice(&raw) {
                 Ok(m) => m,
                 Err(e) => {
-                    rinf::debug_print!("[nmh-pipe] JSON parse error: {}", e);
+                    log_info!("[nmh-pipe] JSON parse error: {}", e);
                     let resp = PipeResponse {
                         success: false,
                         message: Some(format!("invalid JSON: {}", e)),
@@ -144,7 +145,7 @@ mod server {
 
             let response = match msg.action.as_str() {
                 "ping" => {
-                    rinf::debug_print!("[nmh-pipe] ping (msg_id={})", msg.msg_id);
+                    log_info!("[nmh-pipe] ping (msg_id={})", msg.msg_id);
                     PipeResponse {
                         success: true,
                         message: Some("pong".to_string()),
@@ -153,7 +154,7 @@ mod server {
                 }
                 "download" => match serde_json::from_value::<DownloadRequest>(msg.payload) {
                     Ok(download_req) => {
-                        rinf::debug_print!(
+                        log_info!(
                             "[nmh-pipe] download request (msg_id={}): url={}",
                             msg.msg_id,
                             download_req.url
@@ -166,7 +167,7 @@ mod server {
                         }
                     }
                     Err(e) => {
-                        rinf::debug_print!(
+                        log_info!(
                             "[nmh-pipe] download parse error (msg_id={}): {}",
                             msg.msg_id,
                             e
@@ -179,7 +180,7 @@ mod server {
                     }
                 },
                 other => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh-pipe] unknown action '{}' (msg_id={})",
                         other,
                         msg.msg_id
@@ -205,7 +206,7 @@ mod server {
         let (tx, rx) = mpsc::channel::<DownloadRequest>(64);
 
         tokio::spawn(async move {
-            rinf::debug_print!("[nmh-pipe] starting Named Pipe server at {}", PIPE_NAME);
+            log_info!("[nmh-pipe] starting Named Pipe server at {}", PIPE_NAME);
 
             // Create the first server instance before entering the loop.
             let mut server = match ServerOptions::new()
@@ -214,7 +215,7 @@ mod server {
             {
                 Ok(s) => s,
                 Err(e) => {
-                    rinf::debug_print!("[nmh-pipe] failed to create pipe server: {}", e);
+                    log_info!("[nmh-pipe] failed to create pipe server: {}", e);
                     return;
                 }
             };
@@ -222,20 +223,20 @@ mod server {
             loop {
                 // Wait for a client to connect.
                 if let Err(e) = server.connect().await {
-                    rinf::debug_print!("[nmh-pipe] connect error: {}", e);
+                    log_info!("[nmh-pipe] connect error: {}", e);
                     // Brief pause before retrying.
                     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     continue;
                 }
 
-                rinf::debug_print!("[nmh-pipe] client connected");
+                log_info!("[nmh-pipe] client connected");
 
                 // Create the next server instance to accept the next client
                 // while we handle the current one.
                 let next_server = match ServerOptions::new().create(PIPE_NAME) {
                     Ok(s) => s,
                     Err(e) => {
-                        rinf::debug_print!("[nmh-pipe] failed to create next pipe instance: {}", e);
+                        log_info!("[nmh-pipe] failed to create next pipe instance: {}", e);
                         // Can't accept more clients, but handle the current one.
                         let tx_clone = tx.clone();
                         tokio::spawn(handle_pipe_client(server, tx_clone));
@@ -263,6 +264,7 @@ mod server {
     use tokio::sync::mpsc;
 
     use super::{DownloadRequest, MAX_MESSAGE_SIZE, PipeMessage, PipeResponse};
+    use crate::logger::log_info;
 
     /// Returns the Unix socket path for the NMH relay to connect to.
     /// Prefer $XDG_RUNTIME_DIR (user-private, cleaned on logout) over /tmp.
@@ -307,7 +309,7 @@ mod server {
             let raw = match read_framed_message(&mut stream).await {
                 Ok(data) => data,
                 Err(e) => {
-                    rinf::debug_print!("[nmh-uds] read error: {}", e);
+                    log_info!("[nmh-uds] read error: {}", e);
                     break;
                 }
             };
@@ -315,7 +317,7 @@ mod server {
             let msg: PipeMessage = match serde_json::from_slice(&raw) {
                 Ok(m) => m,
                 Err(e) => {
-                    rinf::debug_print!("[nmh-uds] JSON parse error: {}", e);
+                    log_info!("[nmh-uds] JSON parse error: {}", e);
                     let resp = PipeResponse {
                         success: false,
                         message: Some(format!("invalid JSON: {}", e)),
@@ -332,7 +334,7 @@ mod server {
 
             let response = match msg.action.as_str() {
                 "ping" => {
-                    rinf::debug_print!("[nmh-uds] ping (msg_id={})", msg.msg_id);
+                    log_info!("[nmh-uds] ping (msg_id={})", msg.msg_id);
                     PipeResponse {
                         success: true,
                         message: Some("pong".to_string()),
@@ -341,7 +343,7 @@ mod server {
                 }
                 "download" => match serde_json::from_value::<DownloadRequest>(msg.payload) {
                     Ok(download_req) => {
-                        rinf::debug_print!(
+                        log_info!(
                             "[nmh-uds] download request (msg_id={}): url={}",
                             msg.msg_id,
                             download_req.url
@@ -354,7 +356,7 @@ mod server {
                         }
                     }
                     Err(e) => {
-                        rinf::debug_print!(
+                        log_info!(
                             "[nmh-uds] download parse error (msg_id={}): {}",
                             msg.msg_id,
                             e
@@ -367,7 +369,7 @@ mod server {
                     }
                 },
                 other => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh-uds] unknown action '{}' (msg_id={})",
                         other,
                         msg.msg_id
@@ -398,14 +400,14 @@ mod server {
 
             let listener = match UnixListener::bind(&sock_path) {
                 Ok(l) => {
-                    rinf::debug_print!(
+                    log_info!(
                         "[nmh-uds] Unix socket server started at {}",
                         sock_path.display()
                     );
                     l
                 }
                 Err(e) => {
-                    rinf::debug_print!("[nmh-uds] failed to bind Unix socket: {}", e);
+                    log_info!("[nmh-uds] failed to bind Unix socket: {}", e);
                     return;
                 }
             };
@@ -413,12 +415,12 @@ mod server {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        rinf::debug_print!("[nmh-uds] client connected");
+                        log_info!("[nmh-uds] client connected");
                         let tx_clone = tx.clone();
                         tokio::spawn(handle_client(stream, tx_clone));
                     }
                     Err(e) => {
-                        rinf::debug_print!("[nmh-uds] accept error: {}", e);
+                        log_info!("[nmh-uds] accept error: {}", e);
                     }
                 }
             }

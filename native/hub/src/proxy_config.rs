@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use crate::downloader::DownloadError;
+use crate::logger::log_info;
 
 // ---------------------------------------------------------------------------
 // Proxy mode / type enums
@@ -214,7 +215,7 @@ impl ProxyConfig {
                         Self::default()
                     }
                     Err(e) => {
-                        rinf::debug_print!("[proxy] system proxy detection failed: {}", e);
+                        log_info!("[proxy] system proxy detection failed: {}", e);
                         Self::default()
                     }
                 }
@@ -297,8 +298,8 @@ impl ProxyConfig {
 /// Returns a `ProxyConfig` in `Manual` mode on success, or `None` if disabled/unavailable.
 #[cfg(target_os = "windows")]
 pub fn detect_system_proxy() -> Result<Option<ProxyConfig>, DownloadError> {
-    use winreg::enums::HKEY_CURRENT_USER;
     use winreg::RegKey;
+    use winreg::enums::HKEY_CURRENT_USER;
 
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let inet = hkcu
@@ -775,7 +776,7 @@ pub fn socks4_connect_sync(
         _ => {
             return Err(DownloadError::Other(
                 "SOCKS4 requires IPv4 address".to_string(),
-            ))
+            ));
         }
     };
 
@@ -1019,11 +1020,10 @@ pub async fn test_proxy_connection(
         DownloadError::Other("incomplete proxy config (host or port missing)".to_string())
     })?;
 
-    rinf::debug_print!("[proxy-test] testing proxy: {}", proxy_url);
+    log_info!("[proxy-test] testing proxy: {}", proxy_url);
 
-    let mut proxy = reqwest::Proxy::all(&proxy_url).map_err(|e| {
-        DownloadError::Other(format!("invalid proxy URL: {}", e))
-    })?;
+    let mut proxy = reqwest::Proxy::all(&proxy_url)
+        .map_err(|e| DownloadError::Other(format!("invalid proxy URL: {}", e)))?;
 
     if !proxy_username.is_empty() {
         proxy = proxy.basic_auth(proxy_username, proxy_password);
@@ -1039,7 +1039,7 @@ pub async fn test_proxy_connection(
     let mut last_err = String::new();
 
     for url in CONNECTIVITY_CHECK_URLS {
-        rinf::debug_print!("[proxy-test] trying: {}", url);
+        log_info!("[proxy-test] trying: {}", url);
         let start = Instant::now();
 
         match client.head(*url).send().await {
@@ -1047,7 +1047,7 @@ pub async fn test_proxy_connection(
                 let latency = start.elapsed().as_millis() as i64;
                 let status = resp.status();
 
-                rinf::debug_print!(
+                log_info!(
                     "[proxy-test] {} → status={}, latency={}ms",
                     url,
                     status,
@@ -1062,7 +1062,7 @@ pub async fn test_proxy_connection(
                 last_err = format!("{}: HTTP {}", url, status);
             }
             Err(e) => {
-                rinf::debug_print!("[proxy-test] {} → error: {}", url, e);
+                log_info!("[proxy-test] {} → error: {}", url, e);
                 last_err = format!("{}: {}", url, e);
             }
         }
@@ -1081,8 +1081,9 @@ pub async fn test_proxy_connection(
 #[cfg(test)]
 mod tests {
     use super::{
-        base64_encode, parse_host_port, parse_multi_protocol_proxy, parse_windows_proxy_server,
-        percent_decode, percent_encode_userinfo, ProxyConfig, ProxyMode, ProxyType,
+        ProxyConfig, ProxyMode, ProxyType, base64_encode, parse_host_port,
+        parse_multi_protocol_proxy, parse_windows_proxy_server, percent_decode,
+        percent_encode_userinfo,
     };
     use std::collections::HashMap;
 

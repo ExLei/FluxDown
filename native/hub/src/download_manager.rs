@@ -16,6 +16,7 @@ use crate::db::Db;
 use crate::downloader::{self, DownloadParams, ProgressUpdate, SegmentProgressInfo};
 use crate::ftp_downloader;
 use crate::hls_downloader;
+use crate::logger::log_info;
 use crate::proxy_config::ProxyConfig;
 use crate::signals::{
     AllQueues, AllTasks, PriorityTaskChanged, QueueInfo, QueuePosition, QueuePositionsUpdate,
@@ -45,7 +46,7 @@ async fn handle_task_panic(
     db: &Db,
     progress_tx: &mpsc::Sender<ProgressUpdate>,
 ) {
-    rinf::debug_print!("[download] PANIC in task {}: {}", task_id, msg);
+    log_info!("[download] PANIC in task {}: {}", task_id, msg);
     let _ = db.update_task_status(task_id, 4, msg).await;
     let _ = progress_tx
         .send(ProgressUpdate {
@@ -58,6 +59,34 @@ async fn handle_task_panic(
             segment_details: None,
         })
         .await;
+}
+
+// ---------------------------------------------------------------------------
+// Auto-retry constants
+// ---------------------------------------------------------------------------
+
+/// 任务级自动重试最大次数。网络 stall、连接重置等瞬时错误触发后，
+/// 自动延迟恢复下载，避免大文件下载中途停止需要用户手动操作。
+const MAX_TASK_AUTO_RETRIES: u32 = 3;
+
+/// 自动重试基础延迟（秒）。实际延迟 = base × attempt，即 5s / 10s / 15s。
+const AUTO_RETRY_BASE_DELAY_SECS: u64 = 5;
+
+/// 判断错误信息是否属于可自动重试的瞬时网络错误。
+/// 排除永久性错误（404、403、checksum 等），仅重试网络层问题。
+fn is_retriable_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("stalled")
+        || lower.contains("connection reset")
+        || lower.contains("connection refused")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("broken pipe")
+        || lower.contains("network")
+        || lower.contains("eof")
+        || lower.contains("connection closed")
+        || lower.contains("connection abort")
+        || lower.contains("incomplete download")
 }
 
 /// Determine if a URL uses the FTP protocol (case-insensitive).
@@ -236,6 +265,15 @@ pub struct DownloadManager {
     /// 因 Boost 模式自动暂停的任务 ID 集合（内存级，重启清空）。
     /// 取消 Boost 时这些任务会自动恢复。
     auto_paused_ids: HashSet<String>,
+    /// 任务级自动重试：网络 stall / 瞬时错误导致任务失败后，延迟自动恢复。
+    /// key = task_id，value = 已自动重试次数。
+    /// 超过 MAX_TASK_AUTO_RETRIES 后不再重试，保持 error 状态等用户手动恢复。
+    auto_retry_counts: HashMap<String, u32>,
+    /// 延迟重试通道发送端。on_task_done 检测到可重试错误后，spawn 一个
+    /// 延迟任务将 task_id 发送到此通道，actor loop 收到后调用 resume_task。
+    retry_tx: mpsc::Sender<String>,
+    /// 延迟重试通道接收端（仅取一次，交给 actor loop）。
+    retry_rx: Option<mpsc::Receiver<String>>,
 }
 
 /// Configuration parameters for [`DownloadManager::new`].
@@ -264,6 +302,7 @@ impl DownloadManager {
         let client = downloader::build_client(&proxy_config, &user_agent)?;
         let (tx, rx) = mpsc::channel(8192);
         let (done_tx, done_rx) = mpsc::channel(64);
+        let (retry_tx, retry_rx) = mpsc::channel(32);
         let limiter = SpeedLimiter::new(speed_limit_bps);
         limiter.spawn_refill_task();
         Ok(Self {
@@ -294,6 +333,9 @@ impl DownloadManager {
             startup_reset_done: false,
             priority_task_id: None,
             auto_paused_ids: HashSet::new(),
+            auto_retry_counts: HashMap::new(),
+            retry_tx,
+            retry_rx: Some(retry_rx),
         })
     }
 
@@ -305,6 +347,24 @@ impl DownloadManager {
     /// The actor loop should select on this to clean up `active_tokens`.
     pub fn take_done_rx(&mut self) -> Option<mpsc::Receiver<TaskDone>> {
         self.done_rx.take()
+    }
+
+    /// Take the receiver for delayed auto-retry notifications.
+    /// The actor loop should select on this to resume stalled tasks.
+    pub fn take_retry_rx(&mut self) -> Option<mpsc::Receiver<String>> {
+        self.retry_rx.take()
+    }
+
+    /// 检查任务是否仍处于 error(4) 状态，供 actor loop 在自动重试前确认。
+    /// 如果用户已手动暂停/恢复/删除了该任务，返回 false 跳过重试。
+    pub async fn is_task_in_error(&self, task_id: &str) -> bool {
+        self.db
+            .load_task_by_id(task_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|t| t.status == 4)
+            .unwrap_or(false)
     }
 
     // -----------------------------------------------------------------------
@@ -352,7 +412,7 @@ impl DownloadManager {
         &mut self,
         config: ProxyConfig,
     ) -> Result<(), downloader::DownloadError> {
-        rinf::debug_print!(
+        log_info!(
             "[manager] updating proxy config: mode={}, type={}, host={}, port={}",
             config.mode.as_str(),
             config.proxy_type.as_str(),
@@ -377,7 +437,7 @@ impl DownloadManager {
     ///
     /// Empty string = revert to built-in Chrome UA.
     pub fn set_user_agent(&mut self, ua: String) -> Result<(), downloader::DownloadError> {
-        rinf::debug_print!("[manager] updating global_user_agent: {}", ua);
+        log_info!("[manager] updating global_user_agent: {}", ua);
         let new_client = downloader::build_client(&self.proxy_config, &ua)?;
         self.client = new_client;
         self.global_user_agent = ua;
@@ -428,7 +488,7 @@ impl DownloadManager {
     /// downloads will be paused first.
     pub async fn invalidate_bt_session(&mut self) {
         if let Some(bt) = self.bt_session.take() {
-            rinf::debug_print!("[manager] invalidating BT session for config change");
+            log_info!("[manager] invalidating BT session for config change");
             let bt_clone = bt.clone();
             // Shutdown on a blocking thread since it calls block_on internally.
             let _ = tokio::task::spawn_blocking(move || {
@@ -466,7 +526,7 @@ impl DownloadManager {
                     self.queues.insert(q.queue_id.clone(), q);
                 }
             }
-            Err(e) => rinf::debug_print!("[manager] load_queues error: {}", e),
+            Err(e) => log_info!("[manager] load_queues error: {}", e),
         }
     }
 
@@ -611,6 +671,50 @@ impl DownloadManager {
 
         // A slot freed up — try to start queued tasks.
         self.drain_queue().await;
+
+        // ----- Auto-retry for retriable network errors ----------------------
+        // 大文件下载因网络 stall、连接重置等瞬时错误失败后，自动延迟恢复，
+        // 避免用户手动操作。最多重试 MAX_TASK_AUTO_RETRIES 次（5s/10s/15s 递增延迟）。
+        // 仅在 generation 匹配（确实是这一轮 spawn 失败）时触发，防止 stale 信号误触发。
+        if generation_matched
+            && let Ok(Some(task)) = self.db.load_task_by_id(task_id).await
+        {
+            if task.status == 4 && is_retriable_error(&task.error_message) {
+                let count = self
+                    .auto_retry_counts
+                    .entry(task_id.to_string())
+                    .or_insert(0);
+                if *count < MAX_TASK_AUTO_RETRIES {
+                    *count += 1;
+                    let attempt = *count;
+                    let delay_secs = AUTO_RETRY_BASE_DELAY_SECS * attempt as u64;
+                    log_info!(
+                        "[manager] auto-retry {}/{} for task {} in {}s (error: {})",
+                        attempt,
+                        MAX_TASK_AUTO_RETRIES,
+                        task_id,
+                        delay_secs,
+                        task.error_message
+                    );
+                    let tx = self.retry_tx.clone();
+                    let tid = task_id.to_string();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+                        let _ = tx.send(tid).await;
+                    });
+                } else {
+                    log_info!(
+                        "[manager] auto-retry exhausted for task {} ({} attempts), staying in error",
+                        task_id,
+                        MAX_TASK_AUTO_RETRIES
+                    );
+                }
+            } else if task.status == 3 {
+                // 任务成功完成，清除重试计数
+                self.auto_retry_counts.remove(task_id);
+            }
+        }
+
         self.maybe_wal_checkpoint().await;
         self.maybe_release_bt_session().await;
     }
@@ -623,7 +727,7 @@ impl DownloadManager {
             && self.pending_queue.is_empty()
             && let Err(e) = self.db.wal_checkpoint().await
         {
-            rinf::debug_print!("[manager] wal_checkpoint error: {e}");
+            log_info!("[manager] wal_checkpoint error: {e}");
         }
     }
 
@@ -652,13 +756,13 @@ impl DownloadManager {
         // is in use causes the next BT download to fail immediately.
         if let Some(ref bt) = self.bt_session {
             if bt.has_inflight_adds() {
-                rinf::debug_print!(
+                log_info!(
                     "[manager] deferring BT session release — detached add_torrent still in flight"
                 );
                 return;
             }
         }
-        rinf::debug_print!("[manager] all BT tasks finished/paused — releasing BT session");
+        log_info!("[manager] all BT tasks finished/paused — releasing BT session");
         // Shut down on a background thread (same pattern as Drop) to avoid
         // blocking the actor loop while the librqbit runtime winds down.
         if let Some(bt) = self.bt_session.take() {
@@ -674,7 +778,7 @@ impl DownloadManager {
         if let Some(tx) = self.hls_quality_senders.remove(task_id) {
             let _ = tx.send(selected_index);
         } else {
-            rinf::debug_print!(
+            log_info!(
                 "[manager] no pending HLS quality selection for task {}",
                 task_id
             );
@@ -688,14 +792,14 @@ impl DownloadManager {
         if !self.startup_reset_done {
             self.startup_reset_done = true;
             if let Err(e) = self.db.reset_incomplete_tasks_to_paused().await {
-                rinf::debug_print!("reset_incomplete_tasks_to_paused error: {}", e);
+                log_info!("reset_incomplete_tasks_to_paused error: {}", e);
             }
         }
 
         let tasks = match self.db.load_all_tasks().await {
             Ok(t) => t,
             Err(e) => {
-                rinf::debug_print!("load_all_tasks error: {}", e);
+                log_info!("load_all_tasks error: {}", e);
                 Vec::new()
             }
         };
@@ -778,7 +882,7 @@ impl DownloadManager {
             )
             .await
         {
-            rinf::debug_print!("insert_task error: {}", e);
+            log_info!("insert_task error: {}", e);
             return;
         }
 
@@ -789,7 +893,7 @@ impl DownloadManager {
                 .save_torrent_file_bytes(&task_id, &torrent_file_bytes)
                 .await
         {
-            rinf::debug_print!("save_torrent_file_bytes error: {}", e);
+            log_info!("save_torrent_file_bytes error: {}", e);
         }
 
         TaskProgress {
@@ -831,7 +935,7 @@ impl DownloadManager {
             // was freed — drain the queue so pending tasks can proceed.
             self.drain_queue().await;
         } else {
-            rinf::debug_print!(
+            log_info!(
                 "[manager] queuing task {} (active={}, max={}, queue={})",
                 queued.task_id,
                 self.active_tokens.len(),
@@ -936,7 +1040,7 @@ impl DownloadManager {
         let handle = if use_bt {
             // Lazily initialise the shared BT session.
             if let Err(e) = self.ensure_bt_session().await {
-                rinf::debug_print!("[manager] failed to init BT session: {}", e);
+                log_info!("[manager] failed to init BT session: {}", e);
                 let _ = self
                     .db
                     .update_task_status(&task_id, 4, &e.to_string())
@@ -959,9 +1063,7 @@ impl DownloadManager {
             }
             // bt_session is guaranteed to be Some after ensure_bt_session().
             let Some(bt_ref) = self.bt_session.as_ref() else {
-                rinf::debug_print!(
-                    "[manager] BUG: bt_session is None after ensure_bt_session succeeded"
-                );
+                log_info!("[manager] BUG: bt_session is None after ensure_bt_session succeeded");
                 self.active_tokens.remove(&task_id);
                 return;
             };
@@ -1037,7 +1139,7 @@ impl DownloadManager {
                 match downloader::build_client(&pc, resolved_ua) {
                     Ok(c) => (c, pc),
                     Err(e) => {
-                        rinf::debug_print!("[manager] failed to build per-task client: {}", e);
+                        log_info!("[manager] failed to build per-task client: {}", e);
                         // Fallback to global
                         (self.client.clone(), self.proxy_config.resolve())
                     }
@@ -1182,6 +1284,9 @@ impl DownloadManager {
     }
 
     pub async fn resume_task(&mut self, task_id: &str) {
+        // 用户手动恢复时重置自动重试计数，让下次失败重新获得完整重试配额。
+        self.auto_retry_counts.remove(task_id);
+
         if self.active_tokens.contains_key(task_id) {
             // A task can be in active_tokens but already terminal in the DB:
             // this happens when the download task has finished (status=3/4
@@ -1205,7 +1310,7 @@ impl DownloadManager {
             if !is_terminal {
                 return; // truly still active — do not interrupt
             }
-            rinf::debug_print!(
+            log_info!(
                 "[manager] resume_task {}: stale active_tokens entry (terminal in DB) — force-removing",
                 task_id
             );
@@ -1239,7 +1344,7 @@ impl DownloadManager {
             // the queue so pending tasks can proceed.
             self.drain_queue().await;
         } else {
-            rinf::debug_print!(
+            log_info!(
                 "[manager] queuing resume for task {} (active={}, max={}, queue={})",
                 task_id,
                 self.active_tokens.len(),
@@ -1288,11 +1393,11 @@ impl DownloadManager {
         let task = match self.db.load_task_by_id(task_id).await {
             Ok(Some(t)) => t,
             Ok(None) => {
-                rinf::debug_print!("[manager] do_resume_task: task {} not found in DB", task_id);
+                log_info!("[manager] do_resume_task: task {} not found in DB", task_id);
                 return;
             }
             Err(e) => {
-                rinf::debug_print!(
+                log_info!(
                     "[manager] do_resume_task: DB error for task {}: {}",
                     task_id,
                     e
@@ -1345,7 +1450,7 @@ impl DownloadManager {
         let handle = if use_bt {
             // Lazily initialise the shared BT session.
             if let Err(e) = self.ensure_bt_session().await {
-                rinf::debug_print!("[manager] failed to init BT session for resume: {}", e);
+                log_info!("[manager] failed to init BT session for resume: {}", e);
                 let _ = self.db.update_task_status(task_id, 4, &e.to_string()).await;
                 let _ = self
                     .progress_tx
@@ -1365,9 +1470,7 @@ impl DownloadManager {
             }
             // bt_session is guaranteed to be Some after ensure_bt_session().
             let Some(bt_ref) = self.bt_session.as_ref() else {
-                rinf::debug_print!(
-                    "[manager] BUG: bt_session is None after ensure_bt_session succeeded"
-                );
+                log_info!("[manager] BUG: bt_session is None after ensure_bt_session succeeded");
                 self.active_tokens.remove(task_id);
                 return;
             };
@@ -1378,7 +1481,7 @@ impl DownloadManager {
             let mut existing = match bt_ref.resume_task(task_id).await {
                 Ok(h) => h,
                 Err(e) => {
-                    rinf::debug_print!("[manager] BT resume_task error (will re-add): {}", e);
+                    log_info!("[manager] BT resume_task error (will re-add): {}", e);
                     None
                 }
             };
@@ -1393,7 +1496,7 @@ impl DownloadManager {
             if existing.is_some() && !task.file_name.is_empty() {
                 let output_path = PathBuf::from(&task.save_dir).join(&task.file_name);
                 if !output_path.exists() {
-                    rinf::debug_print!(
+                    log_info!(
                         "[manager] BT task {} output missing ({}), discarding cached handle for re-verify",
                         task_id,
                         output_path.display()
@@ -1415,7 +1518,7 @@ impl DownloadManager {
                     .unwrap_or_default()
                     .unwrap_or_default();
                 if bytes.is_empty() {
-                    rinf::debug_print!(
+                    log_info!(
                         "[manager] BT task {} has torrent-file:// URL but no persisted bytes!",
                         task_id
                     );
@@ -1474,10 +1577,7 @@ impl DownloadManager {
                 match downloader::build_client(&pc, &self.global_user_agent) {
                     Ok(c) => (c, pc),
                     Err(e) => {
-                        rinf::debug_print!(
-                            "[manager] failed to build per-task client on resume: {}",
-                            e
-                        );
+                        log_info!("[manager] failed to build per-task client on resume: {}", e);
                         (self.client.clone(), self.proxy_config.resolve())
                     }
                 }
@@ -1604,6 +1704,8 @@ impl DownloadManager {
     /// network connections and file handles are fully released before we
     /// attempt to remove files.  A 5-second timeout prevents indefinite hangs.
     pub async fn delete_task(&mut self, task_id: &str, delete_files: bool) {
+        self.auto_retry_counts.remove(task_id);
+
         // Remove from pending queue if queued.
         if let Some(pos) = self.pending_queue.iter().position(|q| q.task_id == task_id) {
             self.pending_queue.remove(pos);
@@ -1626,7 +1728,7 @@ impl DownloadManager {
             false
         };
         if handle_timed_out {
-            rinf::debug_print!(
+            log_info!(
                 "[manager] delete_task {}: handle wait timed out, spawned task may still be running",
                 task_id
             );
@@ -1681,7 +1783,7 @@ impl DownloadManager {
                     PathBuf::from(format!("{}{}", path.display(), downloader::TEMP_EXT));
                 if let Err(e) = tokio::fs::remove_file(&temp_path).await {
                     if e.kind() != std::io::ErrorKind::NotFound {
-                        rinf::debug_print!(
+                        log_info!(
                             "[manager] delete_task {}: remove temp {} failed: {}",
                             task_id,
                             temp_path.display(),
@@ -1704,7 +1806,7 @@ impl DownloadManager {
                 if delete_files && is_safe_file_name(&t.file_name) {
                     if let Err(e) = tokio::fs::remove_file(&path).await {
                         if e.kind() != std::io::ErrorKind::NotFound {
-                            rinf::debug_print!(
+                            log_info!(
                                 "[manager] delete_task {}: remove file {} failed: {}",
                                 task_id,
                                 path.display(),
@@ -1733,7 +1835,7 @@ impl DownloadManager {
             .await;
 
         if let Err(e) = self.db.delete_task(task_id).await {
-            rinf::debug_print!("[manager] delete_task {}: DB delete error: {}", task_id, e);
+            log_info!("[manager] delete_task {}: DB delete error: {}", task_id, e);
         }
 
         // 竞争修复：若 handle 等待超时（spawned task 可能仍在运行），它可能在首次
@@ -1757,7 +1859,7 @@ impl DownloadManager {
                         PathBuf::from(format!("{}{}", path.display(), crate::downloader::TEMP_EXT));
                     if let Err(e) = tokio::fs::remove_file(&temp_path).await {
                         if e.kind() != std::io::ErrorKind::NotFound {
-                            rinf::debug_print!(
+                            log_info!(
                                 "[manager] delete_task {} deferred: remove temp {} failed: {}",
                                 tid,
                                 temp_path.display(),
@@ -1799,7 +1901,7 @@ impl DownloadManager {
             return;
         }
         let id_set: HashSet<&str> = task_ids.iter().map(|s| s.as_str()).collect();
-        rinf::debug_print!(
+        log_info!(
             "[manager] delete_tasks_batch: {} tasks, delete_files={}",
             task_ids.len(),
             delete_files
@@ -1911,7 +2013,7 @@ impl DownloadManager {
                         ));
                         if let Err(e) = tokio::fs::remove_file(&temp_path).await {
                             if e.kind() != std::io::ErrorKind::NotFound {
-                                rinf::debug_print!(
+                                log_info!(
                                     "[manager] delete_tasks_batch {}: remove temp {} failed: {}",
                                     tid_owned, temp_path.display(), e
                                 );
@@ -1935,7 +2037,7 @@ impl DownloadManager {
                         if delete_files && is_safe_file_name(&file_name) {
                             if let Err(e) = tokio::fs::remove_file(&path).await {
                                 if e.kind() != std::io::ErrorKind::NotFound {
-                                    rinf::debug_print!(
+                                    log_info!(
                                         "[manager] delete_tasks_batch {}: remove file {} failed: {}",
                                         tid_owned, path.display(), e
                                     );
@@ -1991,7 +2093,7 @@ impl DownloadManager {
 
         // 6. Single-transaction batch DB delete.
         if let Err(e) = self.db.delete_tasks_batch(task_ids).await {
-            rinf::debug_print!("[manager] delete_tasks_batch DB error: {}", e);
+            log_info!("[manager] delete_tasks_batch DB error: {}", e);
         }
 
         // 7. Cleanup boost state.
@@ -2019,7 +2121,7 @@ impl DownloadManager {
         let task_map: HashMap<String, TaskInfo> = match self.db.load_tasks_by_ids(task_ids).await {
             Ok(tasks) => tasks.into_iter().map(|t| (t.task_id.clone(), t)).collect(),
             Err(e) => {
-                rinf::debug_print!("[manager] batch_resume: load_tasks_by_ids error: {}", e);
+                log_info!("[manager] batch_resume: load_tasks_by_ids error: {}", e);
                 // Fallback to per-task queries.
                 for tid in task_ids {
                     self.resume_task(tid).await;
@@ -2042,7 +2144,7 @@ impl DownloadManager {
             if !is_terminal {
                 return; // truly still active — do not interrupt
             }
-            rinf::debug_print!(
+            log_info!(
                 "[manager] resume_task {}: stale active_tokens entry (terminal in DB) — force-removing",
                 task_id
             );
@@ -2064,7 +2166,7 @@ impl DownloadManager {
             self.do_resume_task(task_id).await;
             self.drain_queue().await;
         } else {
-            rinf::debug_print!(
+            log_info!(
                 "[manager] queuing resume for task {} (active={}, max={}, queue={})",
                 task_id,
                 self.active_tokens.len(),
@@ -2145,7 +2247,7 @@ impl DownloadManager {
     pub async fn send_all_queues(&self) {
         match self.db.load_all_queues().await {
             Ok(queues) => AllQueues { queues }.send_signal_to_dart(),
-            Err(e) => rinf::debug_print!("[manager] load_all_queues error: {}", e),
+            Err(e) => log_info!("[manager] load_all_queues error: {}", e),
         }
     }
 
@@ -2163,7 +2265,7 @@ impl DownloadManager {
         let position = match self.db.queue_count().await {
             Ok(n) => n,
             Err(e) => {
-                rinf::debug_print!("[manager] queue_count error: {}", e);
+                log_info!("[manager] queue_count error: {}", e);
                 0
             }
         };
@@ -2181,7 +2283,7 @@ impl DownloadManager {
             )
             .await
         {
-            rinf::debug_print!("[manager] insert_queue error: {}", e);
+            log_info!("[manager] insert_queue error: {}", e);
             return;
         }
         // Sync in-memory cache.
@@ -2198,7 +2300,7 @@ impl DownloadManager {
                 default_user_agent,
             },
         );
-        rinf::debug_print!("[manager] created queue: id={}, name={}", id, name);
+        log_info!("[manager] created queue: id={}, name={}", id, name);
         self.send_all_queues().await;
     }
 
@@ -2227,7 +2329,7 @@ impl DownloadManager {
             )
             .await
         {
-            rinf::debug_print!("[manager] update_queue error: {}", e);
+            log_info!("[manager] update_queue error: {}", e);
             return;
         }
         // Sync in-memory cache.
@@ -2243,27 +2345,27 @@ impl DownloadManager {
         if let Some(limiter) = self.queue_limiters.get(&queue_id) {
             limiter.set_limit((speed_limit_kbps.max(0) as u64) * 1024);
         }
-        rinf::debug_print!("[manager] updated queue: {}", queue_id);
+        log_info!("[manager] updated queue: {}", queue_id);
         self.send_all_queues().await;
     }
 
     /// Delete a named queue (tasks move to default queue) and broadcast.
     pub async fn delete_queue(&mut self, queue_id: String) {
         if let Err(e) = self.db.delete_queue(&queue_id).await {
-            rinf::debug_print!("[manager] delete_queue error: {}", e);
+            log_info!("[manager] delete_queue error: {}", e);
             return;
         }
         // Sync in-memory cache.
         self.queues.remove(&queue_id);
         self.queue_limiters.remove(&queue_id);
-        rinf::debug_print!("[manager] deleted queue: {}", queue_id);
+        log_info!("[manager] deleted queue: {}", queue_id);
         self.send_all_queues().await;
     }
 
     /// Move a task to a different queue and broadcast the updated queue list.
     pub async fn move_task_to_queue(&mut self, task_id: String, queue_id: String) {
         if let Err(e) = self.db.move_task_to_queue(&task_id, &queue_id).await {
-            rinf::debug_print!("[manager] move_task_to_queue error: {}", e);
+            log_info!("[manager] move_task_to_queue error: {}", e);
             return;
         }
         // If the task is currently active, update its tracked queue.
@@ -2273,7 +2375,7 @@ impl DownloadManager {
             self.active_task_queue
                 .insert(task_id.clone(), queue_id.clone());
         }
-        rinf::debug_print!("[manager] moved task {} to queue '{}'", task_id, queue_id);
+        log_info!("[manager] moved task {} to queue '{}'", task_id, queue_id);
         self.send_all_queues().await;
     }
 
@@ -2382,7 +2484,7 @@ impl DownloadManager {
         // 任务不会出现在 active_tokens 中。此时必须取消 boost 并恢复已暂停的任务，
         // 否则 Dart 侧会显示 boost 激活但实际无任务下载，产生莫名其妙的结果。
         if !self.active_tokens.contains_key(&task_id) {
-            rinf::debug_print!(
+            log_info!(
                 "[manager] boost: target task {} failed to start — cancelling boost mode",
                 task_id
             );
@@ -2390,7 +2492,7 @@ impl DownloadManager {
             return;
         }
 
-        rinf::debug_print!(
+        log_info!(
             "[manager] boost mode: priority={}, auto_paused={}",
             task_id,
             self.auto_paused_ids.len()
@@ -2407,7 +2509,7 @@ impl DownloadManager {
     async fn clear_priority(&mut self) {
         self.priority_task_id = None;
         let to_resume: Vec<String> = self.auto_paused_ids.drain().collect();
-        rinf::debug_print!(
+        log_info!(
             "[manager] boost cancelled, resuming {} tasks",
             to_resume.len()
         );
@@ -2423,7 +2525,7 @@ impl DownloadManager {
                 .map(|t| t.status == 3)
                 .unwrap_or(false);
             if is_completed {
-                rinf::debug_print!("[manager] clear_priority: skipping completed task {}", id);
+                log_info!("[manager] clear_priority: skipping completed task {}", id);
                 continue;
             }
             self.resume_task(id).await;
@@ -2639,7 +2741,7 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                         .collect()
                 };
 
-                rinf::debug_print!(
+                log_info!(
                     "[seg-vis] sending SegmentProgress for task {}, {} segments, total_bytes={}",
                     update.task_id,
                     segs.len(),
@@ -2653,7 +2755,7 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                 }
                 .send_signal_to_dart();
             } else {
-                rinf::debug_print!(
+                log_info!(
                     "[seg-vis] NO cached segments for task {}, segment_details in update: {}",
                     update.task_id,
                     update.segment_details.is_some()

@@ -1255,6 +1255,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cbc",
+ "chrono",
  "dash-mpd",
  "futures-util",
  "hex 0.4.3",
