@@ -748,7 +748,17 @@ jobs:
       - name: List release assets
         run: ls -la release-assets/
 
+      # ── 创建 Release 并上传所有文件 ──
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          body: ${{ steps.tag_message.outputs.body }}
+          generate_release_notes: false
+          draft: false
+
       # ── 同步所有 Release 文件到 Cloudflare R2（改善中国大陆下载速度）──
+      # 在 GitHub Release 发布成功后执行
       # 文件路径格式: {tag_name}/{filename}，例如: v0.3.0/FluxDown-0.3.0-windows-x64-setup.exe
       # 公开访问 URL: https://dw-fluxdown.zerx.dev/v0.3.0/FluxDown-0.3.0-windows-x64-setup.exe
       - name: Sync release assets to Cloudflare R2
@@ -777,7 +787,7 @@ jobs:
 
           echo "R2 sync complete. Files available at: ${{ secrets.CF_R2_PUBLIC_URL }}/${TAG_NAME}/"
 
-      # ── 清理 R2 旧版本，仅保留最近 5 个版本（免费额度 10GB）──
+      # ── 清理 R2 旧版本，仅保留最近 20 个版本（免费额度 10GB）──
       - name: Cleanup old versions from R2
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CF_R2_ACCESS_KEY_ID }}
@@ -822,12 +832,3 @@ jobs:
           done
 
           echo "✅ Cleanup complete. Kept latest ${KEEP_VERSIONS} versions."
-
-      # ── 创建 Release 并上传所有文件 ──
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: release-assets/*
-          body: ${{ steps.tag_message.outputs.body }}
-          generate_release_notes: false
-          draft: false

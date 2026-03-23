@@ -1,6 +1,5 @@
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import '../services/file_picker_service.dart';
 import 'package:flutter/material.dart'
     show
@@ -256,15 +255,14 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
     try {
       final result = await FilePickerService.pickFiles(
         dialogTitle: currentS.selectTorrentFile,
-        type: FileType.custom,
         allowedExtensions: ['torrent'],
         allowMultiple: true,
       );
-      if (result != null && result.files.isNotEmpty && mounted) {
+      if (result != null && result.isNotEmpty && mounted) {
         setState(() {
-          for (final file in result.files) {
-            if (file.path != null && !_torrentFilePaths.contains(file.path)) {
-              _torrentFilePaths.add(file.path!);
+          for (final file in result) {
+            if (!_torrentFilePaths.contains(file.path)) {
+              _torrentFilePaths.add(file.path);
             }
           }
         });
@@ -289,17 +287,15 @@ class _NewDownloadDialogContentState extends State<_NewDownloadDialogContent> {
     try {
       final result = await FilePickerService.pickFiles(
         dialogTitle: currentS.importTxtFile,
-        type: FileType.custom,
         allowedExtensions: ['txt', 'text'],
         allowMultiple: true,
       );
-      if (result == null || result.files.isEmpty || !mounted) return;
+      if (result == null || result.isEmpty || !mounted) return;
 
       final imported = <_ParsedEntry>[];
-      for (final file in result.files) {
-        if (file.path == null) continue;
+      for (final file in result) {
         try {
-          final content = await File(file.path!).readAsString();
+          final content = await File(file.path).readAsString();
           imported.addAll(_parseEntries(content, loose: true));
         } catch (_) {
           // 单文件读取失败时跳过，继续处理其他文件

@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
+import 'package:file_selector/file_selector.dart';
 import '../services/file_picker_service.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter/material.dart';
@@ -2384,11 +2384,10 @@ class _ThemeActions extends StatelessWidget {
     final provider = FluxDownApp.of(context);
     final s = LocaleScope.of(context);
 
-    FilePickerResult? result;
+    List<XFile>? result;
     try {
       result = await FilePickerService.pickFiles(
         dialogTitle: s.themeImport,
-        type: FileType.custom,
         allowedExtensions: ['json'],
         allowMultiple: true,
       );
@@ -2404,14 +2403,13 @@ class _ThemeActions extends StatelessWidget {
       ShadSonner.of(context).show(ShadToast.destructive(title: Text(msg)));
       return;
     }
-    if (result == null || result.files.isEmpty) return;
+    if (result == null || result.isEmpty) return;
 
     int successCount = 0;
     final errors = <String>[];
 
-    for (final picked in result.files) {
+    for (final picked in result) {
       final path = picked.path;
-      if (path == null) continue;
 
       try {
         final file = File(path);
@@ -2460,7 +2458,6 @@ class _ThemeActions extends StatelessWidget {
       result = await FilePickerService.saveFile(
         dialogTitle: s.themeExport,
         fileName: '$safeName.json',
-        type: FileType.custom,
         allowedExtensions: ['json'],
       );
     } on FilePickerException catch (e) {
@@ -4075,7 +4072,6 @@ class _LogExportCardState extends State<_LogExportCard> {
       final result = await FilePickerService.saveFile(
         dialogTitle: s.logSelectExportDir,
         fileName: 'fluxdown_logs_$datePart.zip',
-        type: FileType.custom,
         allowedExtensions: ['zip'],
       );
       if (result == null || !mounted) {
