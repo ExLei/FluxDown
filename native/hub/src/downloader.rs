@@ -64,6 +64,14 @@ pub struct FileInfo {
     /// MIME content type from the server (e.g. "text/html", "application/octet-stream").
     /// Empty when the probe phase was skipped (hint_file_size > 0).
     pub content_type: String,
+    /// ETag header value from the server (e.g. `"abc123"` or `W/"abc123"`).
+    /// Used by multi-segment downloads to verify all connections fetch the same
+    /// file version.  Empty when the server did not provide an ETag.
+    pub etag: String,
+    /// Last-Modified header value from the server (RFC 7232 §2.2).
+    /// Used together with `etag` for file-identity verification across segments.
+    /// Empty when the server did not provide Last-Modified.
+    pub last_modified: String,
 }
 
 pub struct ProgressUpdate {
@@ -550,11 +558,25 @@ async fn resolve_file_info_once(
         content_type
     );
 
+    let etag = headers
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
     Ok(FileInfo {
         file_name,
         total_bytes,
         supports_range,
         content_type,
+        etag,
+        last_modified,
     })
 }
 
@@ -1153,6 +1175,9 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             // unknown-size downloads (-1 hint) fall back to single-stream.
             supports_range: p.hint_file_size > 0 && p.segment_count != 1,
             content_type: String::new(),
+            // Hint mode skips the probe, so no ETag/Last-Modified available.
+            etag: String::new(),
+            last_modified: String::new(),
         }
     } else {
         log_info!("[download] task {} resolving file info...", p.task_id);
@@ -1315,6 +1340,8 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.cookies,
             &p.referrer,
             &p.extra_headers,
+            &info.etag,
+            &info.last_modified,
         )
         .await?;
     } else {
@@ -1626,6 +1653,8 @@ async fn download_multi_segment(
     cookies: &str,
     referrer: &str,
     extra_headers: &std::collections::HashMap<String, String>,
+    etag: &str,
+    last_modified: &str,
 ) -> Result<(), DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -1665,6 +1694,8 @@ async fn download_multi_segment(
         cookies,
         referrer,
         extra_headers,
+        etag,
+        last_modified,
     )
     .await
 }

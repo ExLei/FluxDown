@@ -291,6 +291,8 @@ fn resolve_ftp_info_sync(ftp_url: &FtpUrl, proxy: &ProxyConfig) -> Result<FileIn
         total_bytes,
         supports_range,
         content_type: String::new(),
+        etag: String::new(),
+        last_modified: String::new(),
     })
 }
 
