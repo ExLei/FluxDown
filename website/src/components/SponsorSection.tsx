@@ -24,7 +24,8 @@ import type { Messages } from "@/lib/locales";
    ============================================================ */
 
 const AFDIAN_URL = "https://ifdian.net/a/zerx-lab";
-const AFDIAN_SPONSOR_URL = "https://ifdian.net/u/7b862392211611f1942a52540025c377";
+const AFDIAN_SPONSOR_URL =
+  "https://ifdian.net/u/7b862392211611f1942a52540025c377";
 
 // ── Types ──────────────────────────────────────────────────
 
@@ -309,6 +310,9 @@ function SponsorAvatar({
       {/* Tooltip */}
       <div className="absolute -top-9 left-1/2 -translate-x-1/2 px-2 py-1 rounded-md bg-dark-surface2 border border-dark-border/60 text-[11px] text-dark-text whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity duration-150 pointer-events-none z-10 shadow-lg">
         {sponsor.name}
+        {sponsor.amount && parseFloat(sponsor.amount) > 0 && (
+          <span className="ml-1 text-amber-400">¥{sponsor.amount}</span>
+        )}
         {sponsor.plan && (
           <span className="ml-1 text-dark-text-muted">· {sponsor.plan}</span>
         )}
