@@ -67,6 +67,7 @@ const en = {
   "nav.community": "Community",
   "nav.sponsor": "Sponsor",
   "nav.faq": "FAQ",
+  "nav.stats": "Stats",
 
   // Theme Builder
   "tb.badge": "Theme Builder",

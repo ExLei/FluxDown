@@ -64,6 +64,7 @@ const zhCN: Messages = {
   "nav.announcements": "公告",
   "nav.feedback": "反馈",
   "nav.sponsor": "赞助",
+  "nav.stats": "统计",
 
   // Theme Builder
   "tb.badge": "主题构建器",
