@@ -25,8 +25,10 @@ const en = {
     "Click the button below to join the FluxDown global community on Telegram. Chat with developers and users from around the world.",
   "telegramGroup.joinBtn": "Join Telegram Group",
   "telegramGroup.howToJoin": "How to Join",
-  "telegramGroup.step1": "Click the button above to open the Telegram invite link",
-  "telegramGroup.step2": "Open in Telegram app or web — no account search needed",
+  "telegramGroup.step1":
+    "Click the button above to open the Telegram invite link",
+  "telegramGroup.step2":
+    "Open in Telegram app or web — no account search needed",
   "telegramGroup.step3": "Click 'Join Group' to become part of the community",
 
   // Community Float
@@ -272,6 +274,7 @@ const en = {
     "For Chrome, Edge, Brave and other Chromium-based browsers",
   "dl.downloadExtension": "Download Extension",
   "dl.totalDownloads": "total downloads",
+  "dl.dmg": "DMG Installer",
   "dl.appimage": "AppImage",
   "dl.linuxPortable": "Portable",
   "dl.moreFormats": "More Formats",

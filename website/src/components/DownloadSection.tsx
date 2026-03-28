@@ -1,6 +1,18 @@
 import { useState, useEffect, useCallback, type ComponentType } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Download, Check, Loader2, ChevronDown, Puzzle, TrendingUp, Bell, CheckCircle2, AlertCircle, Globe, Smartphone } from "lucide-react";
+import {
+  Download,
+  Check,
+  Loader2,
+  ChevronDown,
+  Puzzle,
+  TrendingUp,
+  Bell,
+  CheckCircle2,
+  AlertCircle,
+  Globe,
+  Smartphone,
+} from "lucide-react";
 import { SiApple, SiLinux } from "@icons-pack/react-simple-icons";
 import { LampEffect } from "@/components/ui/lamp-effect";
 import { useLocale } from "@/lib/i18n";
@@ -39,6 +51,10 @@ interface ReleaseInfo {
     portable_arm64: ReleaseAsset | null;
     extension: ReleaseAsset | null;
     firefox_extension: ReleaseAsset | null;
+    macos_dmg_arm64: ReleaseAsset | null;
+    macos_dmg_x64: ReleaseAsset | null;
+    macos_tarball_arm64: ReleaseAsset | null;
+    macos_tarball_x64: ReleaseAsset | null;
     linux_appimage: ReleaseAsset | null;
     linux_deb: ReleaseAsset | null;
     linux_arch: ReleaseAsset | null;
@@ -71,29 +87,47 @@ export default function DownloadSection() {
 
   const [subscribeTarget, setSubscribeTarget] = useState<string | null>(null);
   const [subscribeEmail, setSubscribeEmail] = useState("");
-  const [subscribeStatus, setSubscribeStatus] = useState<"idle" | "loading" | "success" | "duplicate" | "error">("idle");
+  const [subscribeStatus, setSubscribeStatus] = useState<
+    "idle" | "loading" | "success" | "duplicate" | "error"
+  >("idle");
 
-  const handleSubscribe = useCallback(async (platform: string) => {
-    if (!subscribeEmail.trim()) return;
-    setSubscribeStatus("loading");
-    try {
-      const res = await fetch("/api/subscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: subscribeEmail.trim(), platform }),
-      });
-      if (res.status === 429) { setSubscribeStatus("error"); return; }
-      if (!res.ok) { setSubscribeStatus("error"); return; }
-      const data = await res.json();
-      setSubscribeStatus(data.message === "already_subscribed" ? "duplicate" : "success");
-      if (data.message !== "already_subscribed") setSubscribeEmail("");
-      setTimeout(() => { setSubscribeStatus("idle"); setSubscribeTarget(null); }, 4000);
-    } catch {
-      setSubscribeStatus("error");
-    }
-  }, [subscribeEmail]);
+  const handleSubscribe = useCallback(
+    async (platform: string) => {
+      if (!subscribeEmail.trim()) return;
+      setSubscribeStatus("loading");
+      try {
+        const res = await fetch("/api/subscribe", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: subscribeEmail.trim(), platform }),
+        });
+        if (res.status === 429) {
+          setSubscribeStatus("error");
+          return;
+        }
+        if (!res.ok) {
+          setSubscribeStatus("error");
+          return;
+        }
+        const data = await res.json();
+        setSubscribeStatus(
+          data.message === "already_subscribed" ? "duplicate" : "success",
+        );
+        if (data.message !== "already_subscribed") setSubscribeEmail("");
+        setTimeout(() => {
+          setSubscribeStatus("idle");
+          setSubscribeTarget(null);
+        }, 4000);
+      } catch {
+        setSubscribeStatus("error");
+      }
+    },
+    [subscribeEmail],
+  );
 
-  const hasArm64Assets = !!(release?.assets.setup_arm64 || release?.assets.portable_arm64);
+  const hasArm64Assets = !!(
+    release?.assets.setup_arm64 || release?.assets.portable_arm64
+  );
   const hasLinuxAssets = !!(
     release?.assets.linux_appimage ||
     release?.assets.linux_deb ||
@@ -116,7 +150,11 @@ export default function DownloadSection() {
     /** Linux 等平台的多格式下载列表，存在时替代单一 portable 按钮 */
     packages?: Array<{ label: string; asset: ReleaseAsset | null }>;
     /** 多架构变体，存在时在卡片内显示架构切换 tabs */
-    archVariants?: Array<{ label: string; setup: ReleaseAsset | null; portable: ReleaseAsset | null }>;
+    archVariants?: Array<{
+      label: string;
+      setup: ReleaseAsset | null;
+      portable: ReleaseAsset | null;
+    }>;
   }[] = [
     {
       key: "windows",
@@ -128,31 +166,120 @@ export default function DownloadSection() {
       badge: t("dl.availableNow"),
       setup: release?.assets.setup ?? null,
       portable: release?.assets.portable ?? null,
-      archVariants: hasArm64Assets ? [
-        { label: "x64", setup: release?.assets.setup ?? null, portable: release?.assets.portable ?? null },
-        { label: "ARM64", setup: release?.assets.setup_arm64 ?? null, portable: release?.assets.portable_arm64 ?? null },
-      ] : undefined,
+      archVariants: hasArm64Assets
+        ? [
+            {
+              label: "x64",
+              setup: release?.assets.setup ?? null,
+              portable: release?.assets.portable ?? null,
+            },
+            {
+              label: "ARM64",
+              setup: release?.assets.setup_arm64 ?? null,
+              portable: release?.assets.portable_arm64 ?? null,
+            },
+          ]
+        : undefined,
     },
-    { key: "macos", name: t("dl.macos"), icon: SiApple, arch: "Apple Silicon", available: false, primary: false, badge: t("dl.comingSoon"), setup: null, portable: null },
     {
-      key: "linux", name: t("dl.linux"), icon: SiLinux, arch: "x64",
-      available: hasLinuxAssets, primary: hasLinuxAssets,
+      key: "macos",
+      name: t("dl.macos"),
+      icon: SiApple,
+      arch: "Apple Silicon / Intel",
+      available: !!(
+        release?.assets.macos_dmg_arm64 ||
+        release?.assets.macos_dmg_x64 ||
+        release?.assets.macos_tarball_arm64 ||
+        release?.assets.macos_tarball_x64
+      ),
+      primary: !!(
+        release?.assets.macos_dmg_arm64 || release?.assets.macos_dmg_x64
+      ),
+      badge:
+        release?.assets.macos_dmg_arm64 ||
+        release?.assets.macos_dmg_x64 ||
+        release?.assets.macos_tarball_arm64 ||
+        release?.assets.macos_tarball_x64
+          ? t("dl.availableNow")
+          : t("dl.comingSoon"),
+      setup:
+        release?.assets.macos_dmg_arm64 ??
+        release?.assets.macos_dmg_x64 ??
+        null,
+      setupLabel: t("dl.dmg"),
+      portable: null,
+      portableLabel: "tar.gz",
+      archVariants:
+        release?.assets.macos_dmg_arm64 && release?.assets.macos_dmg_x64
+          ? [
+              {
+                label: "Apple Silicon",
+                setup: release?.assets.macos_dmg_arm64 ?? null,
+                portable: release?.assets.macos_tarball_arm64 ?? null,
+              },
+              {
+                label: "Intel (x64)",
+                setup: release?.assets.macos_dmg_x64 ?? null,
+                portable: release?.assets.macos_tarball_x64 ?? null,
+              },
+            ]
+          : undefined,
+    },
+    {
+      key: "linux",
+      name: t("dl.linux"),
+      icon: SiLinux,
+      arch: "x64",
+      available: hasLinuxAssets,
+      primary: hasLinuxAssets,
       badge: hasLinuxAssets ? t("dl.availableNow") : t("dl.comingSoon"),
       setup: release?.assets.linux_appimage ?? null,
       setupLabel: t("dl.appimage"),
       portable: null,
       packages: [
-        { label: "deb (Debian / Ubuntu)", asset: release?.assets.linux_deb ?? null },
-        { label: "pkg.tar.zst (Arch Linux)", asset: release?.assets.linux_arch ?? null },
-        { label: `tar.gz ${t("dl.linuxPortable")}`, asset: release?.assets.linux_tarball ?? null },
+        {
+          label: "deb (Debian / Ubuntu)",
+          asset: release?.assets.linux_deb ?? null,
+        },
+        {
+          label: "pkg.tar.zst (Arch Linux)",
+          asset: release?.assets.linux_arch ?? null,
+        },
+        {
+          label: `tar.gz ${t("dl.linuxPortable")}`,
+          asset: release?.assets.linux_tarball ?? null,
+        },
       ],
     },
-    { key: "web", name: t("dl.web"), icon: Globe, arch: t("dl.webArch"), available: false, primary: false, badge: t("dl.comingSoon"), setup: null, portable: null },
-    { key: "mobile", name: t("dl.mobile"), icon: Smartphone, arch: "Android / iOS", available: false, primary: false, badge: t("dl.comingSoon"), setup: null, portable: null },
+    {
+      key: "web",
+      name: t("dl.web"),
+      icon: Globe,
+      arch: t("dl.webArch"),
+      available: false,
+      primary: false,
+      badge: t("dl.comingSoon"),
+      setup: null,
+      portable: null,
+    },
+    {
+      key: "mobile",
+      name: t("dl.mobile"),
+      icon: Smartphone,
+      arch: "Android / iOS",
+      available: false,
+      primary: false,
+      badge: t("dl.comingSoon"),
+      setup: null,
+      portable: null,
+    },
   ];
 
   return (
-    <section id="download" className="relative pt-16 sm:pt-20 pb-20 sm:pb-32 overflow-hidden bg-dark-bg">
+    <section
+      id="download"
+      className="relative pt-16 sm:pt-20 pb-20 sm:pb-32 overflow-hidden bg-dark-bg"
+    >
       <LampEffect>
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 relative z-10">
           <motion.div
@@ -167,7 +294,10 @@ export default function DownloadSection() {
             </span>
             <h2 className="mt-6 text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight text-dark-text">
               {t("dl.title")}
-              <span className="bg-gradient-to-r from-brand-sky to-brand-cyan bg-clip-text text-transparent">{t("dl.titleHighlight")}</span>?
+              <span className="bg-gradient-to-r from-brand-sky to-brand-cyan bg-clip-text text-transparent">
+                {t("dl.titleHighlight")}
+              </span>
+              ?
             </h2>
             <p className="mt-4 text-dark-text-secondary text-lg">
               {t("dl.subtitle")}
@@ -184,8 +314,11 @@ export default function DownloadSection() {
           >
             {platforms.map((p, i) => {
               const Icon = p.icon;
-              const currentArchLabel = selectedArch[p.key] ?? p.archVariants?.[0]?.label;
-              const activeVariant = p.archVariants?.find(v => v.label === currentArchLabel);
+              const currentArchLabel =
+                selectedArch[p.key] ?? p.archVariants?.[0]?.label;
+              const activeVariant = p.archVariants?.find(
+                (v) => v.label === currentArchLabel,
+              );
               const effectiveSetup = activeVariant?.setup ?? p.setup;
               const effectivePortable = activeVariant?.portable ?? p.portable;
               return (
@@ -211,11 +344,13 @@ export default function DownloadSection() {
                       {p.badge}
                     </div>
                   )}
-                  <div className={`w-14 h-14 rounded-xl flex items-center justify-center mx-auto mb-4 transition-all duration-300 ${
-                    p.primary
-                      ? "bg-gradient-to-br from-brand-sky to-brand-cyan"
-                      : "bg-dark-surface2 border border-dark-border/50 group-hover:border-brand-blue/20 group-hover:bg-gradient-to-br group-hover:from-brand-blue/10 group-hover:to-brand-cyan/5"
-                  }`}>
+                  <div
+                    className={`w-14 h-14 rounded-xl flex items-center justify-center mx-auto mb-4 transition-all duration-300 ${
+                      p.primary
+                        ? "bg-gradient-to-br from-brand-sky to-brand-cyan"
+                        : "bg-dark-surface2 border border-dark-border/50 group-hover:border-brand-blue/20 group-hover:bg-gradient-to-br group-hover:from-brand-blue/10 group-hover:to-brand-cyan/5"
+                    }`}
+                  >
                     <Icon
                       className={`w-7 h-7 transition-colors duration-300 ${
                         p.primary
@@ -225,17 +360,22 @@ export default function DownloadSection() {
                       color="currentColor"
                     />
                   </div>
-                  <h3 className="text-base font-semibold text-dark-text">{p.name}</h3>
+                  <h3 className="text-base font-semibold text-dark-text">
+                    {p.name}
+                  </h3>
 
                   {/* Arch display: segmented toggle for multi-arch, plain text for single */}
                   {p.archVariants && p.archVariants.length > 1 ? (
                     <div className="flex items-center justify-center gap-1 mt-2">
-                      {p.archVariants.map(v => (
+                      {p.archVariants.map((v) => (
                         <button
                           key={v.label}
                           type="button"
                           onClick={() => {
-                            setSelectedArch(prev => ({ ...prev, [p.key]: v.label }));
+                            setSelectedArch((prev) => ({
+                              ...prev,
+                              [p.key]: v.label,
+                            }));
                             setShowPortable(null);
                           }}
                           className={`px-2.5 py-0.5 rounded text-[10px] font-semibold transition-colors ${
@@ -249,7 +389,9 @@ export default function DownloadSection() {
                       ))}
                     </div>
                   ) : (
-                    <p className="text-xs text-dark-text-muted mt-1">{p.arch}</p>
+                    <p className="text-xs text-dark-text-muted mt-1">
+                      {p.arch}
+                    </p>
                   )}
 
                   {/* 版本号 */}
@@ -257,7 +399,9 @@ export default function DownloadSection() {
                     <p className="text-[10px] text-dark-text-muted mt-1">
                       {t("dl.version", { version: release.version })}
                       {effectiveSetup && (
-                        <span className="ml-1.5">({formatSize(effectiveSetup.size)})</span>
+                        <span className="ml-1.5">
+                          ({formatSize(effectiveSetup.size)})
+                        </span>
                       )}
                     </p>
                   )}
@@ -276,7 +420,8 @@ export default function DownloadSection() {
                           className="inline-flex items-center justify-center gap-2 w-full rounded-lg bg-brand-blue px-5 py-2.5 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors shadow-lg shadow-brand-blue/20"
                         >
                           <Download className="w-3.5 h-3.5" />
-                          {t("dl.downloadBtn")} — {p.setupLabel ?? t("dl.installPkg")}
+                          {t("dl.downloadBtn")} —{" "}
+                          {p.setupLabel ?? t("dl.installPkg")}
                         </a>
                       ) : (
                         <a
@@ -289,28 +434,36 @@ export default function DownloadSection() {
                       )}
 
                       {/* 多格式下载折叠（Linux 等平台） */}
-                      {p.packages && p.packages.some(pkg => pkg.asset) && (
+                      {p.packages && p.packages.some((pkg) => pkg.asset) && (
                         <>
                           <button
                             type="button"
-                            onClick={() => setShowPortable(showPortable === p.key ? null : p.key)}
+                            onClick={() =>
+                              setShowPortable(
+                                showPortable === p.key ? null : p.key,
+                              )
+                            }
                             className="inline-flex items-center justify-center gap-1 text-[10px] text-dark-text-muted hover:text-dark-text-secondary transition-colors"
                           >
                             {t("dl.moreFormats")}
-                            <ChevronDown className={`w-3 h-3 transition-transform ${showPortable === p.key ? "rotate-180" : ""}`} />
+                            <ChevronDown
+                              className={`w-3 h-3 transition-transform ${showPortable === p.key ? "rotate-180" : ""}`}
+                            />
                           </button>
                           {showPortable === p.key && (
                             <div className="flex flex-col gap-1.5 w-full">
-                              {p.packages.filter(pkg => pkg.asset).map(pkg => (
-                                <a
-                                  key={pkg.label}
-                                  href={pkg.asset!.download_url}
-                                  className="inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dark-border px-5 py-2 text-[10px] font-medium text-dark-text-secondary hover:bg-dark-surface3 transition-colors"
-                                >
-                                  <Download className="w-3 h-3" />
-                                  {pkg.label} ({formatSize(pkg.asset!.size)})
-                                </a>
-                              ))}
+                              {p.packages
+                                .filter((pkg) => pkg.asset)
+                                .map((pkg) => (
+                                  <a
+                                    key={pkg.label}
+                                    href={pkg.asset!.download_url}
+                                    className="inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dark-border px-5 py-2 text-[10px] font-medium text-dark-text-secondary hover:bg-dark-surface3 transition-colors"
+                                  >
+                                    <Download className="w-3 h-3" />
+                                    {pkg.label} ({formatSize(pkg.asset!.size)})
+                                  </a>
+                                ))}
                             </div>
                           )}
                         </>
@@ -321,11 +474,17 @@ export default function DownloadSection() {
                         <>
                           <button
                             type="button"
-                            onClick={() => setShowPortable(showPortable === p.key ? null : p.key)}
+                            onClick={() =>
+                              setShowPortable(
+                                showPortable === p.key ? null : p.key,
+                              )
+                            }
                             className="inline-flex items-center justify-center gap-1 text-[10px] text-dark-text-muted hover:text-dark-text-secondary transition-colors"
                           >
                             {p.portableLabel ?? t("dl.portablePkg")}
-                            <ChevronDown className={`w-3 h-3 transition-transform ${showPortable === p.key ? "rotate-180" : ""}`} />
+                            <ChevronDown
+                              className={`w-3 h-3 transition-transform ${showPortable === p.key ? "rotate-180" : ""}`}
+                            />
                           </button>
                           {showPortable === p.key && (
                             <a
@@ -333,7 +492,8 @@ export default function DownloadSection() {
                               className="inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dark-border px-5 py-2 text-[10px] font-medium text-dark-text-secondary hover:bg-dark-surface3 transition-colors"
                             >
                               <Download className="w-3 h-3" />
-                              {p.portableLabel ?? t("dl.portablePkg")} ({formatSize(effectivePortable.size)})
+                              {p.portableLabel ?? t("dl.portablePkg")} (
+                              {formatSize(effectivePortable.size)})
                             </a>
                           )}
                         </>
@@ -367,8 +527,13 @@ export default function DownloadSection() {
                                   <input
                                     type="email"
                                     value={subscribeEmail}
-                                    onChange={(e) => setSubscribeEmail(e.target.value)}
-                                    onKeyDown={(e) => e.key === "Enter" && handleSubscribe(p.key)}
+                                    onChange={(e) =>
+                                      setSubscribeEmail(e.target.value)
+                                    }
+                                    onKeyDown={(e) =>
+                                      e.key === "Enter" &&
+                                      handleSubscribe(p.key)
+                                    }
                                     placeholder={t("dl.emailPlaceholder")}
                                     disabled={subscribeStatus === "loading"}
                                     className="flex-1 min-w-0 rounded-lg border border-dark-border bg-dark-surface2 px-3 py-2 text-xs text-dark-text placeholder:text-dark-text-muted/50 focus:outline-none focus:border-brand-blue/50 disabled:opacity-50 transition-colors"
@@ -376,7 +541,10 @@ export default function DownloadSection() {
                                   <button
                                     type="button"
                                     onClick={() => handleSubscribe(p.key)}
-                                    disabled={subscribeStatus === "loading" || !subscribeEmail.trim()}
+                                    disabled={
+                                      subscribeStatus === "loading" ||
+                                      !subscribeEmail.trim()
+                                    }
                                     className="flex-shrink-0 rounded-lg bg-brand-blue px-3 py-2 text-xs font-semibold text-white hover:bg-brand-blue/90 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                                   >
                                     {subscribeStatus === "loading" ? (
@@ -394,7 +562,10 @@ export default function DownloadSection() {
                                 )}
                                 <button
                                   type="button"
-                                  onClick={() => { setSubscribeTarget(null); setSubscribeStatus("idle"); }}
+                                  onClick={() => {
+                                    setSubscribeTarget(null);
+                                    setSubscribeStatus("idle");
+                                  }}
                                   className="text-[10px] text-dark-text-muted hover:text-dark-text-secondary transition-colors"
                                 >
                                   {t("dl.comingSoon")}
@@ -409,7 +580,11 @@ export default function DownloadSection() {
                             initial={{ opacity: 0 }}
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
-                            onClick={() => { setSubscribeTarget(p.key); setSubscribeStatus("idle"); setSubscribeEmail(""); }}
+                            onClick={() => {
+                              setSubscribeTarget(p.key);
+                              setSubscribeStatus("idle");
+                              setSubscribeEmail("");
+                            }}
                             className="inline-flex items-center justify-center gap-2 w-full rounded-lg border border-dashed border-dark-text-muted/30 px-5 py-2.5 text-xs font-medium text-dark-text-muted hover:border-brand-blue/40 hover:text-brand-blue/80 transition-colors duration-200"
                           >
                             <Bell className="w-3.5 h-3.5" />
@@ -439,14 +614,21 @@ export default function DownloadSection() {
                   <Puzzle className="w-6 h-6 text-brand-blue" />
                 </div>
                 <div className="min-w-0">
-                  <h3 className="text-sm font-semibold text-dark-text">{t("dl.extensionTitle")}</h3>
-                  <p className="text-xs text-dark-text-muted mt-0.5">{t("dl.extensionDesc")}</p>
-                  {(release?.assets.extension || release?.assets.firefox_extension) && (
+                  <h3 className="text-sm font-semibold text-dark-text">
+                    {t("dl.extensionTitle")}
+                  </h3>
+                  <p className="text-xs text-dark-text-muted mt-0.5">
+                    {t("dl.extensionDesc")}
+                  </p>
+                  {(release?.assets.extension ||
+                    release?.assets.firefox_extension) && (
                     <p className="text-[10px] text-dark-text-muted mt-1">
                       {t("dl.version", { version: release.version })}
                     </p>
                   )}
-                  <p className="text-[10px] text-dark-text-muted/70 mt-0.5">{t("dl.extensionOtherNote")}</p>
+                  <p className="text-[10px] text-dark-text-muted/70 mt-0.5">
+                    {t("dl.extensionOtherNote")}
+                  </p>
                 </div>
               </div>
               {/* 按钮行 — flex-wrap 自动换行 */}
@@ -458,8 +640,13 @@ export default function DownloadSection() {
                   rel="noopener noreferrer"
                   className="inline-flex items-center justify-center gap-2 rounded-lg border border-brand-blue/30 bg-brand-blue/10 px-4 py-2 text-xs font-semibold text-brand-blue hover:bg-brand-blue/20 transition-colors"
                 >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <path d="M12 0C8.21 0 4.831 1.757 2.632 4.501l3.953 6.848A5.454 5.454 0 0 1 12 6.545h10.691A12 12 0 0 0 12 0zM1.931 5.47A11.943 11.943 0 0 0 0 12c0 6.012 4.42 10.991 10.189 11.864l3.953-6.847a5.45 5.45 0 0 1-6.865-2.29zm13.342 2.166a5.446 5.446 0 0 1 1.45 7.09l.002.001h-.002l-5.344 9.257c.206.01.413.016.621.016 6.627 0 12-5.373 12-12 0-1.54-.29-3.011-.818-4.364zM12 16.364a4.364 4.364 0 1 1 0-8.728 4.364 4.364 0 0 1 0 8.728z"/>
+                  <svg
+                    className="w-3.5 h-3.5"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 0C8.21 0 4.831 1.757 2.632 4.501l3.953 6.848A5.454 5.454 0 0 1 12 6.545h10.691A12 12 0 0 0 12 0zM1.931 5.47A11.943 11.943 0 0 0 0 12c0 6.012 4.42 10.991 10.189 11.864l3.953-6.847a5.45 5.45 0 0 1-6.865-2.29zm13.342 2.166a5.446 5.446 0 0 1 1.45 7.09l.002.001h-.002l-5.344 9.257c.206.01.413.016.621.016 6.627 0 12-5.373 12-12 0-1.54-.29-3.011-.818-4.364zM12 16.364a4.364 4.364 0 1 1 0-8.728 4.364 4.364 0 0 1 0 8.728z" />
                   </svg>
                   {t("dl.extensionChromeStore")}
                 </a>
@@ -470,8 +657,13 @@ export default function DownloadSection() {
                   rel="noopener noreferrer"
                   className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#ff7139]/30 bg-[#ff7139]/10 px-4 py-2 text-xs font-semibold text-[#ff7139] hover:bg-[#ff7139]/20 transition-colors"
                 >
-                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                    <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 16.43c-.195.334-.413.65-.655.948-.494.61-1.07 1.084-1.7 1.41-.646.336-1.347.506-2.069.506-.723 0-1.424-.17-2.07-.506-.63-.326-1.205-.8-1.699-1.41-.242-.298-.46-.614-.655-.948C8.456 15.3 8 13.697 8 12c0-1.698.456-3.3 1.046-4.43.195-.334.413-.65.655-.948.494-.61 1.07-1.084 1.7-1.41C12.047 4.876 12.748 4.706 13.47 4.706c.722 0 1.423.17 2.069.506.63.326 1.206.8 1.7 1.41.242.298.46.614.655.948C18.484 8.7 19 10.303 19 12c0 1.697-.516 3.3-1.106 4.43z"/>
+                  <svg
+                    className="w-3.5 h-3.5"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 16.43c-.195.334-.413.65-.655.948-.494.61-1.07 1.084-1.7 1.41-.646.336-1.347.506-2.069.506-.723 0-1.424-.17-2.07-.506-.63-.326-1.205-.8-1.699-1.41-.242-.298-.46-.614-.655-.948C8.456 15.3 8 13.697 8 12c0-1.698.456-3.3 1.046-4.43.195-.334.413-.65.655-.948.494-.61 1.07-1.084 1.7-1.41C12.047 4.876 12.748 4.706 13.47 4.706c.722 0 1.423.17 2.069.506.63.326 1.206.8 1.7 1.41.242.298.46.614.655.948C18.484 8.7 19 10.303 19 12c0 1.697-.516 3.3-1.106 4.43z" />
                   </svg>
                   {t("dl.extensionFirefox")}
                 </a>
@@ -482,7 +674,8 @@ export default function DownloadSection() {
                     className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#ff7139]/30 bg-[#ff7139]/10 px-4 py-2 text-xs font-semibold text-[#ff7139] hover:bg-[#ff7139]/20 transition-colors"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    Firefox XPI ({formatSize(release.assets.firefox_extension.size)})
+                    Firefox XPI (
+                    {formatSize(release.assets.firefox_extension.size)})
                   </a>
                 )}
                 {/* Chrome 离线包按钮 */}
@@ -498,7 +691,8 @@ export default function DownloadSection() {
                     className="inline-flex items-center justify-center gap-2 rounded-lg border border-brand-blue/30 bg-brand-blue/10 px-4 py-2 text-xs font-semibold text-brand-blue hover:bg-brand-blue/20 transition-colors"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    {t("dl.extensionOffline")} ({formatSize(release.assets.extension.size)})
+                    {t("dl.extensionOffline")} (
+                    {formatSize(release.assets.extension.size)})
                   </a>
                 ) : (
                   <div className="inline-flex items-center justify-center gap-2 rounded-lg border border-dark-border px-4 py-2 text-xs font-medium text-dark-text-muted">
@@ -521,16 +715,24 @@ export default function DownloadSection() {
               <div className="inline-flex items-center gap-2 text-sm text-dark-text-secondary">
                 <TrendingUp className="w-4 h-4 text-success" />
                 <span>
-                  <span className="font-semibold text-dark-text">{release.total_downloads.toLocaleString()}</span>
-                  {" "}{t("dl.totalDownloads")}
+                  <span className="font-semibold text-dark-text">
+                    {release.total_downloads.toLocaleString()}
+                  </span>{" "}
+                  {t("dl.totalDownloads")}
                 </span>
               </div>
             )}
             <div className="inline-flex items-center gap-3 sm:gap-6 rounded-full border border-dark-border bg-dark-surface1/50 px-4 sm:px-6 py-2.5 sm:py-3 backdrop-blur-sm">
               {techStack.map((ts, i) => (
                 <span key={ts.name}>
-                  <span className={`text-[10px] sm:text-xs font-semibold ${ts.color}`}>{ts.name}</span>
-                  {i < techStack.length - 1 && <span className="ml-3 sm:ml-6 inline-block h-3 sm:h-4 w-px bg-dark-border" />}
+                  <span
+                    className={`text-[10px] sm:text-xs font-semibold ${ts.color}`}
+                  >
+                    {ts.name}
+                  </span>
+                  {i < techStack.length - 1 && (
+                    <span className="ml-3 sm:ml-6 inline-block h-3 sm:h-4 w-px bg-dark-border" />
+                  )}
                 </span>
               ))}
             </div>

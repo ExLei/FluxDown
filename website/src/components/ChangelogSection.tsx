@@ -85,6 +85,20 @@ function inferAssetMeta(name: string): {
     };
   }
   // macOS
+  if (lower.endsWith("-macos-arm64.dmg")) {
+    return {
+      label: "macOS",
+      sub: "Apple Silicon 安装镜像",
+      icon: <MonitorDown className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-macos-x64.dmg")) {
+    return {
+      label: "macOS",
+      sub: "Intel (x64) 安装镜像",
+      icon: <MonitorDown className="w-3.5 h-3.5" />,
+    };
+  }
   if (lower.endsWith(".dmg")) {
     return {
       label: "macOS",
@@ -92,10 +106,38 @@ function inferAssetMeta(name: string): {
       icon: <MonitorDown className="w-3.5 h-3.5" />,
     };
   }
+  if (lower.endsWith("-macos-arm64.pkg")) {
+    return {
+      label: "macOS",
+      sub: "Apple Silicon 安装包",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-macos-x64.pkg")) {
+    return {
+      label: "macOS",
+      sub: "Intel (x64) 安装包",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
   if (lower.endsWith(".pkg")) {
     return {
       label: "macOS",
       sub: "安装包",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-macos-arm64.tar.gz")) {
+    return {
+      label: "macOS",
+      sub: "Apple Silicon Tarball",
+      icon: <Package className="w-3.5 h-3.5" />,
+    };
+  }
+  if (lower.endsWith("-macos-x64.tar.gz")) {
+    return {
+      label: "macOS",
+      sub: "Intel (x64) Tarball",
       icon: <Package className="w-3.5 h-3.5" />,
     };
   }
@@ -186,7 +228,7 @@ function groupAssets(assets: ReleaseAsset[]): Array<{
     map.get(meta.label)!.push({ asset, meta });
   }
 
-  return [...map.entries()]
+  return Array.from(map.entries())
     .sort(([a], [b]) => (PLATFORM_ORDER[a] ?? 50) - (PLATFORM_ORDER[b] ?? 50))
     .map(([platform, items]) => ({ platform, items }));
 }

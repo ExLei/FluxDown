@@ -358,6 +358,19 @@ export const GET: APIRoute = async () => {
     const firefoxExtensionAsset = latest.assets.find((a) =>
       a.name.endsWith("-firefox.xpi"),
     );
+    // macOS 资产
+    const macosDmgArm64Asset = latest.assets.find((a) =>
+      a.name.endsWith("-macos-arm64.dmg"),
+    );
+    const macosDmgX64Asset = latest.assets.find((a) =>
+      a.name.endsWith("-macos-x64.dmg"),
+    );
+    const macosTarballArm64Asset = latest.assets.find((a) =>
+      a.name.endsWith("-macos-arm64.tar.gz"),
+    );
+    const macosTarballX64Asset = latest.assets.find((a) =>
+      a.name.endsWith("-macos-x64.tar.gz"),
+    );
     // Linux 资产
     const linuxAppImageAsset = latest.assets.find((a) =>
       a.name.endsWith("-linux-x64.AppImage"),
@@ -411,6 +424,10 @@ export const GET: APIRoute = async () => {
         portable_arm64: formatAsset(portableArm64Asset),
         extension: formatAsset(extensionAsset),
         firefox_extension: formatAsset(firefoxExtensionAsset),
+        macos_dmg_arm64: formatAsset(macosDmgArm64Asset),
+        macos_dmg_x64: formatAsset(macosDmgX64Asset),
+        macos_tarball_arm64: formatAsset(macosTarballArm64Asset),
+        macos_tarball_x64: formatAsset(macosTarballX64Asset),
         linux_appimage: formatAsset(linuxAppImageAsset),
         linux_deb: formatAsset(linuxDebAsset),
         linux_arch: formatAsset(linuxArchAsset),

@@ -5,8 +5,7 @@ const zhCN: Messages = {
   "announcement.1": "投票进行中：建微信群、QQ群还是公众号？快来参与投票吧！",
   "announcement.2":
     "QQ 群已创建！群号：832143651，欢迎加入 FluxDown 社区交流群！",
-  "announcement.3":
-    "Telegram 群已创建！欢迎加入 FluxDown 国际社区交流群！",
+  "announcement.3": "Telegram 群已创建！欢迎加入 FluxDown 国际社区交流群！",
   "announcement.close": "关闭",
   "announcement.badge": "公告",
   "announcement.title": "最新",
@@ -266,6 +265,7 @@ const zhCN: Messages = {
   "dl.extensionOtherNote": "适用于 Chrome、Edge、Brave 等 Chromium 内核浏览器",
   "dl.downloadExtension": "下载扩展",
   "dl.totalDownloads": "次下载",
+  "dl.dmg": "DMG 安装镜像",
   "dl.appimage": "AppImage",
   "dl.linuxPortable": "便携版",
   "dl.moreFormats": "更多格式",
