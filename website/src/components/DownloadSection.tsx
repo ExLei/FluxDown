@@ -407,6 +407,13 @@ export default function DownloadSection() {
                     </p>
                   )}
 
+                  {/* 系统要求提示 */}
+                  {p.key === "windows" && (
+                    <p className="text-[10px] text-dark-text-muted/60 mt-0.5">
+                      {t("dl.sysReq.windows")}
+                    </p>
+                  )}
+
                   {p.available ? (
                     <div className="mt-4 flex flex-col gap-2">
                       {/* 主下载按钮（安装包） */}

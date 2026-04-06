@@ -330,6 +330,7 @@ const en = {
   "dl.subscribeError": "Failed, try again",
   "dl.macosWarning": "Getting a 'damaged' error?",
   "dl.macosWarningLink": "View fix",
+  "dl.sysReq.windows": "Requires Windows 10 or later",
 
   // macOS Gatekeeper page
   "macos.title": "Fix macOS 'App is Damaged' Error",
@@ -480,7 +481,7 @@ const en = {
     "Yes, FluxDown has full breakpoint resume support. All download progress is persisted to a local SQLite database. You can safely close the app or restart your computer without losing any progress.",
   "faq.items.6.q": "Which platforms are supported?",
   "faq.items.6.a":
-    "Windows and Linux (x64) are fully supported right now. macOS support is planned and coming soon.",
+    "Windows (10 or later, x64/ARM64) and Linux (x64) are fully supported right now. macOS support is planned and coming soon. Windows 7/8/8.1 are not supported.",
   "faq.items.7.q": "How do I install the browser extension?",
   "faq.items.7.a":
     "Download the extension zip from the Download section, extract it, then open your browser's extension management page (chrome://extensions), enable Developer Mode, and click 'Load unpacked' to select the extracted folder.",

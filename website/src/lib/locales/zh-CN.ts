@@ -320,6 +320,7 @@ const zhCN: Messages = {
   "dl.subscribeError": "失败，请重试",
   "dl.macosWarning": "遇到「已损坏」提示？",
   "dl.macosWarningLink": "查看解决方案",
+  "dl.sysReq.windows": "需要 Windows 10 或更高版本",
 
   // macOS Gatekeeper page
   "macos.title": "macOS「已损坏」错误解决方案",
@@ -464,7 +465,7 @@ const zhCN: Messages = {
     "支持。FluxDown 具备完整的断点续传功能。所有下载进度都持久化到本地 SQLite 数据库中。你可以安全地关闭应用或重启电脑，不会丢失任何进度。",
   "faq.items.6.q": "支持哪些操作系统？",
   "faq.items.6.a":
-    "目前完整支持 Windows 和 Linux（x64）。macOS 支持已在规划中，即将推出。",
+    "目前完整支持 Windows（10 及以上，x64/ARM64）和 Linux（x64）。macOS 支持已在规划中，即将推出。不支持 Windows 7/8/8.1。",
   "faq.items.7.q": "如何安装浏览器扩展？",
   "faq.items.7.a":
     "从下载区域下载扩展 zip 文件，解压后打开浏览器的扩展管理页面（chrome://extensions），开启开发者模式，点击「加载已解压的扩展程序」选择解压后的文件夹即可。",

@@ -1,6 +1,10 @@
 //! 全局文件日志 — 与 Dart 端 LogService 写入同一目录/文件，按日期分文件。
 //!
-//! - 日志目录：Linux `~/.local/share/fluxdown/logs/`，Windows exe 同级 `logs/`
+//! - 日志目录：由 `data_dir::resolve_data_dir()` 决定，加 `/logs` 后缀
+//!   - Linux: `~/.local/share/fluxdown/logs/`
+//!   - macOS: `~/Library/Application Support/fluxdown/logs/`
+//!   - Windows 便携版: `<exe_dir>/logs/`
+//!   - Windows 安装版: `%LOCALAPPDATA%/FluxDown/logs/`
 //! - 文件名：`fluxdown_YYYY-MM-DD.log`（与 Dart 端完全一致）
 //! - 两端都以 append 模式写入，POSIX `O_APPEND` 保证单次 write 原子性
 //! - 启动时自动清理 7 天前的日志文件
@@ -187,32 +191,11 @@ pub fn write_error(message: &str) {
 }
 
 // ══════════════════════════════════════════════════
-//  路径解析 — 与 Dart LogService._resolveLogDir() 一致
+//  路径解析 — 委托 data_dir 模块，与 Dart 端 platform_utils 一致
 // ══════════════════════════════════════════════════
 
 fn resolve_log_dir() -> PathBuf {
-    #[cfg(target_os = "linux")]
-    {
-        let xdg = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_default();
-            format!("{home}/.local/share")
-        });
-        PathBuf::from(format!("{xdg}/fluxdown/logs"))
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/Library/Application Support/fluxdown/logs"))
-    }
-
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        let exe = std::env::current_exe().unwrap_or_default();
-        exe.parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("logs")
-    }
+    crate::data_dir::resolve_data_dir().join("logs")
 }
 
 // ══════════════════════════════════════════════════

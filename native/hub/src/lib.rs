@@ -1,6 +1,7 @@
 mod actors;
 mod bt_downloader;
 mod dash_downloader;
+mod data_dir;
 mod db;
 mod download_manager;
 mod downloader;

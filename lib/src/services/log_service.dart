@@ -6,8 +6,15 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
+import 'platform_utils.dart';
 
-/// 文件日志服务 — 将日志写入 exe 同级 logs/ 目录，按日期分文件。
+/// 文件日志服务 — 将日志写入数据目录的 logs/ 子目录，按日期分文件。
+///
+/// 日志目录由 [resolveDataDir] 决定：
+/// - Windows 便携版: exe 同级 logs/
+/// - Windows 安装版: %LOCALAPPDATA%/FluxDown/logs/
+/// - Linux: ~/.local/share/fluxdown/logs/
+/// - macOS: ~/Library/Application Support/fluxdown/logs/
 ///
 /// 使用缓冲写入 + 定时刷盘，兼顾性能和崩溃前日志完整度。
 /// 单例，应在 app 启动最早期调用 [init]。
@@ -38,11 +45,26 @@ class LogService {
     _initialized = true;
 
     _logDir = _resolveLogDir();
-    if (!_logDir.existsSync()) {
-      _logDir.createSync(recursive: true);
+    try {
+      if (!_logDir.existsSync()) {
+        _logDir.createSync(recursive: true);
+      }
+    } catch (e) {
+      // 目录创建失败（如 Program Files 无写权限），不能让日志服务崩溃阻止 runApp()
+      // ignore: avoid_print
+      print('[LogService] failed to create log dir ${_logDir.path}: $e');
+      _initialized = false;
+      return;
     }
 
-    _rotateSink();
+    try {
+      _rotateSink();
+    } catch (e) {
+      // ignore: avoid_print
+      print('[LogService] failed to open log file: $e');
+      _initialized = false;
+      return;
+    }
 
     // 启动时清理 7 天前的旧日志文件
     _cleanupOldLogs();
@@ -196,23 +218,15 @@ class LogService {
     _dirty = true;
   }
 
-  /// 解析日志目录：
-  /// - Linux: ~/.local/share/fluxdown/logs（XDG_DATA_HOME 优先）
+  /// 解析日志目录：委托 platform_utils.resolveDataDir()，加 /logs 后缀。
+  ///
+  /// - Linux: ~/.local/share/fluxdown/logs
   /// - macOS: ~/Library/Application Support/fluxdown/logs
-  /// - 其他: exe 同级 logs/
+  /// - Windows 便携版: exe 同级 logs/
+  /// - Windows 安装版: %LOCALAPPDATA%/FluxDown/logs
   static Directory _resolveLogDir() {
-    if (Platform.isLinux) {
-      final xdgData =
-          Platform.environment['XDG_DATA_HOME'] ??
-          '${Platform.environment['HOME']}/.local/share';
-      return Directory('$xdgData/fluxdown/logs');
-    }
-    if (Platform.isMacOS) {
-      final home = Platform.environment['HOME'] ?? '';
-      return Directory('$home/Library/Application Support/fluxdown/logs');
-    }
-    final exeDir = File(Platform.resolvedExecutable).parent.path;
-    return Directory('$exeDir${Platform.pathSeparator}logs');
+    final dataDir = resolveDataDir();
+    return Directory('$dataDir${Platform.pathSeparator}logs');
   }
 
   /// 清理超过 [_retentionDays] 天的 fluxdown_*.log 文件。
