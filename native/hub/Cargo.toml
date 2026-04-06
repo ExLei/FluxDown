@@ -25,7 +25,8 @@ messages = "0.3.1"
 rusqlite = { version = "0.34", features = ["bundled"] }
 futures-util = "0.3"
 uuid = { version = "1", features = ["v4"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["io"] }
+async-compression = { version = "0.4", features = ["tokio", "gzip", "brotli", "deflate", "zstd"] }
 thiserror = "2.0"
 # ftp_downloader 只用同步 FtpStream（无 TLS），禁用 default-features 移除 native-tls 依赖
 suppaftp = { version = "6", default-features = false }

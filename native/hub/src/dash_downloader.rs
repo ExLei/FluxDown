@@ -1169,8 +1169,17 @@ async fn download_segment_streaming(
         _ = ctx.cancel_token.cancelled() => return Err(DownloadError::Cancelled),
         r = req.send() => r?.error_for_status()?,
     };
+    // Transparently decompress if the server returned compressed content.
+    let encoding = crate::downloader::detect_content_encoding(resp.headers());
+    if encoding.is_some() {
+        log_info!(
+            "[dash] segment decompressing Content-Encoding: {:?}",
+            encoding
+        );
+    }
 
-    let mut stream = resp.bytes_stream();
+    let raw_stream = resp.bytes_stream();
+    let mut stream = crate::downloader::maybe_decompress_stream(raw_stream, encoding);
     let mut written: i64 = 0;
 
     loop {
@@ -1181,7 +1190,7 @@ async fn download_segment_streaming(
         let Some(chunk_result) = chunk else {
             break;
         };
-        let chunk_data = chunk_result?;
+        let chunk_data = chunk_result.map_err(DownloadError::Io)?;
         if chunk_data.is_empty() {
             continue;
         }

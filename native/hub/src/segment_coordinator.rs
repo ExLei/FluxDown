@@ -1799,6 +1799,25 @@ async fn do_segment(
         }
     }
 
+    // Safety net: if a Range response carries Content-Encoding, the raw
+    // compressed bytes cannot be spliced into the correct file offset — each
+    // segment would need independent decompression but the decompressed size
+    // is unpredictable, making precise byte-range assembly impossible.
+    //
+    // The probe phase now checks GET Range:0-0 specifically and disables
+    // multi-segment when Range responses are compressed.  Reaching this point
+    // with compression means the server changed behaviour between probe and
+    // download (e.g. CDN edge node rotation).  This is extremely rare but we
+    // must guard against it to prevent silent file corruption.
+    if let Some(enc) = crate::downloader::detect_content_encoding(resp.headers()) {
+        return Err(DownloadError::Other(format!(
+            "segment {}: server returned Content-Encoding ({:?}) on a Range response. \
+             Compressed byte ranges cannot be assembled into a valid file. \
+             The download will be retried automatically in single-stream mode.",
+            seg_idx, enc
+        )));
+    }
+
     // For segment 0, try extracting a better filename from the response.
     if seg_idx == 0
         && let Some(cd) = resp.headers().get(reqwest::header::CONTENT_DISPOSITION)

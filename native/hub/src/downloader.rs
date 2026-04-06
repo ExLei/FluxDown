@@ -72,6 +72,12 @@ pub struct FileInfo {
     /// Used together with `etag` for file-identity verification across segments.
     /// Empty when the server did not provide Last-Modified.
     pub last_modified: String,
+    /// `true` when the server's probe response included a `Content-Encoding`
+    /// other than `identity` (e.g. gzip, br, deflate).  Because reqwest is
+    /// built WITHOUT gzip/brotli/deflate Cargo features, the compressed bytes
+    /// would be written raw to disk, corrupting the file.  Callers should
+    /// treat this as a warning and avoid multi-segment downloads.
+    pub content_encoding_compressed: bool,
 }
 
 pub struct ProgressUpdate {
@@ -145,6 +151,22 @@ pub struct DownloadParams {
 /// 这是 IDM/NDM 的核心策略——原样复制浏览器的请求头。
 ///
 /// 无效的 header name 或 value 会被静默跳过。
+///
+/// **Defense-in-depth filtering**: Even though the browser extension already
+/// strips dangerous headers on the TypeScript side, we filter them again here
+/// at the Rust boundary.  This protects against:
+///   - A buggy or outdated extension version that forgets to filter,
+///   - Manual API callers that bypass the extension entirely,
+///   - Future protocol changes that add new dangerous headers.
+///
+/// Filtered headers:
+///   - `accept-encoding` / `content-encoding` — reqwest has NO gzip/br/deflate
+///     Cargo features enabled; forwarding these causes the server to send
+///     compressed bytes that are written raw to disk → file corruption.
+///   - `transfer-encoding` — hop-by-hop header; must not be forwarded.
+///   - `host` — must match the actual request target, not the browser's.
+///   - `content-length` — meaningless on a GET; can confuse intermediaries.
+///   - `connection` — hop-by-hop header managed by the HTTP stack.
 pub(crate) fn apply_extra_headers(
     req: reqwest::RequestBuilder,
     extra_headers: &std::collections::HashMap<String, String>,
@@ -152,18 +174,119 @@ pub(crate) fn apply_extra_headers(
     if extra_headers.is_empty() {
         return req;
     }
+
+    /// Headers that must never be forwarded from the browser extension.
+    /// Compared case-insensitively via `HeaderName` (which lowercases).
+    const BLOCKED_HEADERS: &[&str] = &[
+        "accept-encoding",
+        "content-encoding",
+        "transfer-encoding",
+        "host",
+        "content-length",
+        "connection",
+    ];
+
     let mut map = reqwest::header::HeaderMap::with_capacity(extra_headers.len());
     for (name, value) in extra_headers {
         if let (Ok(header_name), Ok(header_value)) = (
             reqwest::header::HeaderName::from_bytes(name.as_bytes()),
             reqwest::header::HeaderValue::from_str(value),
         ) {
+            if BLOCKED_HEADERS
+                .iter()
+                .any(|&blocked| header_name.as_str() == blocked)
+            {
+                log_info!(
+                    "[extra-headers] filtered dangerous header: {}",
+                    header_name.as_str()
+                );
+                continue;
+            }
             map.insert(header_name, header_value);
         }
     }
     // req.headers(map) 内部用 insert 逐个替换同名头，
     // 确保浏览器的真实 User-Agent 等值覆盖 build_client 设的默认值。
     req.headers(map)
+}
+
+/// Content-Encoding types that the server may apply to response bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentEncoding {
+    Gzip,
+    Brotli,
+    Deflate,
+    Zstd,
+}
+
+/// Detect the `Content-Encoding` from response headers.
+///
+/// Returns `Some(encoding)` when the server applied compression (gzip, br,
+/// deflate, zstd).  Returns `None` when the header is absent, empty, or
+/// `identity` (i.e. the body is uncompressed).
+///
+/// Unknown encodings are mapped to `None` — callers that need strict
+/// validation should check the raw header separately.
+pub fn detect_content_encoding(headers: &reqwest::header::HeaderMap) -> Option<ContentEncoding> {
+    let ce = headers.get(reqwest::header::CONTENT_ENCODING)?;
+    let value = ce.to_str().unwrap_or("");
+    let lower = value.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "gzip" => Some(ContentEncoding::Gzip),
+        "br" | "brotli" => Some(ContentEncoding::Brotli),
+        "deflate" | "compress" => Some(ContentEncoding::Deflate),
+        "zstd" => Some(ContentEncoding::Zstd),
+        _ => None, // "" | "identity" | unknown
+    }
+}
+
+/// Wrap a response byte stream with transparent decompression if the server
+/// returned a compressed `Content-Encoding`.  For `identity` or missing
+/// encoding, returns the original stream unchanged.
+///
+/// This is the core fix for file corruption: instead of writing raw gzip
+/// bytes to disk, we decompress on-the-fly and write the original file
+/// content.
+///
+/// The output stream uses `std::io::Error` because `reqwest::Error` is opaque
+/// and cannot be constructed from an `io::Error`.  Callers should convert via
+/// `DownloadError::Io` when consuming chunks.
+pub fn maybe_decompress_stream(
+    stream: impl futures_util::Stream<Item = Result<bytes::Bytes, reqwest::Error>>
+    + Unpin
+    + Send
+    + 'static,
+    encoding: Option<ContentEncoding>,
+) -> Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Unpin + Send> {
+    // Map the incoming reqwest::Error stream to io::Error so every branch
+    // has a uniform error type.
+    let io_stream = stream.map(|result| result.map_err(std::io::Error::other));
+
+    let Some(enc) = encoding else {
+        return Box::new(io_stream);
+    };
+
+    let reader = tokio_util::io::StreamReader::new(io_stream);
+
+    // Wrap with the appropriate decompressor and convert back to a stream.
+    match enc {
+        ContentEncoding::Gzip => {
+            let decoder = async_compression::tokio::bufread::GzipDecoder::new(reader);
+            Box::new(tokio_util::io::ReaderStream::new(decoder))
+        }
+        ContentEncoding::Brotli => {
+            let decoder = async_compression::tokio::bufread::BrotliDecoder::new(reader);
+            Box::new(tokio_util::io::ReaderStream::new(decoder))
+        }
+        ContentEncoding::Deflate => {
+            let decoder = async_compression::tokio::bufread::DeflateDecoder::new(reader);
+            Box::new(tokio_util::io::ReaderStream::new(decoder))
+        }
+        ContentEncoding::Zstd => {
+            let decoder = async_compression::tokio::bufread::ZstdDecoder::new(reader);
+            Box::new(tokio_util::io::ReaderStream::new(decoder))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -458,6 +581,17 @@ async fn resolve_file_info_once(
     // Fire both HEAD and GET Range:0-0 in parallel.  HEAD is faster when it
     // works, but many servers/CDNs omit Content-Disposition on HEAD.  By
     // running both concurrently we avoid the serial HEAD→GET penalty.
+    //
+    // IMPORTANT for Content-Encoding handling:
+    // Many CDNs (Cloudflare, Akamai) add Content-Encoding: gzip to HEAD and
+    // full-GET responses but **omit** it from 206 Partial Content responses.
+    // This is correct per HTTP semantics: Range requests operate on the
+    // *original* (identity) representation, not the compressed one.
+    //
+    // We therefore check Content-Encoding on the GET Range:0-0 response
+    // **separately** from the merged headers.  If GET returned 206 without
+    // Content-Encoding, Range requests are safe for multi-segment downloads
+    // even when HEAD advertised compression.
 
     let head_fut = {
         let mut req = client.head(url).timeout(PROBE_TIMEOUT);
@@ -521,8 +655,12 @@ async fn resolve_file_info_once(
             let u = r.url().clone();
             let h = r.headers().clone();
             let got_206 = r.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+            // Check Content-Encoding on the GET Range:0-0 response BEFORE
+            // merging with HEAD.  This tells us whether Range responses
+            // carry compression — the key signal for multi-segment safety.
+            let get_range_compressed = got_206 && detect_content_encoding(&h).is_some();
             drop(r); // release connection immediately
-            Some((h, u, got_206))
+            Some((h, u, got_206, get_range_compressed))
         }
         Ok(r) => {
             log_info!(
@@ -544,10 +682,19 @@ async fn resolve_file_info_once(
         }
     };
 
+    // Track whether the GET Range:0-0 response itself carried compression.
+    // false = either GET didn't succeed, returned 200 (not 206), or returned
+    //         206 without Content-Encoding → Range requests are safe.
+    // true  = GET returned 206 WITH Content-Encoding → rare but must disable
+    //         multi-segment to avoid corrupt byte-range splicing.
+    let range_response_compressed = get_data
+        .as_ref()
+        .is_some_and(|(_, _, _, compressed)| *compressed);
+
     // Merge results: HEAD as base, GET to fill in missing data.
     let (mut headers, mut final_url) = match (&head_data, &get_data) {
         (Some((hh, hu)), _) => (hh.clone(), hu.clone()),
-        (None, Some((gh, gu, _))) => (gh.clone(), gu.clone()),
+        (None, Some((gh, gu, _, _))) => (gh.clone(), gu.clone()),
         (None, None) => {
             return Err(DownloadError::Other(
                 "both HEAD and GET probes failed".to_string(),
@@ -557,7 +704,7 @@ async fn resolve_file_info_once(
 
     // If HEAD succeeded but lacks Content-Disposition, merge from GET.
     if head_data.is_some()
-        && let Some((get_headers, get_url, got_206)) = &get_data
+        && let Some((get_headers, get_url, got_206, _)) = &get_data
     {
         if !headers.contains_key(reqwest::header::CONTENT_DISPOSITION)
             && let Some(cd) = get_headers.get(reqwest::header::CONTENT_DISPOSITION)
@@ -580,8 +727,8 @@ async fn resolve_file_info_once(
 
     // --- Phase 3: Parse metadata from merged headers ------------------------
     // A 206 response from GET proves range support even without Accept-Ranges header.
-    let got_206_from_get = get_data.as_ref().is_some_and(|(_, _, got)| *got);
-    let supports_range = got_206_from_get
+    let got_206_from_get = get_data.as_ref().is_some_and(|(_, _, got, _)| *got);
+    let mut supports_range = got_206_from_get
         || headers
             .get(reqwest::header::ACCEPT_RANGES)
             .and_then(|v| v.to_str().ok())
@@ -630,6 +777,75 @@ async fn resolve_file_info_once(
         .unwrap_or("")
         .to_string();
 
+    // --- Content-Encoding handling -------------------------------------------
+    //
+    // The merged `headers` may carry Content-Encoding from the HEAD response.
+    // However, this does NOT mean Range responses are also compressed.
+    //
+    // HTTP semantics (RFC 9110 §8.8.3): Range requests operate on the
+    // "selected representation" which is typically the **identity** encoding.
+    // Most CDNs (Cloudflare, Akamai, AWS CloudFront) correctly:
+    //   - HEAD / full GET → Content-Encoding: gzip (if Accept-Encoding allows)
+    //   - GET Range:bytes=X-Y → 206 with NO Content-Encoding (raw bytes)
+    //
+    // We use the GET Range:0-0 probe result (`range_response_compressed`) as
+    // the authoritative signal for multi-segment safety:
+    //
+    //   GET 206 WITHOUT Content-Encoding → Range returns raw bytes → safe
+    //   GET 206 WITH    Content-Encoding → rare; server compresses Range
+    //                                      responses too → NOT safe
+    //   Only HEAD available (GET failed)  → conservative; use HEAD's signal
+    //
+    // When Range responses ARE compressed, we disable multi-segment and let
+    // `download_single` decompress the full-GET stream on-the-fly.
+    //
+    // When Range responses are NOT compressed (the common case), multi-segment
+    // can proceed normally even if HEAD showed Content-Encoding.
+
+    // Did *any* probe response (HEAD or GET) indicate compression?
+    let content_encoding_compressed = detect_content_encoding(&headers).is_some();
+
+    // Should we disable Range support due to compression?
+    // Only if the GET Range:0-0 *itself* returned compressed content,
+    // OR if we have no GET data and must rely on HEAD alone.
+    let got_get_206 = get_data.as_ref().is_some_and(|(_, _, got, _)| *got);
+    let disable_range_for_compression = if got_get_206 {
+        // We have a 206 response — use its Content-Encoding as ground truth.
+        range_response_compressed
+    } else {
+        // No 206 available (GET failed or returned 200) — fall back to the
+        // merged headers (conservative: if HEAD says compressed, disable).
+        content_encoding_compressed
+    };
+
+    if disable_range_for_compression {
+        log_info!(
+            "[resolve] WARNING: Range response itself carries Content-Encoding: {:?} — \
+             byte ranges are invalid on compressed streams; disabling multi-segment",
+            headers
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("?")
+        );
+        supports_range = false;
+    } else if content_encoding_compressed {
+        // HEAD indicated compression but the GET 206 did NOT — Range requests
+        // return raw (identity) bytes.  Multi-segment is safe.  The HEAD's
+        // Content-Length may be the compressed size though — if we got a
+        // Content-Range from the 206, that already gave us the real file size.
+        log_info!(
+            "[resolve] HEAD indicated Content-Encoding: {:?} but GET Range:0-0 \
+             returned 206 without compression — Range requests use identity \
+             encoding; multi-segment is safe (total_bytes={}, range={})",
+            headers
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("?"),
+            total_bytes,
+            supports_range
+        );
+    }
+
     Ok(FileInfo {
         file_name,
         total_bytes,
@@ -637,6 +853,7 @@ async fn resolve_file_info_once(
         content_type,
         etag,
         last_modified,
+        content_encoding_compressed,
     })
 }
 
@@ -1250,6 +1467,8 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             // Hint mode skips the probe, so no ETag/Last-Modified available.
             etag: String::new(),
             last_modified: String::new(),
+            // Hint mode skips the probe — no Content-Encoding info.
+            content_encoding_compressed: false,
         }
     } else {
         log_info!("[download] task {} resolving file info...", p.task_id);
@@ -1642,6 +1861,20 @@ async fn download_single(
 
     let resp = req.send().await?.error_for_status()?;
 
+    // Detect compressed responses — we now decompress on-the-fly instead of
+    // rejecting.  When decompression is active, total_bytes from the probe is
+    // the *compressed* size, not the decompressed size, so we must treat it
+    // as unknown for progress reporting and skip the final size integrity check.
+    let encoding = detect_content_encoding(resp.headers());
+    if encoding.is_some() {
+        log_info!(
+            "[download-single] task {} server returned Content-Encoding: {:?} — \
+             decompressing on-the-fly",
+            task_id,
+            encoding
+        );
+    }
+
     // Verify the server actually honoured the Range request.
     // Some servers (or CDN edge nodes) silently ignore Range and return 200 OK
     // with the full file.  If we appended to the partial file in that case we
@@ -1707,7 +1940,16 @@ async fn download_single(
             .await;
     }
 
-    let mut stream = resp.bytes_stream();
+    // Wrap with decompression if needed.  The stream now yields
+    // Result<Bytes, io::Error> regardless of whether decompression is active.
+    let raw_stream = resp.bytes_stream();
+    let mut stream = maybe_decompress_stream(raw_stream, encoding);
+
+    // When decompression is active, the probe's total_bytes is the *compressed*
+    // size — the actual decompressed bytes written to disk will differ.
+    // Treat size as unknown so progress reports don't show wrong percentages
+    // and the final integrity check is skipped.
+    let total_bytes = if encoding.is_some() { 0 } else { total_bytes };
 
     let mut last_report = std::time::Instant::now();
     let mut last_db_save = std::time::Instant::now();
@@ -1781,7 +2023,7 @@ async fn download_single(
                     Some(Err(e)) => {
                         file.flush().await?;
                         let _ = db.update_task_progress(task_id, downloaded).await;
-                        return Err(DownloadError::Request(e));
+                        return Err(DownloadError::Io(e));
                     }
                     None => break,
                 }
@@ -2385,6 +2627,122 @@ mod tests {
             "good"
         );
         // 无效 header 被跳过（HeaderName::from_bytes 会拒绝含空格的名称）
+    }
+
+    #[test]
+    fn apply_extra_headers_filters_dangerous_headers() {
+        use std::collections::HashMap;
+        let client = reqwest::Client::new();
+        let mut headers = HashMap::new();
+        // All of these should be filtered out (defense-in-depth)
+        headers.insert("Accept-Encoding".to_string(), "gzip, br".to_string());
+        headers.insert("Content-Encoding".to_string(), "gzip".to_string());
+        headers.insert("Transfer-Encoding".to_string(), "chunked".to_string());
+        headers.insert("Host".to_string(), "evil.com".to_string());
+        headers.insert("Content-Length".to_string(), "999".to_string());
+        headers.insert("Connection".to_string(), "keep-alive".to_string());
+        // This one should pass through
+        headers.insert("Authorization".to_string(), "Bearer ok".to_string());
+        let req = client.get("https://example.com/file.zip");
+        let req = super::apply_extra_headers(req, &headers);
+        let built = req.build().unwrap();
+        assert!(built.headers().get("Accept-Encoding").is_none());
+        assert!(built.headers().get("Content-Encoding").is_none());
+        assert!(built.headers().get("Transfer-Encoding").is_none());
+        assert!(built.headers().get("Host").is_none());
+        assert!(built.headers().get("Content-Length").is_none());
+        assert!(built.headers().get("Connection").is_none());
+        assert_eq!(
+            built
+                .headers()
+                .get("Authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer ok"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // detect_content_encoding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn detect_content_encoding_none_when_missing() {
+        let headers = reqwest::header::HeaderMap::new();
+        assert!(super::detect_content_encoding(&headers).is_none());
+    }
+
+    #[test]
+    fn detect_content_encoding_none_for_identity() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("identity"),
+        );
+        assert!(super::detect_content_encoding(&headers).is_none());
+    }
+
+    #[test]
+    fn detect_content_encoding_gzip() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("gzip"),
+        );
+        assert_eq!(
+            super::detect_content_encoding(&headers),
+            Some(super::ContentEncoding::Gzip)
+        );
+    }
+
+    #[test]
+    fn detect_content_encoding_brotli() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("br"),
+        );
+        assert_eq!(
+            super::detect_content_encoding(&headers),
+            Some(super::ContentEncoding::Brotli)
+        );
+    }
+
+    #[test]
+    fn detect_content_encoding_zstd() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("zstd"),
+        );
+        assert_eq!(
+            super::detect_content_encoding(&headers),
+            Some(super::ContentEncoding::Zstd)
+        );
+    }
+
+    #[test]
+    fn detect_content_encoding_deflate() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static("deflate"),
+        );
+        assert_eq!(
+            super::detect_content_encoding(&headers),
+            Some(super::ContentEncoding::Deflate)
+        );
+    }
+
+    #[test]
+    fn detect_content_encoding_empty_is_none() {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            reqwest::header::CONTENT_ENCODING,
+            reqwest::header::HeaderValue::from_static(""),
+        );
+        assert!(super::detect_content_encoding(&headers).is_none());
     }
 
     // -----------------------------------------------------------------------

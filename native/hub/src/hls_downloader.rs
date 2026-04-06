@@ -42,7 +42,7 @@ fn is_same_origin(base_url: &str, target_url: &str) -> bool {
     };
     base.scheme() == target.scheme()
         && base.host_str() == target.host_str()
-        && base.port() == target.port()
+        && base.port_or_known_default() == target.port_or_known_default()
 }
 
 fn cookies_for_url<'a>(playlist_url: &str, target_url: &str, cookies: &'a str) -> &'a str {
@@ -1014,7 +1014,22 @@ async fn download_segment_once(
     req = crate::downloader::apply_extra_headers(req, extra_headers);
 
     let resp = req.send().await?.error_for_status()?;
-    let data = resp.bytes().await?.to_vec();
+
+    // Transparently decompress if the server returned compressed content.
+    let encoding = crate::downloader::detect_content_encoding(resp.headers());
+    let data = if encoding.is_some() {
+        use futures_util::StreamExt;
+        let raw_stream = resp.bytes_stream();
+        let mut stream = crate::downloader::maybe_decompress_stream(raw_stream, encoding);
+        let mut buf = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(DownloadError::Io)?;
+            buf.extend_from_slice(&chunk);
+        }
+        buf
+    } else {
+        resp.bytes().await?.to_vec()
+    };
     Ok(data)
 }
 
