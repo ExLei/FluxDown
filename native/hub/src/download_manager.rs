@@ -840,13 +840,13 @@ impl DownloadManager {
         // still running.  Those tasks hold an `Arc<Session>` that keeps the
         // BT listening port bound; creating a new session while the old port
         // is in use causes the next BT download to fail immediately.
-        if let Some(ref bt) = self.bt_session {
-            if bt.has_inflight_adds() {
-                log_info!(
-                    "[manager] deferring BT session release — detached add_torrent still in flight"
-                );
-                return;
-            }
+        if let Some(ref bt) = self.bt_session
+            && bt.has_inflight_adds()
+        {
+            log_info!(
+                "[manager] deferring BT session release — detached add_torrent still in flight"
+            );
+            return;
         }
         log_info!("[manager] all BT tasks finished/paused — releasing BT session");
         // Shut down on a background thread (same pattern as Drop) to avoid
@@ -861,11 +861,11 @@ impl DownloadManager {
 
     /// Forward a quality selection from Dart to the waiting HLS download task.
     pub fn send_hls_quality_selection(&mut self, task_id: &str, selected_index: i32) {
-        if let Some(entry) = self.active_tasks.get_mut(task_id) {
-            if let Some(tx) = entry.hls_quality_tx.take() {
-                let _ = tx.send(selected_index);
-                return;
-            }
+        if let Some(entry) = self.active_tasks.get_mut(task_id)
+            && let Some(tx) = entry.hls_quality_tx.take()
+        {
+            let _ = tx.send(selected_index);
+            return;
         }
         {
             log_info!(
@@ -2089,10 +2089,10 @@ impl DownloadManager {
             // For BT tasks, explicitly pause the torrent in the session so
             // that fast-resume data is preserved and the user can resume later.
             // This mirrors what pause_task does for BT tasks.
-            if entry.is_bt {
-                if let Some(ref bt) = self.bt_session {
-                    let _ = bt.pause_task(task_id).await;
-                }
+            if entry.is_bt
+                && let Some(ref bt) = self.bt_session
+            {
+                let _ = bt.pause_task(task_id).await;
             }
             // Clean up the JoinHandle so it doesn't linger after cancellation.
             if let Some(handle) = entry.handle {
@@ -2225,15 +2225,15 @@ impl DownloadManager {
                 // HTTP / FTP / HLS / DASH: always clean up the in-progress temp file
                 let temp_path =
                     PathBuf::from(format!("{}{}", path.display(), downloader::TEMP_EXT));
-                if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-                    if e.kind() != std::io::ErrorKind::NotFound {
-                        log_info!(
-                            "[manager] delete_task {}: remove temp {} failed: {}",
-                            task_id,
-                            temp_path.display(),
-                            e
-                        );
-                    }
+                if let Err(e) = tokio::fs::remove_file(&temp_path).await
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    log_info!(
+                        "[manager] delete_task {}: remove temp {} failed: {}",
+                        task_id,
+                        temp_path.display(),
+                        e
+                    );
                 }
 
                 // DASH audio sidecar: clean up .audio.m4a and its .part temp
@@ -2247,17 +2247,17 @@ impl DownloadManager {
                     }
                 }
 
-                if delete_files && is_safe_file_name(&t.file_name) {
-                    if let Err(e) = tokio::fs::remove_file(&path).await {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            log_info!(
-                                "[manager] delete_task {}: remove file {} failed: {}",
-                                task_id,
-                                path.display(),
-                                e
-                            );
-                        }
-                    }
+                if delete_files
+                    && is_safe_file_name(&t.file_name)
+                    && let Err(e) = tokio::fs::remove_file(&path).await
+                    && e.kind() != std::io::ErrorKind::NotFound
+                {
+                    log_info!(
+                        "[manager] delete_task {}: remove file {} failed: {}",
+                        task_id,
+                        path.display(),
+                        e
+                    );
                 }
             }
         }
@@ -2314,15 +2314,15 @@ impl DownloadManager {
                 } else {
                     let temp_path =
                         PathBuf::from(format!("{}{}", path.display(), crate::downloader::TEMP_EXT));
-                    if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-                        if e.kind() != std::io::ErrorKind::NotFound {
-                            log_info!(
-                                "[manager] delete_task {} deferred: remove temp {} failed: {}",
-                                tid,
-                                temp_path.display(),
-                                e
-                            );
-                        }
+                    if let Err(e) = tokio::fs::remove_file(&temp_path).await
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        log_info!(
+                            "[manager] delete_task {} deferred: remove temp {} failed: {}",
+                            tid,
+                            temp_path.display(),
+                            e
+                        );
                     }
                     if del_files && is_safe_file_name(&file_name) {
                         let _ = tokio::fs::remove_file(&path).await;
@@ -2482,20 +2482,24 @@ impl DownloadManager {
                             let _ =
                                 tokio::time::timeout(std::time::Duration::from_secs(10), h).await;
                         }
-                        let Ok(_permit) = sem.acquire().await else { return; };
+                        let Ok(_permit) = sem.acquire().await else {
+                            return;
+                        };
                         // Remove temp file
                         let temp_path = PathBuf::from(format!(
                             "{}{}",
                             path.display(),
                             crate::downloader::TEMP_EXT
                         ));
-                        if let Err(e) = tokio::fs::remove_file(&temp_path).await {
-                            if e.kind() != std::io::ErrorKind::NotFound {
-                                log_info!(
-                                    "[manager] delete_tasks_batch {}: remove temp {} failed: {}",
-                                    tid_owned, temp_path.display(), e
-                                );
-                            }
+                        if let Err(e) = tokio::fs::remove_file(&temp_path).await
+                            && e.kind() != std::io::ErrorKind::NotFound
+                        {
+                            log_info!(
+                                "[manager] delete_tasks_batch {}: remove temp {} failed: {}",
+                                tid_owned,
+                                temp_path.display(),
+                                e
+                            );
                         }
 
                         // DASH audio sidecar cleanup
@@ -2512,15 +2516,17 @@ impl DownloadManager {
                             }
                         }
 
-                        if delete_files && is_safe_file_name(&file_name) {
-                            if let Err(e) = tokio::fs::remove_file(&path).await {
-                                if e.kind() != std::io::ErrorKind::NotFound {
-                                    log_info!(
-                                        "[manager] delete_tasks_batch {}: remove file {} failed: {}",
-                                        tid_owned, path.display(), e
-                                    );
-                                }
-                            }
+                        if delete_files
+                            && is_safe_file_name(&file_name)
+                            && let Err(e) = tokio::fs::remove_file(&path).await
+                            && e.kind() != std::io::ErrorKind::NotFound
+                        {
+                            log_info!(
+                                "[manager] delete_tasks_batch {}: remove file {} failed: {}",
+                                tid_owned,
+                                path.display(),
+                                e
+                            );
                         }
 
                         // Signal completion

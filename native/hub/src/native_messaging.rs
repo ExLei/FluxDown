@@ -38,9 +38,9 @@ pub struct DownloadRequest {
     #[serde(default)]
     pub headers: Option<std::collections::HashMap<String, String>>,
     /// 文件大小提示（字节）。
-    ///   >0 = 已知大小，跳过 probe
-    ///   -1 = 大小未知但确认是下载资源（webRequest 嗅探），跳过 probe
-    ///    0 / None = 正常 probe
+    ///   - `>0` = 已知大小，跳过 probe
+    ///   - `-1` = 大小未知但确认是下载资源（webRequest 嗅探），跳过 probe
+    ///   - `0` / `None` = 正常 probe
     #[serde(rename = "fileSize")]
     #[serde(default)]
     pub file_size: Option<i64>,

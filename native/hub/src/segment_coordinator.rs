@@ -81,29 +81,28 @@ fn extract_host(url: &str) -> Option<String> {
 
 /// 记录某域名的服务器拒绝多连接。
 pub(crate) fn record_single_conn_domain(url: &str) {
-    if let Some(host) = extract_host(url) {
-        if let Ok(mut cache) = single_conn_cache().lock() {
-            log_info!(
-                "[conn-policy] 记录域名 {} 为单连接限制，24h 内自动使用单线程",
-                host
-            );
-            cache.insert(host, Instant::now());
-        }
+    if let Some(host) = extract_host(url)
+        && let Ok(mut cache) = single_conn_cache().lock()
+    {
+        log_info!(
+            "[conn-policy] 记录域名 {} 为单连接限制，24h 内自动使用单线程",
+            host
+        );
+        cache.insert(host, Instant::now());
     }
 }
 
 /// 检查某域名是否在单连接缓存中（且未过期）。
 pub(crate) fn is_single_conn_domain(url: &str) -> bool {
-    if let Some(host) = extract_host(url) {
-        if let Ok(mut cache) = single_conn_cache().lock() {
-            if let Some(recorded) = cache.get(&host) {
-                if recorded.elapsed() < SINGLE_CONN_TTL {
-                    return true;
-                }
-                // 过期，移除
-                cache.remove(&host);
-            }
+    if let Some(host) = extract_host(url)
+        && let Ok(mut cache) = single_conn_cache().lock()
+        && let Some(recorded) = cache.get(&host)
+    {
+        if recorded.elapsed() < SINGLE_CONN_TTL {
+            return true;
         }
+        // 过期，移除
+        cache.remove(&host);
     }
     false
 }
@@ -1802,31 +1801,29 @@ async fn do_segment(
     // Only check when the probe returned a non-empty value AND the segment
     // response also provides the header.  Many CDN edge servers strip these
     // headers on Range responses, so a missing header is not an error.
-    if !expected_etag.is_empty() {
-        if let Some(resp_etag) = resp.headers().get(reqwest::header::ETAG)
-            && let Ok(resp_etag_str) = resp_etag.to_str()
-            && !resp_etag_str.is_empty()
-            && resp_etag_str != expected_etag
-        {
-            return Err(DownloadError::Other(format!(
-                "segment {}: ETag mismatch — probe=\"{}\", segment=\"{}\". \
-                 The file may have changed on the server during download.",
-                seg_idx, expected_etag, resp_etag_str
-            )));
-        }
+    if !expected_etag.is_empty()
+        && let Some(resp_etag) = resp.headers().get(reqwest::header::ETAG)
+        && let Ok(resp_etag_str) = resp_etag.to_str()
+        && !resp_etag_str.is_empty()
+        && resp_etag_str != expected_etag
+    {
+        return Err(DownloadError::Other(format!(
+            "segment {}: ETag mismatch — probe=\"{}\", segment=\"{}\". \
+             The file may have changed on the server during download.",
+            seg_idx, expected_etag, resp_etag_str
+        )));
     }
-    if !expected_last_modified.is_empty() {
-        if let Some(resp_lm) = resp.headers().get(reqwest::header::LAST_MODIFIED)
-            && let Ok(resp_lm_str) = resp_lm.to_str()
-            && !resp_lm_str.is_empty()
-            && resp_lm_str != expected_last_modified
-        {
-            return Err(DownloadError::Other(format!(
-                "segment {}: Last-Modified mismatch — probe=\"{}\", segment=\"{}\". \
-                 The file may have changed on the server during download.",
-                seg_idx, expected_last_modified, resp_lm_str
-            )));
-        }
+    if !expected_last_modified.is_empty()
+        && let Some(resp_lm) = resp.headers().get(reqwest::header::LAST_MODIFIED)
+        && let Ok(resp_lm_str) = resp_lm.to_str()
+        && !resp_lm_str.is_empty()
+        && resp_lm_str != expected_last_modified
+    {
+        return Err(DownloadError::Other(format!(
+            "segment {}: Last-Modified mismatch — probe=\"{}\", segment=\"{}\". \
+             The file may have changed on the server during download.",
+            seg_idx, expected_last_modified, resp_lm_str
+        )));
     }
 
     // Safety net: if a Range response carries Content-Encoding, the raw

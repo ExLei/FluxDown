@@ -218,21 +218,19 @@ impl Db {
     ///
     /// - `probe < stored`  (file shrank on the server)
     ///   → Always update.  Keeping the old (larger) value would cause Range
-    ///     requests past the server's EOF and 416 errors.
+    ///   requests past the server's EOF and 416 errors.
     ///
     /// - `probe > stored`  (server reports a larger file)
     ///   → Two sub-cases, distinguished by a tolerance threshold
-    ///     (1 % of stored size, capped at 1 MiB, floor 1 byte):
+    ///   (1 % of stored size, capped at 1 MiB, floor 1 byte):
     ///
-    ///     delta <= threshold  CDN drift (Transfer-Encoding overhead, dynamic
-    ///                         header injection, signed-URL padding…).
-    ///                         Keep `stored` so that segment `end_byte`
-    ///                         boundaries stay consistent.
+    ///   `delta <= threshold` — CDN drift (Transfer-Encoding overhead,
+    ///   dynamic header injection, signed-URL padding…).
+    ///   Keep `stored` so that segment `end_byte` boundaries stay consistent.
     ///
-    ///     delta > threshold   File genuinely grew.  Update `total_bytes` to
-    ///                         `probe` so the segment coordinator rebuilds
-    ///                         segments to cover the new tail — without this
-    ///                         the tail would be silently truncated.
+    ///   `delta > threshold` — File genuinely grew.  Update `total_bytes` to
+    ///   `probe` so the segment coordinator rebuilds segments to cover the
+    ///   new tail — without this the tail would be silently truncated.
     ///
     /// Returns `(effective_total_bytes, total_bytes_was_updated)`.
     pub async fn update_task_file_info_resume(

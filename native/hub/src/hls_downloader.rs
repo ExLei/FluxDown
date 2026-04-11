@@ -1036,6 +1036,7 @@ async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<Pat
 // Per-segment download with retry
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn download_segment_with_retry(
     client: &Client,
     url: &str,

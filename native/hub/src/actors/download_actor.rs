@@ -17,9 +17,9 @@ use crate::signals::{
     ConfigEntry, ConfigLoaded, ConfirmExternalDownload, ControlTask, CreateQueue, CreateTask,
     DeleteQueue, DetectSystemProxy, DownloadUpdate, ExternalDownloadRequest, FileAssociationStatus,
     InstallUpdate, MoveTaskToQueue, ProbeTorrentMeta, ProxyTestResult, RequestAllQueues,
-    RequestAllTasks, RequestConfig, SaveConfig, SelectBtFiles, SelectHlsQuality,
-    RevealFile, SetFileAssociation, SetPriorityTask, SetUrlProtocol, SystemProxyInfo,
-    TestProxyConnection, UpdateCheckResult, UpdateQueue, UrlProtocolStatus,
+    RequestAllTasks, RequestConfig, RevealFile, SaveConfig, SelectBtFiles, SelectHlsQuality,
+    SetFileAssociation, SetPriorityTask, SetUrlProtocol, SystemProxyInfo, TestProxyConnection,
+    UpdateCheckResult, UpdateQueue, UrlProtocolStatus,
 };
 use crate::updater;
 
@@ -418,16 +418,16 @@ pub async fn run(db_dir: PathBuf) {
                     req.headers.as_ref().map(|h| h.keys().collect::<Vec<_>>()),
                 );
                 // 缓存额外请求头，供用户确认下载时使用
-                if let Some(ref headers) = req.headers {
-                    if !headers.is_empty() {
-                        // Evict oldest entries when cache grows too large to
-                        // prevent unbounded memory growth over long sessions.
-                        const MAX_HEADER_CACHE: usize = 200;
-                        if ext_headers_cache.len() >= MAX_HEADER_CACHE {
-                            ext_headers_cache.clear();
-                        }
-                        ext_headers_cache.insert(req.url.clone(), headers.clone());
+                if let Some(ref headers) = req.headers
+                    && !headers.is_empty()
+                {
+                    // Evict oldest entries when cache grows too large to
+                    // prevent unbounded memory growth over long sessions.
+                    const MAX_HEADER_CACHE: usize = 200;
+                    if ext_headers_cache.len() >= MAX_HEADER_CACHE {
+                        ext_headers_cache.clear();
                     }
+                    ext_headers_cache.insert(req.url.clone(), headers.clone());
                 }
                 // Forward to Dart UI so it can pop the quick-download dialog.
                 ExternalDownloadRequest {

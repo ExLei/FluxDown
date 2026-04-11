@@ -77,6 +77,7 @@ pub struct FileInfo {
     /// built WITHOUT gzip/brotli/deflate Cargo features, the compressed bytes
     /// would be written raw to disk, corrupting the file.  Callers should
     /// treat this as a warning and avoid multi-segment downloads.
+    #[allow(dead_code)]
     pub content_encoding_compressed: bool,
 }
 
@@ -992,12 +993,12 @@ fn extract_from_content_disposition(headers: &reqwest::header::HeaderMap) -> Opt
                 // RFC 5987 filename*= syntax.  When the raw value contains
                 // percent-encoded sequences, try URL-decoding it so that
                 // `%E6%B0%B8%E7%94%9F.mp4` becomes `永生.mp4`.
-                if name.contains('%') {
-                    if let Ok(decoded) = urlencoding_decode(name) {
-                        let decoded = decoded.trim();
-                        if !decoded.is_empty() && decoded != name {
-                            return Some(sanitize_filename(decoded));
-                        }
+                if name.contains('%')
+                    && let Ok(decoded) = urlencoding_decode(name)
+                {
+                    let decoded = decoded.trim();
+                    if !decoded.is_empty() && decoded != name {
+                        return Some(sanitize_filename(decoded));
                     }
                 }
                 return Some(sanitize_filename(name));
@@ -1872,7 +1873,6 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
 // Single-thread download (with resume support)
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
 /// Result of a single-thread download, carrying response metadata for the
 /// caller's integrity check.
 struct SingleDownloadResult {
@@ -1881,6 +1881,7 @@ struct SingleDownloadResult {
     response_content_length: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_single(
     task_id: &str,
     url: &str,

@@ -1597,18 +1597,17 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     | AddTorrentResponse::AlreadyManaged(id, _) => Some(*id),
                     _ => None,
                 };
-                if let Some(id) = torrent_id {
-                    if let Some(del_files) = shared_bt_for_add
+                if let Some(id) = torrent_id
+                    && let Some(del_files) = shared_bt_for_add
                         .take_pending_delete(&task_id_for_add)
                         .await
-                    {
-                        let _ = session_for_add.delete(id.into(), del_files).await;
-                        log_info!(
-                            "[BT] task={} pending delete applied after add_torrent (delete_files={})",
-                            short_id(&task_id_for_add),
-                            del_files
-                        );
-                    }
+                {
+                    let _ = session_for_add.delete(id.into(), del_files).await;
+                    log_info!(
+                        "[BT] task={} pending delete applied after add_torrent (delete_files={})",
+                        short_id(&task_id_for_add),
+                        del_files
+                    );
                 }
             }
             result

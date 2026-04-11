@@ -220,26 +220,23 @@ mod inner {
                 "{}\\{}",
                 r"Software\Google\Chrome\NativeMessagingHosts", NMH_NAME
             );
-            if let Ok(key) = hkcu.open_subkey_with_flags(&chrome_reg, KEY_READ) {
-                if let Ok(manifest_str) = key.get_value::<String, _>("") {
-                    if let Ok(content) = std::fs::read_to_string(&manifest_str) {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                            if let Some(registered_str) = json["path"].as_str() {
-                                let registered_dir = Path::new(registered_str).parent();
-                                if registered_dir
-                                    .map(|d| d != exe_dir.as_path())
-                                    .unwrap_or(true)
-                                {
-                                    log_info!(
-                                        "[nmh_registry] exe dir changed: registered NMH dir={:?}, current exe dir={:?} → needs update",
-                                        registered_dir,
-                                        exe_dir
-                                    );
-                                    return true;
-                                }
-                            }
-                        }
-                    }
+            if let Ok(key) = hkcu.open_subkey_with_flags(&chrome_reg, KEY_READ)
+                && let Ok(manifest_str) = key.get_value::<String, _>("")
+                && let Ok(content) = std::fs::read_to_string(&manifest_str)
+                && let Ok(json) = serde_json::from_str::<serde_json::Value>(&content)
+                && let Some(registered_str) = json["path"].as_str()
+            {
+                let registered_dir = Path::new(registered_str).parent();
+                if registered_dir
+                    .map(|d| d != exe_dir.as_path())
+                    .unwrap_or(true)
+                {
+                    log_info!(
+                        "[nmh_registry] exe dir changed: registered NMH dir={:?}, current exe dir={:?} → needs update",
+                        registered_dir,
+                        exe_dir
+                    );
+                    return true;
                 }
             }
         }
@@ -330,11 +327,10 @@ mod inner {
             }
         }
         // Remove Firefox registry key
-        match hkcu.open_subkey_with_flags(r"Software\Mozilla\NativeMessagingHosts", KEY_WRITE) {
-            Ok(parent) => {
-                let _ = parent.delete_subkey(NMH_NAME);
-            }
-            Err(_) => {}
+        if let Ok(parent) =
+            hkcu.open_subkey_with_flags(r"Software\Mozilla\NativeMessagingHosts", KEY_WRITE)
+        {
+            let _ = parent.delete_subkey(NMH_NAME);
         }
 
         // Remove both manifest files if NMH exe is found.

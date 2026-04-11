@@ -92,12 +92,9 @@ impl AppLogger {
         state.file = None;
 
         let path = self.log_dir.join(format!("fluxdown_{date_tag}.log"));
-        match OpenOptions::new().create(true).append(true).open(&path) {
-            Ok(f) => {
-                state.date_tag = date_tag.to_string();
-                state.file = Some(f);
-            }
-            Err(_) => {}
+        if let Ok(f) = OpenOptions::new().create(true).append(true).open(&path) {
+            state.date_tag = date_tag.to_string();
+            state.file = Some(f);
         }
     }
 
@@ -140,12 +137,11 @@ impl AppLogger {
             if !name.starts_with("fluxdown_") || !name.ends_with(".log") {
                 continue;
             }
-            if let Ok(meta) = fs::metadata(&path) {
-                if let Ok(modified) = meta.modified() {
-                    if modified < cutoff {
-                        let _ = fs::remove_file(&path);
-                    }
-                }
+            if let Ok(meta) = fs::metadata(&path)
+                && let Ok(modified) = meta.modified()
+                && modified < cutoff
+            {
+                let _ = fs::remove_file(&path);
             }
         }
     }
@@ -162,10 +158,10 @@ pub fn init() {
     let log_dir = resolve_log_dir();
     let logger = AppLogger::new(log_dir);
     logger.cleanup_old_logs(LOG_RETENTION_DAYS);
-    if LOGGER.set(logger).is_ok() {
-        if let Some(l) = LOGGER.get() {
-            l.write_session_header();
-        }
+    if LOGGER.set(logger).is_ok()
+        && let Some(l) = LOGGER.get()
+    {
+        l.write_session_header();
     }
 }
 
