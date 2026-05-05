@@ -27,6 +27,18 @@ const REQUEST_TIMEOUT_MS = 12000;
 // 类型定义
 // ──────────────────────────────────────────────────────────────
 
+/**
+ * 浏览器原始请求体——通过 webRequest.onBeforeRequest 抓取，
+ * 用于让 Rust 下载器一比一重建浏览器看到的请求事务。
+ *
+ * - `formData`：来自 chrome.webRequest 的 `requestBody.formData`。
+ *   Rust 端用 reqwest::form() 编码为 application/x-www-form-urlencoded。
+ * - `raw`：原始字节（base64 编码），覆盖 fetch/XHR 直接传 ArrayBuffer 的场景。
+ */
+export type RequestBody =
+  | { kind: "formData"; fields: Record<string, string[]> }
+  | { kind: "raw"; bytesB64: string; contentType?: string };
+
 export interface DownloadRequest {
   url: string;
   filename?: string;
@@ -35,6 +47,13 @@ export interface DownloadRequest {
   headers?: Record<string, string>;
   fileSize?: number;
   mimeType?: string;
+  /**
+   * 浏览器原始 HTTP method。省略 = "GET"。
+   * 在 form-POST 触发的下载场景下必传，否则 FluxDown 会用 GET 重发拿到错误内容。
+   */
+  method?: string;
+  /** 浏览器原始请求体（仅非 GET 时有意义）。 */
+  body?: RequestBody;
 }
 
 export interface ApiResponse {
@@ -51,6 +70,8 @@ export interface BatchDownloadItem {
   headers?: Record<string, string>;
   fileSize?: number;
   mimeType?: string;
+  method?: string;
+  body?: RequestBody;
 }
 
 // ──────────────────────────────────────────────────────────────

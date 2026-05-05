@@ -23,6 +23,34 @@ const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 // Message types matching the browser extension protocol
 // ---------------------------------------------------------------------------
 
+/// 浏览器原始请求体（form POST / XHR raw body 等）。
+///
+/// 当用户在 form-submit 触发的下载中点击下载按钮时，浏览器实际发起的是
+/// POST 请求并携带表单数据；扩展通过 `webRequest.onBeforeRequest` 抓到 method
+/// 与 body 后透传到此字段。Rust 端按 `kind` 重建请求体。
+///
+/// 协议字段：
+/// - `formData`：来自 `requestBody.formData`，Rust 端用 `reqwest::form()` 编码为
+///   `application/x-www-form-urlencoded`
+/// - `urlencoded`：扩展端已序列化好的 url-encoded 字符串（直接作为 body 发送）
+/// - `raw`：base64 编码的二进制 body（XHR / fetch 直接发送 ArrayBuffer 的场景）
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum RequestBody {
+    FormData {
+        fields: std::collections::HashMap<String, Vec<String>>,
+    },
+    Urlencoded {
+        raw: String,
+    },
+    Raw {
+        #[serde(rename = "bytesB64")]
+        bytes_b64: String,
+        #[serde(rename = "contentType", default)]
+        content_type: Option<String>,
+    },
+}
+
 /// Download request payload from the browser extension.
 #[derive(Debug, Clone, Deserialize)]
 pub struct DownloadRequest {
@@ -47,6 +75,15 @@ pub struct DownloadRequest {
     #[serde(rename = "mimeType")]
     #[serde(default)]
     pub mime_type: Option<String>,
+    /// 浏览器原始请求方法（"GET" / "POST" / ...）。
+    /// 缺省 = "GET"。POST/PUT/PATCH 类请求由 `body` 携带请求体。
+    /// 这是修复 uupdump.net 等 form-POST 触发下载场景的关键字段——
+    /// 没有它，FluxDown 会用 GET 重发拿到 HTML 页面而非真实文件。
+    #[serde(default)]
+    pub method: Option<String>,
+    /// 浏览器原始请求体（仅在非 GET 时有意义）。
+    #[serde(default)]
+    pub body: Option<RequestBody>,
 }
 
 /// Incoming pipe message with action routing.

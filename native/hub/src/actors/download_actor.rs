@@ -252,16 +252,22 @@ pub async fn run(db_dir: PathBuf) {
         }
     });
 
-    // 缓存浏览器扩展传递的额外 HTTP 请求头（如 Authorization），
-    // 以 URL 为 key，在用户确认下载时取出传递给下载引擎。
-    let mut ext_headers_cache: HashMap<String, HashMap<String, String>> = HashMap::new();
+    // 缓存浏览器扩展捕获的请求事务上下文（headers + method + body），
+    // 以 URL 为 key，在用户确认下载时一并消耗——下游用此一比一重建浏览器请求。
+    #[derive(Default, Clone)]
+    struct ExtRequestCtx {
+        headers: HashMap<String, String>,
+        method: Option<String>,
+        body: Option<crate::native_messaging::RequestBody>,
+    }
+    let mut ext_request_cache: HashMap<String, ExtRequestCtx> = HashMap::new();
 
     loop {
         tokio::select! {
             Some(signal) = create_recv.recv() => {
                 let msg = signal.message;
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, String::new(), 0, msg.torrent_file_bytes, msg.proxy_url, msg.user_agent, msg.queue_id, msg.checksum, HashMap::new(), msg.selected_file_indices)
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, String::new(), 0, msg.torrent_file_bytes, msg.proxy_url, msg.user_agent, msg.queue_id, msg.checksum, HashMap::new(), msg.selected_file_indices, None, None)
                     .await;
                 // 立即推送 AllTasks，确保 Dart 端在收到 TaskProgress 之前
                 // 已通过 AllTasks 获得正确的 queue_id，防止新任务被错误归入默认队列。
@@ -275,7 +281,7 @@ pub async fn run(db_dir: PathBuf) {
                 );
                 for entry in msg.entries {
                     manager
-                        .create_task(entry.url, msg.save_dir.clone(), entry.file_name, msg.segments, msg.cookies.clone(), msg.referrer.clone(), 0, Vec::new(), msg.proxy_url.clone(), msg.user_agent.clone(), msg.queue_id.clone(), entry.checksum, HashMap::new(), Vec::new())
+                        .create_task(entry.url, msg.save_dir.clone(), entry.file_name, msg.segments, msg.cookies.clone(), msg.referrer.clone(), 0, Vec::new(), msg.proxy_url.clone(), msg.user_agent.clone(), msg.queue_id.clone(), entry.checksum, HashMap::new(), Vec::new(), None, None)
                         .await;
                 }
                 // 批量创建完成后统一推送一次 AllTasks，同步 queue_id 到 Dart。
@@ -417,17 +423,23 @@ pub async fn run(db_dir: PathBuf) {
                     req.cookies.len(),
                     req.headers.as_ref().map(|h| h.keys().collect::<Vec<_>>()),
                 );
-                // 缓存额外请求头，供用户确认下载时使用
-                if let Some(ref headers) = req.headers
-                    && !headers.is_empty()
-                {
-                    // Evict oldest entries when cache grows too large to
-                    // prevent unbounded memory growth over long sessions.
-                    const MAX_HEADER_CACHE: usize = 200;
-                    if ext_headers_cache.len() >= MAX_HEADER_CACHE {
-                        ext_headers_cache.clear();
+                // 缓存请求事务上下文（headers/method/body）——任一字段非空即缓存。
+                let has_headers =
+                    req.headers.as_ref().is_some_and(|h| !h.is_empty());
+                if has_headers || req.method.is_some() || req.body.is_some() {
+                    // 长会话防累积：超阈值整表清空（与原行为一致）。
+                    const MAX_REQ_CTX_CACHE: usize = 200;
+                    if ext_request_cache.len() >= MAX_REQ_CTX_CACHE {
+                        ext_request_cache.clear();
                     }
-                    ext_headers_cache.insert(req.url.clone(), headers.clone());
+                    ext_request_cache.insert(
+                        req.url.clone(),
+                        ExtRequestCtx {
+                            headers: req.headers.clone().unwrap_or_default(),
+                            method: req.method.clone(),
+                            body: req.body.clone(),
+                        },
+                    );
                 }
                 // Forward to Dart UI so it can pop the quick-download dialog.
                 ExternalDownloadRequest {
@@ -443,16 +455,23 @@ pub async fn run(db_dir: PathBuf) {
             // --- Dart confirmed an external download request ---
             Some(signal) = confirm_ext_recv.recv() => {
                 let msg = signal.message;
-                // 取出缓存的额外请求头
-                let extra_headers = ext_headers_cache.remove(&msg.url).unwrap_or_default();
+                // 取出缓存的请求事务上下文（headers + method + body）。
+                // 命中即用、未命中按默认值（GET、无 body）继续——后者保留向后兼容
+                // 旧版扩展（不发 method/body）的下载路径。
+                let ctx = ext_request_cache.remove(&msg.url).unwrap_or_default();
+                let extra_headers = ctx.headers;
+                let method = ctx.method;
+                let body = ctx.body;
                 log_info!(
-                    "[actor] user confirmed external download: url={}, cookies_len={}, extra_headers={}",
+                    "[actor] user confirmed external download: url={}, cookies_len={}, extra_headers={}, method={:?}, has_body={}",
                     msg.url,
                     msg.cookies.len(),
                     extra_headers.len(),
+                    method,
+                    body.is_some(),
                 );
                 manager
-                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, msg.referrer, msg.hint_file_size, Vec::new(), msg.proxy_url, msg.user_agent, msg.queue_id, String::new(), extra_headers, Vec::new())
+                    .create_task(msg.url, msg.save_dir, msg.file_name, msg.segments, msg.cookies, msg.referrer, msg.hint_file_size, Vec::new(), msg.proxy_url, msg.user_agent, msg.queue_id, String::new(), extra_headers, Vec::new(), method, body)
                     .await;
                 // 推送 AllTasks 确保 Dart 端获得正确 queue_id。
                 manager.load_and_send_all_tasks().await;

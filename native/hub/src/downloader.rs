@@ -126,9 +126,14 @@ pub struct DownloadParams {
     pub speed_limiter: SpeedLimiter,
     /// Browser cookies for authenticated downloads (e.g. GitHub private repos).
     /// Format: "name1=val1; name2=val2"
+    ///
+    /// **冗余字段**：值与 `spec.cookies` 始终保持一致——保留是为了让"不感知
+    /// RequestSpec"的旧调用路径继续工作。新增代码请优先读 `spec.cookies`。
     pub cookies: String,
     /// HTTP Referer header value captured by the browser extension.
     /// Empty = do not send Referer (manually added downloads).
+    ///
+    /// **冗余字段**：与 `spec.referrer` 同步。
     pub referrer: String,
     /// File size hint from the browser extension (bytes). 0 = unknown.
     /// When > 0, the probe phase (HEAD + Range:0-0) is skipped entirely.
@@ -147,7 +152,15 @@ pub struct DownloadParams {
     pub checksum: String,
     /// 浏览器扩展捕获的额外 HTTP 请求头（如 Authorization）。
     /// 在发起 HTTP 请求时附加到请求头中。
+    ///
+    /// **冗余字段**：与 `spec.extra_headers` 同步。
     pub extra_headers: std::collections::HashMap<String, String>,
+    /// 完整 HTTP 请求事务规格——method + cookies + referrer + headers + body。
+    ///
+    /// 这是请求构造的**单一权威来源**。`build_request(&client, &url, method, &spec)`
+    /// 用此重建浏览器看到的请求，而不是用 GET 重发 URL。修复 form-POST、
+    /// 一次性签名 URL 等"URL 之外的输入决定响应"的下载场景。
+    pub spec: RequestSpec,
 }
 
 /// 将浏览器扩展捕获的额外 HTTP 头应用到请求构建器上。
@@ -215,6 +228,188 @@ pub(crate) fn apply_extra_headers(
     // req.headers(map) 内部用 insert 逐个替换同名头，
     // 确保浏览器的真实 User-Agent 等值覆盖 build_client 设的默认值。
     req.headers(map)
+}
+
+// ---------------------------------------------------------------------------
+// RequestSpec: 完整 HTTP 请求事务的内部表示
+// ---------------------------------------------------------------------------
+//
+// 设计动机：FluxDown 早期把每个下载视为"URL → 内容"的简化模型，所有
+// HTTP 请求都通过 `client.get(url)` 重发。这个假设在以下场景全部失败：
+//   - form POST 触发的下载（uupdump.net）：服务器对 GET 返回 HTML 页面
+//   - 一次性签名 URL：被 probe 消费后再请求拿到 403/HTML
+//   - 内容协商响应：method/headers 不同 → body 不同
+//
+// 现在统一为「请求事务 = method + url + headers + cookies + body」，由扩展
+// 在 `webRequest.onBeforeRequest` 抓取后透传至 Rust，downloader 用 `build_request`
+// 一比一重建浏览器看到的请求。
+
+/// 解码后的请求体——`reqwest::RequestBuilder` 可直接消费的形式。
+#[derive(Debug, Clone)]
+pub enum RequestBodyDecoded {
+    /// 表单字段对——`reqwest::form()` 会编码为 `application/x-www-form-urlencoded`。
+    Form(Vec<(String, String)>),
+    /// 已经序列化好的 url-encoded 字符串，原样作为 body 发送。
+    Urlencoded(String),
+    /// 原始字节流。`content_type` 为 `None` 时不主动设置 Content-Type 头。
+    Raw {
+        bytes: Vec<u8>,
+        content_type: Option<String>,
+    },
+}
+
+/// 完整 HTTP 请求事务规格——`build_request` 的唯一输入来源。
+///
+/// 字段含义：
+///   - `method`：浏览器原始 method；缺省视为 GET
+///   - `cookies`：`Cookie:` 头的完整字符串（"k1=v1; k2=v2"）
+///   - `referrer`：浏览器原始 Referer
+///   - `extra_headers`：扩展捕获的其他请求头（UA/Accept/Sec-Fetch-* 等），
+///     由 `apply_extra_headers` 过滤危险头后注入
+///   - `body`：仅非 GET 有意义；GET 请求即使携带也会被忽略（见 build_request）
+#[derive(Debug, Clone)]
+pub struct RequestSpec {
+    pub method: reqwest::Method,
+    pub cookies: String,
+    pub referrer: String,
+    pub extra_headers: std::collections::HashMap<String, String>,
+    pub body: Option<RequestBodyDecoded>,
+}
+
+impl RequestSpec {
+    /// 默认 GET、无 cookies/headers/body——用于 download_manager 内部的"裸"
+    /// HTTP 请求场景（如 BT/HLS 元数据获取，无浏览器会话上下文）。
+    pub fn empty_get() -> Self {
+        Self {
+            method: reqwest::Method::GET,
+            cookies: String::new(),
+            referrer: String::new(),
+            extra_headers: std::collections::HashMap::new(),
+            body: None,
+        }
+    }
+
+    /// GET / HEAD 请求——可以多段下载、可以做 HEAD probe。
+    /// 其他 method（POST/PUT/PATCH/DELETE/...）一律强制单流，跳过 HEAD probe。
+    pub fn is_get_like(&self) -> bool {
+        self.method == reqwest::Method::GET || self.method == reqwest::Method::HEAD
+    }
+
+    /// 从 NM 协议消息构造。
+    ///
+    /// `method` 解析失败（非法字符串）时回退为 GET 并记录日志，确保单一坏请求
+    /// 不会让整个下载链路崩溃。
+    /// `body` 解码失败（base64 错误等）时回退为 None。
+    pub fn from_nm(req: &crate::native_messaging::DownloadRequest) -> Self {
+        use base64::Engine;
+
+        let method = req
+            .method
+            .as_deref()
+            .and_then(|s| {
+                let upper = s.trim().to_ascii_uppercase();
+                reqwest::Method::from_bytes(upper.as_bytes()).ok()
+            })
+            .unwrap_or(reqwest::Method::GET);
+
+        let body = req.body.as_ref().and_then(|b| {
+            use crate::native_messaging::RequestBody as NmBody;
+            match b {
+                NmBody::FormData { fields } => {
+                    let mut pairs: Vec<(String, String)> = Vec::new();
+                    for (k, vs) in fields {
+                        for v in vs {
+                            pairs.push((k.clone(), v.clone()));
+                        }
+                    }
+                    Some(RequestBodyDecoded::Form(pairs))
+                }
+                NmBody::Urlencoded { raw } => {
+                    Some(RequestBodyDecoded::Urlencoded(raw.clone()))
+                }
+                NmBody::Raw {
+                    bytes_b64,
+                    content_type,
+                } => match base64::engine::general_purpose::STANDARD.decode(bytes_b64) {
+                    Ok(bytes) => Some(RequestBodyDecoded::Raw {
+                        bytes,
+                        content_type: content_type.clone(),
+                    }),
+                    Err(e) => {
+                        log_info!("[request-spec] failed to base64-decode raw body: {}", e);
+                        None
+                    }
+                },
+            }
+        });
+
+        Self {
+            method,
+            cookies: req.cookies.clone(),
+            referrer: req.referrer.clone(),
+            extra_headers: req.headers.clone().unwrap_or_default(),
+            body,
+        }
+    }
+}
+
+/// 统一请求构建入口——所有发出 HTTP 请求的地方都应通过此函数。
+///
+/// 此函数替代了散落在 downloader / segment_coordinator / hls / dash 等
+/// 模块中的 `client.get(url) + apply_extra_headers(...)` 模式。
+///
+/// 参数 `method` 允许覆盖 `spec.method`——主要用于 probe 阶段（HEAD probe
+/// 总是发送 HEAD，与 spec 自身的 method 无关）。下载阶段通常传 `spec.method.clone()`。
+///
+/// **请求体语义**：
+///   - GET / HEAD：即使 `spec.body` 非空也不会被附加（HTTP 标准上 GET/HEAD 不应携带 body）
+///   - 其他 method：按 `RequestBodyDecoded` 类型重建请求体
+pub fn build_request(
+    client: &Client,
+    url: &str,
+    method: reqwest::Method,
+    spec: &RequestSpec,
+) -> reqwest::RequestBuilder {
+    let attaches_body =
+        method != reqwest::Method::GET && method != reqwest::Method::HEAD;
+    let mut req = client.request(method, url);
+
+    if !spec.cookies.is_empty() {
+        req = req.header("Cookie", &spec.cookies);
+    }
+    if !spec.referrer.is_empty() {
+        req = req.header(reqwest::header::REFERER, &spec.referrer);
+    }
+    req = apply_extra_headers(req, &spec.extra_headers);
+
+    if attaches_body {
+        if let Some(body) = &spec.body {
+            match body {
+                RequestBodyDecoded::Form(pairs) => {
+                    req = req.form(pairs);
+                }
+                RequestBodyDecoded::Urlencoded(raw) => {
+                    req = req
+                        .header(
+                            reqwest::header::CONTENT_TYPE,
+                            "application/x-www-form-urlencoded",
+                        )
+                        .body(raw.clone());
+                }
+                RequestBodyDecoded::Raw {
+                    bytes,
+                    content_type,
+                } => {
+                    if let Some(ct) = content_type {
+                        req = req.header(reqwest::header::CONTENT_TYPE, ct);
+                    }
+                    req = req.body(bytes.clone());
+                }
+            }
+        }
+    }
+
+    req
 }
 
 /// Content-Encoding types that the server may apply to response bodies.
@@ -512,21 +707,31 @@ const PROBE_RETRY_BASE_DELAY: Duration = Duration::from_secs(1);
 pub async fn resolve_file_info(
     client: &Client,
     url: &str,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
+    spec: &RequestSpec,
 ) -> Result<FileInfo, DownloadError> {
-    // Prepare a fallback header map that strips browser-like User-Agent.
+    // Prepare a fallback spec that strips browser-like User-Agent.
     // On the last attempt we use this to avoid Cloudflare JA3-vs-UA mismatch.
-    let headers_without_browser_ua: std::collections::HashMap<String, String> = extra_headers
+    let headers_without_browser_ua: std::collections::HashMap<String, String> = spec
+        .extra_headers
         .iter()
         .filter(|(k, _)| !k.eq_ignore_ascii_case("user-agent"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
-    let has_browser_ua = extra_headers
+    let has_browser_ua = spec
+        .extra_headers
         .keys()
         .any(|k| k.eq_ignore_ascii_case("user-agent"));
+
+    // Holder for the UA-downgraded variant; allocated once outside the loop so
+    // we can borrow it without repeated cloning.
+    let downgraded_spec = RequestSpec {
+        method: spec.method.clone(),
+        cookies: spec.cookies.clone(),
+        referrer: spec.referrer.clone(),
+        extra_headers: headers_without_browser_ua,
+        body: spec.body.clone(),
+    };
 
     let mut last_err = None;
     for attempt in 0..PROBE_MAX_RETRIES {
@@ -534,23 +739,23 @@ pub async fn resolve_file_info(
         // the request falls back to DEFAULT_UA ("FluxDown/1.0").  This
         // avoids Cloudflare's TLS-fingerprint-vs-UA bot detection.
         let use_downgraded_ua = has_browser_ua && attempt + 1 == PROBE_MAX_RETRIES;
-        let hdrs = if use_downgraded_ua {
+        let attempt_spec = if use_downgraded_ua {
             if attempt == 0 {
                 // Should not happen with PROBE_MAX_RETRIES >= 2, but guard anyway.
-                extra_headers
+                spec
             } else {
                 log_info!(
                     "[resolve] retry {}/{}: stripping browser UA to avoid bot detection",
                     attempt + 1,
                     PROBE_MAX_RETRIES
                 );
-                &headers_without_browser_ua
+                &downgraded_spec
             }
         } else {
-            extra_headers
+            spec
         };
 
-        match resolve_file_info_once(client, url, cookies, referrer, hdrs).await {
+        match resolve_file_info_once(client, url, attempt_spec).await {
             Ok(info) => return Ok(info),
             Err(e) => {
                 log_info!(
@@ -585,10 +790,16 @@ fn format_error_chain(mut src: Option<&dyn StdError>) -> String {
 async fn resolve_file_info_once(
     client: &Client,
     url: &str,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
+    spec: &RequestSpec,
 ) -> Result<FileInfo, DownloadError> {
+    // 非 GET（form POST 等）：HEAD 通常返回 405 Method Not Allowed，POST + Range
+    // 在 HTTP 标准上未定义。改为只发一次原始 method+body 请求，从响应头读取
+    // 文件元数据后立即终止读取（drop response）。
+    if !spec.is_get_like() {
+        return resolve_file_info_non_get(client, url, spec).await;
+    }
+
+    let cookies = spec.cookies.as_str();
     // --- Concurrent HEAD + GET probe ----------------------------------------
     // Fire both HEAD and GET Range:0-0 in parallel.  HEAD is faster when it
     // works, but many servers/CDNs omit Content-Disposition on HEAD.  By
@@ -605,32 +816,14 @@ async fn resolve_file_info_once(
     // Content-Encoding, Range requests are safe for multi-segment downloads
     // even when HEAD advertised compression.
 
-    let head_fut = {
-        let mut req = client.head(url).timeout(PROBE_TIMEOUT);
-        if !cookies.is_empty() {
-            req = req.header("Cookie", cookies);
-        }
-        if !referrer.is_empty() {
-            req = req.header(reqwest::header::REFERER, referrer);
-        }
-        req = apply_extra_headers(req, extra_headers);
-        req.send()
-    };
+    let head_fut = build_request(client, url, reqwest::Method::HEAD, spec)
+        .timeout(PROBE_TIMEOUT)
+        .send();
 
-    let get_fut = {
-        let mut req = client
-            .get(url)
-            .header("Range", "bytes=0-0")
-            .timeout(PROBE_TIMEOUT);
-        if !cookies.is_empty() {
-            req = req.header("Cookie", cookies);
-        }
-        if !referrer.is_empty() {
-            req = req.header(reqwest::header::REFERER, referrer);
-        }
-        req = apply_extra_headers(req, extra_headers);
-        req.send()
-    };
+    let get_fut = build_request(client, url, reqwest::Method::GET, spec)
+        .header("Range", "bytes=0-0")
+        .timeout(PROBE_TIMEOUT)
+        .send();
 
     let (head_result, get_result) = tokio::join!(head_fut, get_fut);
 
@@ -862,6 +1055,99 @@ async fn resolve_file_info_once(
         file_name,
         total_bytes,
         supports_range,
+        content_type,
+        etag,
+        last_modified,
+        content_encoding_compressed,
+    })
+}
+
+/// 文件名是否以 HTML 类扩展名结尾——用于 HTML 安全网判断"服务器返回 HTML
+/// 是否为用户期望"。空字符串视为不像 HTML：调用方有责任在到达此处前确保
+/// 文件名已经解析（run_download 中的 auto_name 空值检查 :1581 是兜底位置）。
+pub(crate) fn filename_looks_like_html(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".html") || lower.ends_with(".htm") || lower.ends_with(".xhtml")
+}
+
+/// 非 GET 请求的元数据探测——只发送一次原始 method+body 请求，从响应头
+/// 提取文件名/大小/MIME，不读响应体（drop response 立即释放连接）。
+///
+/// 设计理由：
+///   - HEAD 对 POST 端点通常返回 405/501，且不能携带 body
+///   - POST + Range:bytes=0-0 在 HTTP 标准上未定义，服务端实现不一致
+///   - 多段下载（Range 分割）对 non-GET 不可靠，统一强制单流
+///
+/// 因此 supports_range 强制为 false，调用方据此选择单流路径。
+async fn resolve_file_info_non_get(
+    client: &Client,
+    url: &str,
+    spec: &RequestSpec,
+) -> Result<FileInfo, DownloadError> {
+    log_info!(
+        "[resolve-non-get] method={} url={} body_present={}",
+        spec.method,
+        url,
+        spec.body.is_some()
+    );
+
+    let resp = build_request(client, url, spec.method.clone(), spec)
+        .timeout(PROBE_TIMEOUT)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        return Err(DownloadError::Other(format!(
+            "non-GET probe returned status {}",
+            resp.status()
+        )));
+    }
+
+    let final_url = resp.url().clone();
+    let headers = resp.headers().clone();
+    // drop(resp) 在此释放——我们只需头部，body 留给真正的下载阶段
+    drop(resp);
+
+    let total_bytes = headers
+        .get(reqwest::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    let content_type = headers
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let file_name = extract_filename(&headers, final_url.as_str());
+
+    let etag = headers
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let last_modified = headers
+        .get(reqwest::header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    let content_encoding_compressed = detect_content_encoding(&headers).is_some();
+
+    log_info!(
+        "[resolve-non-get] resolved: name={}, size={}, ct={}",
+        file_name,
+        total_bytes,
+        content_type
+    );
+
+    Ok(FileInfo {
+        file_name,
+        total_bytes,
+        // 非 GET 强制单流——POST + Range 在标准上未定义，服务端实现不一致
+        supports_range: false,
         content_type,
         etag,
         last_modified,
@@ -1511,9 +1797,13 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             // is intentionally skipped for hint-mode tasks (see below) so no
             // extra HTTP request is made that could consume a one-time CDN
             // token (e.g. Lanzou cloud signed URLs).
-            // Only assume Range support when we have a real file size;
-            // unknown-size downloads (-1 hint) fall back to single-stream.
-            supports_range: p.hint_file_size > 0 && p.segment_count != 1,
+            // Only assume Range support when we have a real file size AND
+            // the original method is GET-like. POST + Range is undefined and
+            // unsafe; force single-stream so the assumed supports_range can
+            // never trip multi-segment for non-GET requests.
+            supports_range: p.hint_file_size > 0
+                && p.segment_count != 1
+                && p.spec.is_get_like(),
             content_type: String::new(),
             // Hint mode skips the probe, so no ETag/Last-Modified available.
             etag: String::new(),
@@ -1524,7 +1814,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
     } else {
         log_info!("[download] task {} resolving file info...", p.task_id);
         let info =
-            resolve_file_info(client, &p.url, &p.cookies, &p.referrer, &p.extra_headers).await?;
+            resolve_file_info(client, &p.url, &p.spec).await?;
         log_info!(
             "[download] task {} resolved: name={}, size={}, range={}",
             p.task_id,
@@ -1535,9 +1825,12 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         info
     };
 
-    // Safety net: if the server returned HTML but the user expects a binary file,
-    // the URL is likely a redirect/landing page (e.g. Lanzou CDN transit page).
-    // Abort early instead of saving an HTML file with a wrong extension.
+    // Safety net (probe 阶段)：服务器在 probe 阶段返回 HTML 但用户期望二进制
+    // 文件——典型场景：Lanzou 等 CDN transit page、form-POST 端点用 GET 访问。
+    // 立即终止，避免落盘成 fake.zip 这类损坏文件。
+    //
+    // 第二道防线在 download_single 的 req.send() 后做实际响应的 Content-Type 检查
+    // （通过 build_request 发起，见 :2335 附近），覆盖 hint_file_size 旁路场景。
     if !info.content_type.is_empty() {
         let ct_lower = info.content_type.to_ascii_lowercase();
         let mime = ct_lower.split(';').next().unwrap_or("").trim();
@@ -1547,13 +1840,10 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             } else {
                 &p.file_name
             };
-            let looks_like_html = expected.ends_with(".html")
-                || expected.ends_with(".htm")
-                || expected.ends_with(".xhtml");
-            if !looks_like_html {
+            if !filename_looks_like_html(expected) {
                 return Err(DownloadError::Other(format!(
                     "server returned HTML page (Content-Type: {}) instead of the expected file — \
-                     the URL may be a redirect/transit page",
+                     the URL may be a redirect/transit page or a form-POST endpoint accessed via GET",
                     mime
                 )));
             }
@@ -1724,10 +2014,25 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
         p.segment_count
     };
 
-    // Use multi-segment only when the server supports Range,
-    // file is > 1 MB, and we asked for more than 1 segment.
-    let use_segments =
-        effective_supports_range && effective_total_bytes > 1_048_576 && segments > 1;
+    // Use multi-segment only when:
+    //   • The server supports Range (probe confirmed)
+    //   • File is > 1 MB (small files don't benefit from segmentation)
+    //   • We asked for more than 1 segment
+    //   • Original HTTP method is GET-like — POST + Range:bytes=X-Y is undefined
+    //     in HTTP standards and most servers will silently return 200 OK with
+    //     full body, corrupting the assembled output. Force single-stream
+    //     for non-GET to make uupdump-style form-POST downloads safe.
+    let use_segments = effective_supports_range
+        && effective_total_bytes > 1_048_576
+        && segments > 1
+        && p.spec.is_get_like();
+    if !p.spec.is_get_like() {
+        log_info!(
+            "[download] task {} method={:?} → forcing single-stream (non-GET cannot use Range/multi-segment)",
+            p.task_id,
+            p.spec.method
+        );
+    }
 
     log_info!(
         "[download] task {} mode={}, segments={}, temp={}, dest={}",
@@ -1758,9 +2063,7 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.progress_tx,
             &p.cancel_token,
             &p.speed_limiter,
-            &p.cookies,
-            &p.referrer,
-            &p.extra_headers,
+            &p.spec,
             &info.etag,
             &info.last_modified,
         )
@@ -1804,9 +2107,8 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
                     &p.progress_tx,
                     &p.cancel_token,
                     &p.speed_limiter,
-                    &p.cookies,
-                    &p.referrer,
-                    &p.extra_headers,
+                    &p.spec,
+                    &actual_name,
                 )
                 .await?;
                 Some(result)
@@ -1825,9 +2127,8 @@ async fn run_download_inner(p: &DownloadParams) -> Result<i64, DownloadError> {
             &p.progress_tx,
             &p.cancel_token,
             &p.speed_limiter,
-            &p.cookies,
-            &p.referrer,
-            &p.extra_headers,
+            &p.spec,
+            &actual_name,
         )
         .await?;
         Some(result)
@@ -1996,9 +2297,8 @@ async fn download_single(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
+    spec: &RequestSpec,
+    expected_filename: &str,
 ) -> Result<SingleDownloadResult, DownloadError> {
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -2010,29 +2310,54 @@ async fn download_single(
         Err(_) => 0,
     };
 
-    // Attempt a Range resume when:
-    //   • The caller says the server supports Range (from probe or from DB history), AND
-    //   • We have a non-empty partial file on disk, AND
-    //   • The partial file is smaller than the known total (or total is unknown)
-    let want_resume =
-        supports_range && existing_len > 0 && (total_bytes == 0 || existing_len < total_bytes);
+    // Resume only when the original method is GET-like.  POST + Range:bytes=N-
+    // is undefined in HTTP standards and most servers will ignore the Range
+    // header (returning 200 with the full body) — appending it to the partial
+    // file would corrupt the result.
+    let want_resume = spec.is_get_like()
+        && supports_range
+        && existing_len > 0
+        && (total_bytes == 0 || existing_len < total_bytes);
 
     let mut downloaded: i64;
     let mut file;
 
-    let mut req = client.get(url);
-    if !cookies.is_empty() {
-        req = req.header("Cookie", cookies);
-    }
-    if !referrer.is_empty() {
-        req = req.header(reqwest::header::REFERER, referrer);
-    }
-    req = apply_extra_headers(req, extra_headers);
+    let mut req = build_request(client, url, spec.method.clone(), spec);
     if want_resume {
         req = req.header("Range", format!("bytes={}-", existing_len));
     }
 
     let resp = req.send().await?.error_for_status()?;
+
+    // ---- Safety net: HTML response on a binary download ---------------------
+    //
+    // 兜底 hint_file_size > 0 旁路（行 1480-1536）跳过 probe 的场景：
+    // 当扩展端给出一次性 CDN URL 的 fileSize 提示时，downloader 跳过 probe
+    // 直接进入下载，但若 CDN 实际返回 HTML 错误页（token 已被消费、签名过期、
+    // 站点改用 form POST 等），会落盘成 fake.zip 这类损坏文件。
+    //
+    // 这里在 send 后第一时间检查 Content-Type——发现 text/html 但用户期望
+    // 二进制文件时立即终止下载，确保即使协议升级出问题也绝不再发生
+    // "HTML 当 zip 保存"的损坏。
+    {
+        let ct_raw = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        let mime = ct_raw.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        if (mime == "text/html" || mime == "application/xhtml+xml")
+            && !filename_looks_like_html(expected_filename)
+        {
+            return Err(DownloadError::Other(format!(
+                "server returned HTML page (Content-Type: {}) for a non-HTML download — \
+                 aborting to avoid corrupting saved file. \
+                 Likely causes: form-POST URL accessed via GET, expired one-time CDN token, \
+                 or site requires authentication that the extension did not capture.",
+                mime
+            )));
+        }
+    }
 
     // Detect compressed responses — we now decompress on-the-fly instead of
     // rejecting.  When decompression is active, total_bytes from the probe is
@@ -2213,9 +2538,7 @@ async fn download_multi_segment(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
+    spec: &RequestSpec,
     etag: &str,
     last_modified: &str,
 ) -> Result<(), DownloadError> {
@@ -2247,9 +2570,7 @@ async fn download_multi_segment(
         progress_tx,
         cancel_token,
         speed_limiter,
-        cookies,
-        referrer,
-        extra_headers,
+        spec,
         etag,
         last_modified,
     )
@@ -3062,5 +3383,258 @@ mod tests {
         assert!(!super::is_server_rejection(&super::DownloadError::Other(
             "403 forbidden".to_string()
         )));
+    }
+
+    // -----------------------------------------------------------------------
+    // RequestSpec / build_request — 架构修复验证
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn request_spec_empty_get_is_get_like() {
+        let spec = super::RequestSpec::empty_get();
+        assert_eq!(spec.method, reqwest::Method::GET);
+        assert!(spec.is_get_like());
+        assert!(spec.body.is_none());
+    }
+
+    #[test]
+    fn request_spec_post_is_not_get_like() {
+        let spec = super::RequestSpec {
+            method: reqwest::Method::POST,
+            cookies: String::new(),
+            referrer: String::new(),
+            extra_headers: std::collections::HashMap::new(),
+            body: None,
+        };
+        assert!(!spec.is_get_like());
+    }
+
+    #[test]
+    fn request_spec_from_nm_defaults_to_get_when_method_missing() {
+        let nm_req = crate::native_messaging::DownloadRequest {
+            url: "https://example.com/file.zip".to_string(),
+            filename: String::new(),
+            referrer: String::new(),
+            cookies: String::new(),
+            headers: None,
+            file_size: None,
+            mime_type: None,
+            method: None,
+            body: None,
+        };
+        let spec = super::RequestSpec::from_nm(&nm_req);
+        assert_eq!(spec.method, reqwest::Method::GET);
+    }
+
+    #[test]
+    fn request_spec_from_nm_parses_post_with_form_body() {
+        let mut fields = std::collections::HashMap::new();
+        fields.insert(
+            "autodl".to_string(),
+            vec!["2".to_string()],
+        );
+        fields.insert(
+            "updates".to_string(),
+            vec!["1".to_string()],
+        );
+        let nm_req = crate::native_messaging::DownloadRequest {
+            url: "https://uupdump.net/get.php".to_string(),
+            filename: String::new(),
+            referrer: String::new(),
+            cookies: String::new(),
+            headers: None,
+            file_size: None,
+            mime_type: None,
+            method: Some("POST".to_string()),
+            body: Some(crate::native_messaging::RequestBody::FormData { fields }),
+        };
+        let spec = super::RequestSpec::from_nm(&nm_req);
+        assert_eq!(spec.method, reqwest::Method::POST);
+        assert!(!spec.is_get_like());
+        match &spec.body {
+            Some(super::RequestBodyDecoded::Form(pairs)) => {
+                assert_eq!(pairs.len(), 2);
+                assert!(pairs.iter().any(|(k, v)| k == "autodl" && v == "2"));
+                assert!(pairs.iter().any(|(k, v)| k == "updates" && v == "1"));
+            }
+            other => panic!("expected Form body, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn request_spec_from_nm_decodes_raw_body_base64() {
+        use base64::Engine;
+        let raw = b"hello world";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(raw);
+        let nm_req = crate::native_messaging::DownloadRequest {
+            url: "https://example.com".to_string(),
+            filename: String::new(),
+            referrer: String::new(),
+            cookies: String::new(),
+            headers: None,
+            file_size: None,
+            mime_type: None,
+            method: Some("PUT".to_string()),
+            body: Some(crate::native_messaging::RequestBody::Raw {
+                bytes_b64: b64,
+                content_type: Some("application/octet-stream".to_string()),
+            }),
+        };
+        let spec = super::RequestSpec::from_nm(&nm_req);
+        match &spec.body {
+            Some(super::RequestBodyDecoded::Raw {
+                bytes,
+                content_type,
+            }) => {
+                assert_eq!(bytes, raw);
+                assert_eq!(content_type.as_deref(), Some("application/octet-stream"));
+            }
+            other => panic!("expected Raw body, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn request_spec_from_nm_invalid_method_falls_back_to_get() {
+        let nm_req = crate::native_messaging::DownloadRequest {
+            url: "https://example.com".to_string(),
+            filename: String::new(),
+            referrer: String::new(),
+            cookies: String::new(),
+            headers: None,
+            file_size: None,
+            mime_type: None,
+            method: Some("BAD METHOD".to_string()), // 含空格的非法 method
+            body: None,
+        };
+        let spec = super::RequestSpec::from_nm(&nm_req);
+        assert_eq!(spec.method, reqwest::Method::GET);
+    }
+
+    #[test]
+    fn build_request_get_does_not_attach_body_even_if_present() {
+        // 即使 spec 携带 body，GET 请求也不应附加（HTTP 标准上 GET 不应携带 body）
+        let client = reqwest::Client::new();
+        let spec = super::RequestSpec {
+            method: reqwest::Method::GET,
+            cookies: String::new(),
+            referrer: String::new(),
+            extra_headers: std::collections::HashMap::new(),
+            body: Some(super::RequestBodyDecoded::Urlencoded("k=v".to_string())),
+        };
+        let req = super::build_request(&client, "https://example.com", reqwest::Method::GET, &spec);
+        let built = req.build().expect("build_request must produce a valid request");
+        assert_eq!(built.method(), reqwest::Method::GET);
+        // GET 请求 body 应为 None
+        assert!(
+            built.body().is_none(),
+            "GET request must not carry a body even if spec.body is set"
+        );
+    }
+
+    #[test]
+    fn build_request_post_attaches_form_body() {
+        let client = reqwest::Client::new();
+        let spec = super::RequestSpec {
+            method: reqwest::Method::POST,
+            cookies: String::new(),
+            referrer: String::new(),
+            extra_headers: std::collections::HashMap::new(),
+            body: Some(super::RequestBodyDecoded::Form(vec![
+                ("autodl".to_string(), "2".to_string()),
+                ("updates".to_string(), "1".to_string()),
+            ])),
+        };
+        let req = super::build_request(
+            &client,
+            "https://uupdump.net/get.php",
+            reqwest::Method::POST,
+            &spec,
+        );
+        let built = req.build().expect("build_request must produce a valid request");
+        assert_eq!(built.method(), reqwest::Method::POST);
+        // form() 设置 Content-Type 为 application/x-www-form-urlencoded
+        assert_eq!(
+            built
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-www-form-urlencoded")
+        );
+        // body 应被附加
+        assert!(built.body().is_some(), "POST must carry the form body");
+    }
+
+    #[test]
+    fn build_request_applies_cookies_referrer_and_extra_headers() {
+        let client = reqwest::Client::new();
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("Authorization".to_string(), "Bearer xyz".to_string());
+        let spec = super::RequestSpec {
+            method: reqwest::Method::GET,
+            cookies: "k1=v1; k2=v2".to_string(),
+            referrer: "https://referrer.example.com/page".to_string(),
+            extra_headers: extra,
+            body: None,
+        };
+        let req = super::build_request(
+            &client,
+            "https://example.com/file.zip",
+            reqwest::Method::GET,
+            &spec,
+        );
+        let built = req.build().unwrap();
+        assert_eq!(
+            built.headers().get("Cookie").unwrap().to_str().unwrap(),
+            "k1=v1; k2=v2"
+        );
+        assert_eq!(
+            built
+                .headers()
+                .get(reqwest::header::REFERER)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "https://referrer.example.com/page"
+        );
+        assert_eq!(
+            built
+                .headers()
+                .get("Authorization")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "Bearer xyz"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // filename_looks_like_html — HTML 安全网兜底辅助函数
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn filename_looks_like_html_recognises_html_extensions() {
+        assert!(super::filename_looks_like_html("page.html"));
+        assert!(super::filename_looks_like_html("page.htm"));
+        assert!(super::filename_looks_like_html("page.xhtml"));
+        assert!(super::filename_looks_like_html("PAGE.HTML")); // 大小写无关
+    }
+
+    #[test]
+    fn filename_looks_like_html_rejects_binary_extensions() {
+        assert!(!super::filename_looks_like_html("file.zip"));
+        assert!(!super::filename_looks_like_html("video.mp4"));
+        assert!(!super::filename_looks_like_html("installer.exe"));
+        // uupdump 案例的真实文件名
+        assert!(!super::filename_looks_like_html(
+            "26220.8340_amd64_zh-cn_professional_5412fa31_convert.zip"
+        ));
+    }
+
+    #[test]
+    fn filename_looks_like_html_empty_is_not_html() {
+        // 空字符串不像 HTML——调用方应在调用前保证名称非空
+        // （run_download 中 auto_name.is_empty() 检查会提前返回错误）。
+        // 让此处返回 false 才能让 HTML 安全网在边界 case 下仍能触发。
+        assert!(!super::filename_looks_like_html(""));
     }
 }

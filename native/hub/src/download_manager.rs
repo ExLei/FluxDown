@@ -268,6 +268,11 @@ struct QueuedTask {
     /// Pre-selected file indices for BT downloads (from the new-download dialog).
     /// Non-empty = skip the BtFilesInfo dialog.
     selected_file_indices: Vec<i32>,
+    /// 浏览器扩展捕获的原始 HTTP method（如 "POST"）。`None` 视为 "GET"。
+    /// 配合 `body` 字段一起重建 form-POST 等触发的下载请求事务。
+    method: Option<String>,
+    /// 浏览器扩展捕获的原始请求体（仅非 GET 时有意义）。
+    body: Option<crate::native_messaging::RequestBody>,
 }
 
 /// All state associated with a single actively-running download task.
@@ -1235,6 +1240,8 @@ impl DownloadManager {
         checksum: String,
         extra_headers: std::collections::HashMap<String, String>,
         selected_file_indices: Vec<i32>,
+        method: Option<String>,
+        body: Option<crate::native_messaging::RequestBody>,
     ) {
         let task_id = Uuid::new_v4().to_string();
         // When segments <= 0 ("auto"), store 0 in DB and let the downloader
@@ -1304,6 +1311,8 @@ impl DownloadManager {
             checksum,
             extra_headers,
             selected_file_indices,
+            method,
+            body,
         };
         if is_bt || (self.has_capacity() && self.has_queue_capacity(&queued.queue_id)) {
             self.do_start_task(queued).await;
@@ -1371,6 +1380,8 @@ impl DownloadManager {
             checksum,
             extra_headers,
             selected_file_indices,
+            method,
+            body,
         } = queued;
 
         // Four-tier segment count priority:
@@ -1675,6 +1686,21 @@ impl DownloadManager {
                 None
             };
 
+            // 构造完整 HTTP 请求事务规格——method/body 来自浏览器扩展，
+            // 用于在 form-POST 等非 GET 触发的下载场景中一比一重建原始请求。
+            // 参见 downloader.rs 中 RequestSpec / build_request 的设计动机。
+            let spec = downloader::RequestSpec::from_nm(&crate::native_messaging::DownloadRequest {
+                url: url.clone(),
+                filename: file_name.clone(),
+                referrer: referrer.clone(),
+                cookies: cookies.clone(),
+                headers: Some(extra_headers.clone()),
+                file_size: None,
+                mime_type: None,
+                method: method.clone(),
+                body: body.clone(),
+            });
+
             let params = DownloadParams {
                 task_id: task_id.clone(),
                 url,
@@ -1694,6 +1720,7 @@ impl DownloadManager {
                 hls_quality_rx,
                 checksum,
                 extra_headers,
+                spec,
             };
 
             tokio::spawn(async move {
@@ -1912,6 +1939,8 @@ impl DownloadManager {
                     checksum: t.checksum, // loaded from DB for integrity verification
                     extra_headers: std::collections::HashMap::new(), // 恢复任务无额外请求头
                     selected_file_indices: Vec::new(), // resume tasks have no pre-selection
+                    method: None, // 不持久化 method/body，恢复时按 GET 重发
+                    body: None,
                 });
             }
         }
@@ -2211,6 +2240,10 @@ impl DownloadManager {
                 hls_quality_rx,
                 checksum: task.checksum,
                 extra_headers: std::collections::HashMap::new(), // 恢复任务无额外请求头
+                // 恢复任务无浏览器请求上下文 → GET 重发（既往行为，本次重构不改变）。
+                // 极端情况下原本是 POST 触发的下载，恢复时会失败——但 method/body 未持久化，
+                // 这是已知折衷：成本远低于把 POST 体写进 SQLite。
+                spec: downloader::RequestSpec::empty_get(),
             };
 
             tokio::spawn(async move {
@@ -2855,6 +2888,8 @@ impl DownloadManager {
                 checksum: task_row.checksum,
                 extra_headers: std::collections::HashMap::new(), // 恢复任务无额外请求头
                 selected_file_indices: Vec::new(), // resume tasks have no pre-selection
+                method: None,
+                body: None,
             });
         }
     }

@@ -16,7 +16,6 @@
 
 #![cfg(test)]
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -172,7 +171,7 @@ async fn run_one_real_download(
     let (progress_tx, progress_rx) = mpsc::channel::<ProgressUpdate>(256);
     let drain_handle = spawn_progress_drain(progress_rx);
 
-    let extra_headers: HashMap<String, String> = HashMap::new();
+    let spec = crate::downloader::RequestSpec::empty_get();
 
     let started = Instant::now();
 
@@ -187,9 +186,7 @@ async fn run_one_real_download(
         &progress_tx,
         &cancel,
         &speed_limiter,
-        "", // cookies
-        "", // referrer
-        &extra_headers,
+        &spec,
         etag,
         last_modified,
     )
@@ -251,9 +248,13 @@ async fn real_multi_segment_corruption_repeat() {
     let client = build_client(&proxy, "Mozilla/5.0 FluxDownCorruptionTest/1.0")
         .expect("build_client for probe");
 
-    let info = resolve_file_info(&client, TEST_URL, "", "", &HashMap::new())
-        .await
-        .expect("resolve_file_info");
+    let info = resolve_file_info(
+        &client,
+        TEST_URL,
+        &crate::downloader::RequestSpec::empty_get(),
+    )
+    .await
+    .expect("resolve_file_info");
 
     println!("  total_bytes       : {}", info.total_bytes);
     println!("  supports_range    : {}", info.supports_range);

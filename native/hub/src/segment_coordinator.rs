@@ -308,9 +308,7 @@ pub async fn run_coordinated_download(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     cancel_token: &CancellationToken,
     speed_limiter: &SpeedLimiter,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
+    spec: &crate::downloader::RequestSpec,
     etag: &str,
     last_modified: &str,
 ) -> Result<(), DownloadError> {
@@ -692,9 +690,7 @@ pub async fn run_coordinated_download(
             db.clone(),
             progress_tx.clone(),
             speed_limiter.clone(),
-            cookies.to_string(),
-            referrer.to_string(),
-            extra_headers.clone(),
+            spec.clone(),
             etag.to_string(),
             last_modified.to_string(),
         );
@@ -1632,9 +1628,7 @@ fn spawn_worker(
     db: Db,
     progress_tx: mpsc::Sender<ProgressUpdate>,
     speed_limiter: SpeedLimiter,
-    cookies: String,
-    referrer: String,
-    extra_headers: std::collections::HashMap<String, String>,
+    spec: crate::downloader::RequestSpec,
     etag: String,
     last_modified: String,
 ) -> tokio::task::JoinHandle<()> {
@@ -1661,9 +1655,7 @@ fn spawn_worker(
                 &progress_tx,
                 &seg_states,
                 &speed_limiter,
-                &cookies,
-                &referrer,
-                &extra_headers,
+                &spec,
                 &etag,
                 &last_modified,
             )
@@ -1721,9 +1713,7 @@ async fn do_segment_with_retry(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
+    spec: &crate::downloader::RequestSpec,
     expected_etag: &str,
     expected_last_modified: &str,
 ) -> Result<i64, DownloadError> {
@@ -1746,9 +1736,7 @@ async fn do_segment_with_retry(
             progress_tx,
             seg_states,
             speed_limiter,
-            cookies,
-            referrer,
-            extra_headers,
+            spec,
             expected_etag,
             expected_last_modified,
         )
@@ -1821,9 +1809,7 @@ async fn do_segment(
     progress_tx: &mpsc::Sender<ProgressUpdate>,
     seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     speed_limiter: &SpeedLimiter,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
+    spec: &crate::downloader::RequestSpec,
     expected_etag: &str,
     expected_last_modified: &str,
 ) -> Result<i64, DownloadError> {
@@ -1833,14 +1819,11 @@ async fn do_segment(
     }
 
     let range = format!("bytes={}-{}", actual_start, seg_end);
-    let mut req = client.get(url).header("Range", range);
-    if !cookies.is_empty() {
-        req = req.header("Cookie", cookies);
-    }
-    if !referrer.is_empty() {
-        req = req.header(reqwest::header::REFERER, referrer);
-    }
-    req = crate::downloader::apply_extra_headers(req, extra_headers);
+    // 多段下载始终用 GET——上游 resolve_file_info 已确保 spec.is_get_like()，
+    // 此处显式传入 GET 以规避：（1）调用方误传 non-GET spec；（2）spec.method
+    // 是 HEAD（HEAD 不携带 body，没有意义）。
+    let req = crate::downloader::build_request(client, url, reqwest::Method::GET, spec)
+        .header("Range", range);
     let resp = req.send().await?.error_for_status()?;
 
     // --- Range support verification ----------------------------------------

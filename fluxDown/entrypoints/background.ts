@@ -343,6 +343,149 @@ export default defineBackground(() => {
   }
   const responseDownloadCache = new Map<string, ResponseDownloadInfo>();
 
+  // ──────────────────────────────────────────────────────────────
+  // 完整请求事务捕获（method + body）—— 修复 form-POST 触发的下载
+  // ──────────────────────────────────────────────────────────────
+  //
+  // 问题背景：chrome.downloads.onCreated 仅暴露 URL/filename/mime，**不暴露**
+  // 浏览器实际发出的 method 与 requestBody。对 uupdump.net 这类 form POST
+  // 触发下载的站点，FluxDown 拿到 URL 后用 GET 重发会拿到 HTML 页面而非
+  // 真实文件，导致 ".zip" 文件落盘成 "<!DOCTYPE html>"。
+  //
+  // 解决方案：在 webRequest.onBeforeRequest 抓取浏览器原始 method 与 body，
+  // 按 URL 索引缓存。downloads.onCreated 命中时按 URL 反查这张表，把
+  // method/body 一起塞进发送给 FluxDown App 的 payload。Rust 端用此
+  // 一比一重建浏览器请求事务。
+  //
+  // 局限性：requestRecordCache 按 URL 串接 onBeforeRequest 与 onCreated，
+  // 同一 URL 在 60 秒内的多次请求只保留最新一次（覆盖式写入）。这是因为
+  // chrome.downloads.onCreated 不暴露 webRequest 的 requestId，无法精确配对。
+  type CapturedBody =
+    | { kind: "formData"; fields: Record<string, string[]> }
+    | { kind: "raw"; bytesB64: string; contentType?: string };
+
+  interface RequestRecord {
+    url: string;
+    method: string;
+    body?: CapturedBody;
+    ts: number;
+  }
+  const requestRecordCache = new Map<string, RequestRecord>();
+
+  // ArrayBuffer → base64 字符串（chrome.webRequest 抓到的 raw body 是 ArrayBuffer）。
+  function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    // 分块处理，避免对超大 body 触发 String.fromCharCode 栈溢出
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      const slice = bytes.subarray(i, Math.min(i + chunk, bytes.length));
+      binary += String.fromCharCode(...slice);
+    }
+    return btoa(binary);
+  }
+
+  // 仅当 method 非 GET 或带有 body 时才有捕获价值——单纯的 GET 请求与现有
+  // URL 重发逻辑等价，缓存它会无谓占用内存。
+  function shouldCaptureRequest(
+    details: chrome.webRequest.WebRequestBodyDetails,
+  ): boolean {
+    if (details.method !== "GET" && details.method !== "HEAD") return true;
+    if (details.requestBody && (details.requestBody.formData || details.requestBody.raw)) {
+      return true;
+    }
+    return false;
+  }
+
+  function captureBody(
+    details: chrome.webRequest.WebRequestBodyDetails,
+  ): CapturedBody | undefined {
+    const body = details.requestBody;
+    if (!body) return undefined;
+    if (body.formData && Object.keys(body.formData).length > 0) {
+      return { kind: "formData", fields: body.formData };
+    }
+    if (body.raw && body.raw.length > 0) {
+      // 只取首块 raw bytes——多块拼接对常见 form-urlencoded / JSON POST 不必要
+      const part = body.raw[0];
+      if (part?.bytes) {
+        return {
+          kind: "raw",
+          bytesB64: arrayBufferToBase64(part.bytes),
+          // chrome.webRequest 不直接暴露 Content-Type，留给后续 header 配对
+        };
+      }
+    }
+    return undefined;
+  }
+
+  function onBeforeRequestHandler(
+    details: chrome.webRequest.WebRequestBodyDetails,
+  ): chrome.webRequest.BlockingResponse | undefined {
+    if (!shouldCaptureRequest(details)) return undefined;
+    const body = captureBody(details);
+    requestRecordCache.set(details.url, {
+      url: details.url,
+      method: details.method,
+      body,
+      ts: Date.now(),
+    });
+    return undefined;
+  }
+
+  try {
+    browser.webRequest.onBeforeRequest.addListener(
+      onBeforeRequestHandler as any,
+      { urls: ["<all_urls>"] },
+      ["requestBody"] as any,
+    );
+    console.log(
+      "[FluxDown] webRequest.onBeforeRequest listener registered (with requestBody)",
+    );
+  } catch (e) {
+    console.warn(
+      "[FluxDown] Failed to register onBeforeRequest listener:",
+      e,
+    );
+  }
+
+  // requestRecordCache 周期清理（与 requestHeaderCache 同步策略）
+  setInterval(() => {
+    const now = Date.now();
+    for (const [k, rec] of requestRecordCache) {
+      if (now - rec.ts > 60_000) {
+        requestRecordCache.delete(k);
+      }
+    }
+    if (requestRecordCache.size > 500) {
+      const excess = requestRecordCache.size - 400;
+      let deleted = 0;
+      for (const k of requestRecordCache.keys()) {
+        if (deleted >= excess) break;
+        requestRecordCache.delete(k);
+        deleted++;
+      }
+    }
+  }, 30_000);
+
+  // 取出 (method, body) 作为附加 payload —— onCreated / onDeterminingFilename
+  // 路径在调用 sendDownloadRequest 之前调用此函数。
+  // 优先匹配 finalUrl（重定向后的真实下载 URL），fallback 到原始 url。
+  function lookupRequestRecord(
+    url: string,
+    fallbackUrl?: string,
+  ): { method?: string; body?: CapturedBody } {
+    const rec =
+      requestRecordCache.get(url) ||
+      (fallbackUrl && fallbackUrl !== url
+        ? requestRecordCache.get(fallbackUrl)
+        : undefined);
+    if (!rec) return {};
+    // GET 是默认值——不传也罢，节省 NM 协议字节数
+    const method = rec.method && rec.method !== "GET" ? rec.method : undefined;
+    return { method, body: rec.body };
+  }
+
   // Chrome MV3 需要 'extraHeaders' 才能看到 Cookie 等敏感头，Firefox 不需要也不识别此选项
   const sendHeadersOpts: string[] = ["requestHeaders"];
   try {
@@ -1741,6 +1884,23 @@ export default defineBackground(() => {
       );
     }
 
+    // 反查浏览器原始 method 与 body —— 修复 form-POST 触发的下载（uupdump 等）。
+    // 优先以下载发起的真实 url 查找；命中不到时回退到重定向前的 originalUrl。
+    const reqRecord = lookupRequestRecord(url, originalUrl);
+    if (reqRecord.method || reqRecord.body) {
+      console.log(
+        "[FluxDown] Captured original request transaction: method=",
+        reqRecord.method ?? "GET",
+        "has_body=",
+        !!reqRecord.body,
+      );
+      // 用过即清——避免下次同 URL 复用旧 record
+      requestRecordCache.delete(url);
+      if (originalUrl && originalUrl !== url) {
+        requestRecordCache.delete(originalUrl);
+      }
+    }
+
     const request: DownloadRequest = {
       url,
       filename: filename || "",
@@ -1749,6 +1909,8 @@ export default defineBackground(() => {
       headers: Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
       fileSize,
       mimeType,
+      method: reqRecord.method,
+      body: reqRecord.body,
     };
 
     console.log("[FluxDown] Sending to FluxDown app:", request);
