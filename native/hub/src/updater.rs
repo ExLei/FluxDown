@@ -113,10 +113,16 @@ struct ReleaseAssets {
     #[allow(dead_code)]
     linux_tarball: Option<AssetInfo>,
     // macOS (unused on Windows/Linux but must be present for serde deserialization)
+    // Field names MUST match website /api/release JSON keys exactly:
+    //   macos_dmg_arm64, macos_dmg_x64, macos_tarball_arm64, macos_tarball_x64
     #[allow(dead_code)]
-    macos_tarball: Option<AssetInfo>,
+    macos_dmg_arm64: Option<AssetInfo>,
     #[allow(dead_code)]
-    macos_arm64_tarball: Option<AssetInfo>,
+    macos_dmg_x64: Option<AssetInfo>,
+    #[allow(dead_code)]
+    macos_tarball_arm64: Option<AssetInfo>,
+    #[allow(dead_code)]
+    macos_tarball_x64: Option<AssetInfo>,
 }
 
 #[derive(Deserialize)]
@@ -229,12 +235,22 @@ fn select_asset(assets: &ReleaseAssets) -> Option<&AssetInfo> {
 
     #[cfg(target_os = "macos")]
     {
-        // Always use the tar.gz distribution for programmatic in-app updates.
-        // DMG is for first-time manual installs only.
+        // Without an Apple Developer signing identity we cannot perform a
+        // silent in-place .app replacement (Gatekeeper / quarantine /
+        // App Translocation will block the result).  Instead we ship the DMG
+        // and hand it to Finder via `open`, replicating the first-install UX
+        // (drag .app to Applications).  Fall back to tarball if the release
+        // happens to be missing a DMG asset.
         if is_arm64() {
-            assets.macos_arm64_tarball.as_ref()
+            assets
+                .macos_dmg_arm64
+                .as_ref()
+                .or(assets.macos_tarball_arm64.as_ref())
         } else {
-            assets.macos_tarball.as_ref()
+            assets
+                .macos_dmg_x64
+                .as_ref()
+                .or(assets.macos_tarball_x64.as_ref())
         }
     }
 
@@ -399,6 +415,30 @@ fn sanitize_filename(raw: &str) -> String {
     }
 }
 
+/// Where to deposit the downloaded update artifact.
+///
+/// On macOS we land in `~/Downloads` so users can find the DMG in the place
+/// they expect after a "download from the web" — the in-app update UX is
+/// indistinguishable from a manual download until they double-click.
+/// On Windows/Linux we keep `temp_dir` because the helper binary handles the
+/// install end-to-end and the artifact is disposable.
+fn pick_download_dir() -> PathBuf {
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(home) = std::env::var("HOME") {
+            let downloads = PathBuf::from(home).join("Downloads");
+            if downloads.is_dir() {
+                return downloads;
+            }
+            // Best-effort create — fall through to temp_dir on failure.
+            if std::fs::create_dir_all(&downloads).is_ok() {
+                return downloads;
+            }
+        }
+    }
+    std::env::temp_dir()
+}
+
 async fn download_inner(url: &str, version: &str, hint_file_size: i64) -> Result<(), UpdateError> {
     let client = Client::builder()
         .timeout(Duration::from_secs(600))
@@ -443,8 +483,8 @@ async fn download_inner(url: &str, version: &str, hint_file_size: i64) -> Result
         .filter(|n| !n.is_empty())
         .unwrap_or("FluxDown-update");
     let file_name = sanitize_filename(raw_name);
-    let temp_dir = std::env::temp_dir();
-    let file_path = temp_dir.join(&file_name);
+    let download_dir = pick_download_dir();
+    let file_path = download_dir.join(&file_name);
 
     let use_multi = supports_range
         && total_bytes > 0
@@ -783,8 +823,12 @@ pub fn install(installer_path: &str) -> Result<(), UpdateError> {
 
     #[cfg(target_os = "macos")]
     {
-        // macOS always receives a tar.gz containing the new FluxDown.app bundle.
-        install_macos_app(installer_path)
+        // Dispatch by extension: DMG → hand to Finder; tar.gz → legacy helper.
+        if installer_path.to_ascii_lowercase().ends_with(".dmg") {
+            install_macos_dmg(installer_path)
+        } else {
+            install_macos_app(installer_path)
+        }
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
@@ -806,6 +850,47 @@ pub fn install(installer_path: &str) -> Result<(), UpdateError> {
 // macOS installer
 // ---------------------------------------------------------------------------
 
+/// macOS DMG update: clear quarantine, hand the DMG to Finder, return.
+///
+/// The DMG already lives in `~/Downloads` (see `pick_download_dir`).  We do NOT
+/// exit the running app — the user must drag the new .app to /Applications,
+/// which requires the source DMG window to remain open.  Quitting the app is
+/// the user's responsibility (the standard first-install flow).
+///
+/// We strip the Gatekeeper quarantine xattr first so unsigned/unnotarized
+/// builds at least skip the "downloaded from the internet" warning when the
+/// user double-clicks the mounted .app.  This is best-effort — if the
+/// `xattr` binary is missing, mounting still works.
+#[cfg(target_os = "macos")]
+fn install_macos_dmg(dmg_path: &str) -> Result<(), UpdateError> {
+    // Best-effort quarantine removal on the DMG itself.
+    let _ = std::process::Command::new("xattr")
+        .args(["-dr", "com.apple.quarantine", dmg_path])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    // `open` returns immediately; Finder mounts the DMG and shows its window
+    // (which typically contains FluxDown.app + an Applications symlink).
+    let status = std::process::Command::new("open")
+        .arg(dmg_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map_err(UpdateError::Io)?;
+
+    if !status.success() {
+        return Err(UpdateError::Other(format!(
+            "`open {dmg_path}` exited with status {status}"
+        )));
+    }
+
+    log_info!("[updater] mounted DMG via `open`: {}", dmg_path);
+    Ok(())
+}
+
 /// macOS update: spawn `fluxdown_updater` and exit immediately.
 ///
 /// The updater polls `kill(pid, 0)` until this process exits, then:
@@ -817,6 +902,10 @@ pub fn install(installer_path: &str) -> Result<(), UpdateError> {
 /// The updater binary lives at `FluxDown.app/Contents/MacOS/fluxdown_updater`,
 /// which is the same directory as the main executable — `find_updater_bin()`
 /// finds it automatically via `current_exe().parent()`.
+///
+/// Reachable only when a release ships without a DMG and we fall back to
+/// tar.gz. This path requires the app bundle to be signed/notarized to avoid
+/// Gatekeeper killing the helper after replacement.
 #[cfg(target_os = "macos")]
 fn install_macos_app(tarball_path: &str) -> Result<(), UpdateError> {
     let exe = std::env::current_exe().map_err(UpdateError::Io)?;

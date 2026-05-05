@@ -107,22 +107,59 @@ async function renderDisabledPng(size: number): Promise<Buffer> {
 }
 
 /**
- * 生成 macOS 菜单栏模板图标（黑色剪影 + alpha）
+ * 生成 macOS 菜单栏模板图标 — 黑色圆角方块 + 镂空箭头剪影
  *
  * macOS 模板图标规范:
- *   - 仅使用黑色（或白色），系统根据菜单栏外观自动着色
- *   - 透明区域保持不变
- *   - 非透明像素转为黑色剪影，亮度越高越透明
+ *   - 仅黑色 + alpha，系统按菜单栏外观自动着色（深色变白、浅色变黑）
+ *   - 用 fill-rule=evenodd 把箭头从圆角方块中"挖空"，保留 logo 整体识别度
  *
- * 算法:
- *   1. 计算每个像素的感知亮度 (ITU-R BT.709)
- *   2. 使用平滑阈值映射:
- *      - 亮度 >= 240 → 完全透明（白色背景）
- *      - 亮度 <= 180 → 完全不透明（图标主体）
- *      - 180 < 亮度 < 240 → 线性插值（抗锯齿边缘）
- *   3. RGB 全部设为 0（黑色），仅通过 alpha 表达形状
- *   4. 最终 alpha = min(原始 alpha, 计算的 alpha)，保留原有透明度
+ * 路径坐标与 fluxdown_logo.svg 完全对齐:
+ *   外框: rect(56,56,400,400, rx=88) → 等价 8 段贝塞尔/直线
+ *   箭头: 与 renderWindowsTrayArrow 同一条 path
  */
+async function renderMacTrayTemplate(size: number): Promise<Buffer> {
+  const svg = `<svg width="512" height="512" viewBox="30 30 452 452" xmlns="http://www.w3.org/2000/svg">
+    <path fill="#000000" fill-rule="evenodd" d="
+      M 144 56
+      L 368 56
+      Q 456 56 456 144
+      L 456 368
+      Q 456 456 368 456
+      L 144 456
+      Q 56 456 56 368
+      L 56 144
+      Q 56 56 144 56
+      Z
+      M 226 131
+      Q 226 119 238 119
+      L 274 119
+      Q 286 119 286 131
+      L 286 296
+      L 331 251
+      Q 340 242 349 251
+      L 363 265
+      Q 372 274 363 283
+      L 265 381
+      Q 256 390 247 381
+      L 149 283
+      Q 140 274 149 265
+      L 163 251
+      Q 172 242 181 251
+      L 226 296
+      Z
+    "/>
+  </svg>`;
+  return sharp(Buffer.from(svg), { density: 300 })
+    .resize(size, size, {
+      kernel: sharp.kernel.lanczos3,
+      fit: "contain",
+      background: { r: 0, g: 0, b: 0, alpha: 0 },
+    })
+    .png({ compressionLevel: 9 })
+    .toBuffer();
+}
+
+/** 旧的亮度阈值剪影算法 — 保留备用，新 logo 不再使用 */
 async function renderTrayTemplate(size: number): Promise<Buffer> {
   const src = await renderPng(size);
   const { data, info } = await sharp(src)
@@ -297,10 +334,10 @@ async function main() {
     await saveFile("assets/logo/fluxdown_logo.png", logo600);
     await saveFile("assets/logo/logo.png", logo600);
 
-    // macOS 菜单栏模板图标
-    const tray36 = await renderTrayTemplate(36);
+    // macOS 菜单栏模板图标 — 黑色圆角方块 + 镂空箭头（保留 logo 识别度）
+    const tray36 = await renderMacTrayTemplate(36);
     await saveFile("assets/logo/tray_iconTemplate.png", tray36);
-    const tray18 = await renderTrayTemplate(18);
+    const tray18 = await renderMacTrayTemplate(18);
     await saveFile("assets/logo/tray_iconTemplate@1x.png", tray18);
 
     // 暗色主题侧边栏 logo — 蓝色箭头 (#3B82F6) + 透明背景，64px 保证高 DPI 清晰度
@@ -331,37 +368,20 @@ async function main() {
   }
 
   // ──────────────────────────────────────────
-  // 2b. Windows 托盘图标 — 深/浅色模式各一套
-  //     仅含箭头形状，透明背景，适配任务栏颜色
+  // 2b. Windows 托盘图标 — 深/浅色共用同一彩色 logo
+  //     新 logo（蓝底白箭头）在浅/深任务栏均可辨识，无需区分主题
   // ──────────────────────────────────────────
   console.log("\n📁 windows/runner/resources/ (tray icons)");
   {
     const traySizes = [16, 32];
-
-    // 深色模式托盘图标（白色箭头，用于深色任务栏）
-    const darkFrames: { size: number; data: Buffer }[] = [];
+    const trayFrames: { size: number; data: Buffer }[] = [];
     for (const size of traySizes) {
-      darkFrames.push({
-        size,
-        data: await renderWindowsTrayArrow(size, "#FFFFFF"),
-      });
+      trayFrames.push({ size, data: await getCachedPng(size) });
     }
-    const trayDarkIco = buildIco(darkFrames);
-    await saveFile("windows/runner/resources/tray_win_dark.ico", trayDarkIco);
-
-    // 浅色模式托盘图标（深蓝色箭头，用于浅色任务栏）
-    const lightFrames: { size: number; data: Buffer }[] = [];
-    for (const size of traySizes) {
-      lightFrames.push({
-        size,
-        data: await renderWindowsTrayArrow(size, "#1e3a8a"),
-      });
-    }
-    const trayLightIco = buildIco(lightFrames);
-    await saveFile(
-      "windows/runner/resources/tray_win_light.ico",
-      trayLightIco,
-    );
+    const trayIco = buildIco(trayFrames);
+    // 两文件保持相同内容，避免改动 Rust 端在不同主题切换图标的现有逻辑
+    await saveFile("windows/runner/resources/tray_win_dark.ico", trayIco);
+    await saveFile("windows/runner/resources/tray_win_light.ico", trayIco);
 
     console.log(`     (含分辨率: ${traySizes.map((s) => `${s}×${s}`).join(", ")})`);
     totalCount += 2;
