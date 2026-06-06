@@ -1,23 +1,29 @@
 //! HLS (HTTP Live Streaming) download engine.
 //!
-//! Fetches M3U8 playlists, downloads all segments sequentially, optionally
-//! decrypts AES-128-CBC encrypted segments, and merges them into a single
-//! `.ts` output file.
+//! Fetches M3U8 playlists, downloads all segments with bounded concurrency,
+//! optionally decrypts AES-128-CBC encrypted segments, and merges them into a
+//! single `.ts` output file.
 //!
 //! Architecture:
 //! - Master playlist → auto-select highest bandwidth variant
-//! - Media playlist → sequential segment download with cancellation
-//! - AES-128-CBC decryption with key caching
-//! - Progress reporting via ProgressUpdate channel
+//! - Media playlist → bounded-concurrency segment download with cancellation.
+//!   Each segment downloads + decrypts on its own task (permit-gated by a
+//!   `Semaphore`); a single writer drains finished segments in `seg_idx` order
+//!   so the on-disk byte stream matches the sequential implementation exactly.
+//! - AES-128-CBC decryption with shared key caching
+//! - Progress reporting via ProgressUpdate channel (writer-side, so byte counts
+//!   never double-count under concurrency)
 //! - Per-segment retry with exponential backoff
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use futures_util::StreamExt;
 use reqwest::Client;
 use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
+use tokio::sync::{Mutex, Semaphore, mpsc};
 
 use rinf::RustSignal;
 
@@ -63,6 +69,36 @@ fn cookies_for_url<'a>(playlist_url: &str, target_url: &str, cookies: &'a str) -
 
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Upper bound on concurrent segment downloads.
+///
+/// Matches `build_client`'s `pool_max_idle_per_host(16)` in `downloader.rs`:
+/// going past the connection-pool size forces expensive TCP+TLS re-handshakes
+/// and risks tripping CDN per-IP connection limits. 16 is the same ceiling the
+/// multi-segment HTTP downloader uses.
+const MAX_HLS_CONCURRENCY: usize = 16;
+
+/// Concurrency used when the user left the segment count on "auto"
+/// (`segment_count <= 0`). Conservative enough to help every playlist without
+/// hammering small CDNs.
+const DEFAULT_HLS_CONCURRENCY: usize = 8;
+
+/// Pick the number of segments to download in parallel.
+///
+/// Derived from the user-configured `segment_count` (the same knob the
+/// multi-segment HTTP downloader uses), clamped to `[1, MAX_HLS_CONCURRENCY]`
+/// and never exceeding the number of segments actually left to download.
+/// `segment_count <= 0` means "auto" → `DEFAULT_HLS_CONCURRENCY`.
+fn hls_concurrency(segment_count: i32, remaining_segments: usize) -> usize {
+    let requested = if segment_count <= 0 {
+        DEFAULT_HLS_CONCURRENCY
+    } else {
+        segment_count as usize
+    };
+    requested
+        .clamp(1, MAX_HLS_CONCURRENCY)
+        .min(remaining_segments.max(1))
+}
 
 pub(crate) fn force_ts_extension(name: &str) -> String {
     if let Some(dot_pos) = name.rfind('.') {
@@ -307,16 +343,29 @@ type Aes128CbcDec = cbc::Decryptor<Aes128>;
 /// AES block size in bytes (AES-128-CBC operates on 16-byte blocks).
 const AES_BLOCK_SIZE: usize = 16;
 
+/// Shared AES-128 key cache: key URI → 16-byte key.
+///
+/// Wrapped in an async `Mutex` so concurrent segment tasks can share one cache
+/// without re-fetching the same key. The lock is held only across the in-memory
+/// `HashMap` access; the network fetch happens outside any lock (see
+/// `fetch_key`), so a slow key fetch never blocks other tasks.
+type KeyCache = Arc<Mutex<HashMap<String, Vec<u8>>>>;
+
 /// Fetch an AES-128 key from the given URI, with caching.
+///
+/// Two segments referencing the same key URI may race and both perform the
+/// network fetch; this is harmless (idempotent GET) and far simpler than
+/// holding the cache lock across I/O — the last writer wins and both observe an
+/// identical 16-byte key.
 async fn fetch_key(
     client: &Client,
     key_uri: &str,
     cookies: &str,
     playlist_url: &str,
-    key_cache: &mut HashMap<String, Vec<u8>>,
+    key_cache: &KeyCache,
     extra_headers: &std::collections::HashMap<String, String>,
 ) -> Result<Vec<u8>, DownloadError> {
-    if let Some(cached) = key_cache.get(key_uri) {
+    if let Some(cached) = key_cache.lock().await.get(key_uri) {
         return Ok(cached.clone());
     }
 
@@ -339,7 +388,10 @@ async fn fetch_key(
         )));
     }
 
-    key_cache.insert(key_uri.to_string(), key_bytes.clone());
+    key_cache
+        .lock()
+        .await
+        .insert(key_uri.to_string(), key_bytes.clone());
     Ok(key_bytes)
 }
 
@@ -872,160 +924,292 @@ async fn run_hls_download_inner(
         (File::create(&temp_path).await?, 0, 0i64)
     };
 
-    let mut key_cache: HashMap<String, Vec<u8>> = HashMap::new();
+    let key_cache: KeyCache = Arc::new(Mutex::new(HashMap::new()));
     let mut last_report = std::time::Instant::now();
     let mut last_db_save = std::time::Instant::now();
 
-    for (seg_idx, segment) in segments.iter().enumerate() {
-        // Skip already-downloaded segments on resume
-        if seg_idx < skip_segments {
-            continue;
-        }
-        // Check cancellation between segments
-        if p.cancel_token.is_cancelled() {
-            file.flush().await?;
-            let _ =
-                p.db.update_task_progress(&p.task_id, downloaded_bytes)
-                    .await;
-            return Err(DownloadError::Cancelled);
-        }
+    // -----------------------------------------------------------------------
+    // Bounded-concurrency segment download.
+    //
+    // Each remaining segment downloads + decrypts on its own task, gated by a
+    // `Semaphore` so at most `concurrency` are in flight (and at most that many
+    // decrypted buffers are buffered waiting to be written). A single writer —
+    // this function — drains finished segments **strictly in `seg_idx` order**
+    // via a `BTreeMap`, then runs the *same* speed-limit / write / rollback /
+    // checkpoint / progress code the sequential implementation used. Keeping
+    // all writes on one task guarantees:
+    //   • the on-disk byte order is identical to the sequential version,
+    //   • `downloaded_bytes` is accumulated exactly once per segment (no
+    //     double-counting / loss under concurrency),
+    //   • the speed limiter is consulted on the single write path,
+    //   • the resume checkpoint advances monotonically by completed prefix.
+    // Each task computes its IV from its own `seg_idx`, so AES-128-CBC
+    // decryption stays correct regardless of completion order.
+    // -----------------------------------------------------------------------
+    let first_idx = skip_segments;
+    let remaining = segment_count.saturating_sub(first_idx);
+    let concurrency = hls_concurrency(p.segment_count, remaining);
+    log_info!(
+        "[hls-download] task {} downloading {} remaining segment(s) with concurrency {}",
+        p.task_id,
+        remaining,
+        concurrency
+    );
 
-        // Download segment with retry
-        let seg_data = download_segment_with_retry(
-            &p.client,
-            &segment.uri,
-            &p.cookies,
-            // 同源判定以实际列出该段的 media playlist 为基准（见 media_playlist_url）。
-            &media_playlist_url,
-            &p.cancel_token,
-            &p.task_id,
-            seg_idx,
-            &p.extra_headers,
-        )
-        .await?;
+    let semaphore = Arc::new(Semaphore::new(concurrency));
+    // Channel capacity == concurrency: at most `concurrency` permit-holding
+    // producers can each enqueue exactly one result before releasing their
+    // permit, so a producer never blocks on `send` waiting for the writer —
+    // this prevents a permit-starvation deadlock when the writer is waiting on
+    // an earlier index.
+    let (result_tx, mut result_rx) =
+        mpsc::channel::<(usize, Result<Vec<u8>, DownloadError>)>(concurrency.max(1));
 
-        // Decrypt if needed
-        let output_data = if let Some(ref key_info) = segment.key {
-            if key_info.method == HlsKeyMethod::Aes128 && !key_info.uri.is_empty() {
-                // Fetch key (cached)
-                let key_bytes = fetch_key(
-                    &p.client,
-                    &key_info.uri,
-                    &p.cookies,
-                    // 同源判定以实际列出该密钥的 media playlist 为基准。
-                    &media_playlist_url,
-                    &mut key_cache,
-                    &p.extra_headers,
-                )
-                .await?;
-
-                // Determine IV
-                let iv = if let Some(ref iv_str) = key_info.iv {
-                    parse_iv_hex(iv_str)?
-                } else {
-                    compute_default_iv(media_sequence, seg_idx)
-                };
-
-                // Decrypt
-                let mut data_buf = seg_data;
-                decrypt_segment(&mut data_buf, &key_bytes, &iv, seg_idx)?
-            } else {
-                seg_data
-            }
-        } else {
-            seg_data
+    // Spawn one download+decrypt task per remaining segment. Tasks own all the
+    // data they need (clones of cheap Arc/handle types).
+    let mut producers: Vec<tokio::task::JoinHandle<()>> = Vec::with_capacity(remaining);
+    for seg_idx in first_idx..segment_count {
+        let Some(segment) = segments.get(seg_idx) else {
+            break;
         };
-
-        // Apply speed limiter and write to file.
-        //
-        // seg_start_pos 是本段写入前文件的逻辑长度。resume 时文件已被
-        // truncate 到恰好 safe_size(== 初始 downloaded_bytes),此后每段以
-        // append 方式精确追加 chunk_len 字节,故文件磁盘长度始终等于
-        // downloaded_bytes —— 用它作为出错回退点是准确的。
-        let chunk_len = output_data.len();
-        let seg_start_pos = downloaded_bytes;
-        let mut offset = 0usize;
-        let mut write_result: Result<(), std::io::Error> = Ok(());
-        while offset < chunk_len {
-            let remaining = (chunk_len - offset) as u64;
-            let allowed = p.speed_limiter.consume(remaining).await;
-            let end = offset + allowed as usize;
-            if let Err(e) = file.write_all(&output_data[offset..end]).await {
-                write_result = Err(e);
-                break;
+        let uri = segment.uri.clone();
+        // Extract only the encryption fields needed to decrypt this segment.
+        let key_info: Option<(String, Option<String>)> = segment.key.as_ref().and_then(|k| {
+            if k.method == HlsKeyMethod::Aes128 && !k.uri.is_empty() {
+                Some((k.uri.clone(), k.iv.clone()))
+            } else {
+                None
             }
-            offset = end;
-        }
+        });
 
-        if let Err(e) = write_result {
-            // 写入中途失败(常见:磁盘满 ENOSPC)。本段已部分写入,先把文件
-            // 回退到本段写入前的长度,避免残留半截分段污染后续 resume(与
-            // dash_downloader 的 set_len(start_pos) 兜底一致)。回退失败仅记录
-            // 日志,不掩盖原始写入错误。
-            if let Err(trunc_err) = file.set_len(seg_start_pos as u64).await {
-                log_info!(
-                    "[hls] task {} segment {} rollback set_len({}) failed: {}",
-                    p.task_id,
-                    seg_idx,
-                    seg_start_pos,
-                    trunc_err
-                );
+        let client = p.client.clone();
+        let cookies = p.cookies.clone();
+        let playlist_url = media_playlist_url.clone();
+        let cancel = p.cancel_token.clone();
+        let task_id = p.task_id.clone();
+        let extra_headers = p.extra_headers.clone();
+        let key_cache = key_cache.clone();
+        let sem = semaphore.clone();
+        let tx = result_tx.clone();
+
+        producers.push(tokio::spawn(async move {
+            // Hold the permit across download + decrypt + send so in-flight work
+            // (and buffered decrypted bytes) stays bounded by `concurrency`.
+            let _permit = match sem.acquire().await {
+                Ok(permit) => permit,
+                // Semaphore closed — runtime shutting down; nothing to send.
+                Err(_) => return,
+            };
+            if cancel.is_cancelled() {
+                let _ = tx.send((seg_idx, Err(DownloadError::Cancelled))).await;
+                return;
             }
-            // 磁盘空间不足(ENOSPC, errno 28 / ErrorKind::StorageFull)给出
-            // 明确提示,便于用户区分"磁盘满"与普通 IO 错误。
-            if e.kind() == std::io::ErrorKind::StorageFull || e.raw_os_error() == Some(28) {
-                return Err(DownloadError::Other(
-                    "磁盘空间不足，请清理磁盘后重试".to_string(),
-                ));
-            }
-            return Err(DownloadError::Io(e));
-        }
-
-        downloaded_bytes += chunk_len as i64;
-
-        // Save resume checkpoint for HLS resume support.
-        // Format: "next_seg_idx:total_bytes_written:media_sequence" — on resume
-        // we truncate to this byte offset to discard any partially-written
-        // segment data,并比对 media_sequence 以保证续传段的 IV 计算与首次一致。
-        let _ =
-            p.db.set_config(
-                &resume_seg_key,
-                &format!("{}:{}:{}", seg_idx + 1, downloaded_bytes, media_sequence),
+            let outcome = download_and_decrypt_segment(
+                &client,
+                &uri,
+                &cookies,
+                &playlist_url,
+                &cancel,
+                &task_id,
+                seg_idx,
+                &extra_headers,
+                key_info.as_ref(),
+                &key_cache,
+                media_sequence,
             )
             .await;
+            // Always emit a result for this index so the in-order writer never
+            // blocks forever waiting on a task that failed.
+            let _ = tx.send((seg_idx, outcome)).await;
+        }));
+    }
+    // Drop our keep-alive sender so `result_rx` closes once every producer
+    // finishes — otherwise the writer's recv loop would hang at the end.
+    drop(result_tx);
 
-        // Progress reporting (every 200ms)
-        if last_report.elapsed().as_millis() >= 200 {
-            let _ = p
-                .progress_tx
-                .send(ProgressUpdate {
-                    task_id: p.task_id.clone(),
-                    downloaded_bytes,
-                    total_bytes: 0, // unknown for HLS
-                    status: 1,
-                    error_message: String::new(),
-                    file_name: String::new(),
-                    segment_details: None,
-                })
-                .await;
-            last_report = std::time::Instant::now();
+    // In-order writer: buffer out-of-order completions and flush the contiguous
+    // prefix starting at `next_to_write`.
+    let mut pending: BTreeMap<usize, Vec<u8>> = BTreeMap::new();
+    let mut next_to_write = first_idx;
+    let mut fatal_error: Option<DownloadError> = None;
+
+    'writer: while next_to_write < segment_count {
+        // Writer-side cancellation check (mirrors the original between-segment
+        // check). Cancel the token so producers abort, flush progress, exit.
+        if p.cancel_token.is_cancelled() {
+            fatal_error = Some(DownloadError::Cancelled);
+            break;
         }
 
-        // DB persistence (every DB_SAVE_INTERVAL_SECS)
-        if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
+        // If the next segment isn't buffered yet, wait for more completions.
+        while !pending.contains_key(&next_to_write) {
+            match result_rx.recv().await {
+                Some((idx, Ok(data))) => {
+                    pending.insert(idx, data);
+                }
+                Some((idx, Err(e))) => {
+                    // A segment failed permanently. Cancel siblings and stop;
+                    // the partial prefix already on disk is kept for resume.
+                    log_info!(
+                        "[hls-download] task {} segment {} failed: {}",
+                        p.task_id,
+                        idx,
+                        e
+                    );
+                    p.cancel_token.cancel();
+                    fatal_error = Some(e);
+                    break 'writer;
+                }
+                None => {
+                    // Channel closed before producing `next_to_write`. This can
+                    // only happen if a producer was dropped without sending
+                    // (e.g. semaphore closed during shutdown); treat as cancel.
+                    if fatal_error.is_none() {
+                        fatal_error = Some(DownloadError::Cancelled);
+                    }
+                    break 'writer;
+                }
+            }
+        }
+
+        // Flush every contiguous segment we already have, in order.
+        while let Some(output_data) = pending.remove(&next_to_write) {
+            let seg_idx = next_to_write;
+
+            // Stop flushing promptly on cancellation. Segments already written
+            // (the contiguous prefix) stay on disk with a matching checkpoint,
+            // so a later resume continues cleanly; this in-memory segment and
+            // the rest of `pending` are discarded (they will be re-downloaded).
+            if p.cancel_token.is_cancelled() {
+                drop(output_data);
+                fatal_error = Some(DownloadError::Cancelled);
+                break 'writer;
+            }
+
+            // Apply speed limiter and write to file.
+            //
+            // seg_start_pos 是本段写入前文件的逻辑长度。resume 时文件已被
+            // truncate 到恰好 safe_size(== 初始 downloaded_bytes),此后每段以
+            // append 方式精确追加 chunk_len 字节,故文件磁盘长度始终等于
+            // downloaded_bytes —— 用它作为出错回退点是准确的。
+            let chunk_len = output_data.len();
+            let seg_start_pos = downloaded_bytes;
+            let mut offset = 0usize;
+            let mut write_result: Result<(), std::io::Error> = Ok(());
+            while offset < chunk_len {
+                let remaining_bytes = (chunk_len - offset) as u64;
+                let allowed = p.speed_limiter.consume(remaining_bytes).await;
+                let end = offset + allowed as usize;
+                if let Err(e) = file.write_all(&output_data[offset..end]).await {
+                    write_result = Err(e);
+                    break;
+                }
+                offset = end;
+            }
+
+            if let Err(e) = write_result {
+                // 写入中途失败(常见:磁盘满 ENOSPC)。本段已部分写入,先把文件
+                // 回退到本段写入前的长度,避免残留半截分段污染后续 resume(与
+                // dash_downloader 的 set_len(start_pos) 兜底一致)。回退失败仅记录
+                // 日志,不掩盖原始写入错误。
+                if let Err(trunc_err) = file.set_len(seg_start_pos as u64).await {
+                    log_info!(
+                        "[hls] task {} segment {} rollback set_len({}) failed: {}",
+                        p.task_id,
+                        seg_idx,
+                        seg_start_pos,
+                        trunc_err
+                    );
+                }
+                p.cancel_token.cancel();
+                // 磁盘空间不足(ENOSPC, errno 28 / ErrorKind::StorageFull)给出
+                // 明确提示,便于用户区分"磁盘满"与普通 IO 错误。
+                if e.kind() == std::io::ErrorKind::StorageFull || e.raw_os_error() == Some(28) {
+                    fatal_error = Some(DownloadError::Other(
+                        "磁盘空间不足，请清理磁盘后重试".to_string(),
+                    ));
+                } else {
+                    fatal_error = Some(DownloadError::Io(e));
+                }
+                break 'writer;
+            }
+
+            downloaded_bytes += chunk_len as i64;
+            next_to_write += 1;
+
+            // Save resume checkpoint for HLS resume support.
+            // Format: "next_seg_idx:total_bytes_written:media_sequence" — on resume
+            // we truncate to this byte offset to discard any partially-written
+            // segment data,并比对 media_sequence 以保证续传段的 IV 计算与首次一致。
+            // 因为按 seg_idx 顺序写盘,next_to_write 即"已完整落盘的连续前缀
+            // 长度",检查点始终对应一段完整、可安全续传的字节边界。
             let _ =
-                p.db.update_task_progress(&p.task_id, downloaded_bytes)
-                    .await;
-            last_db_save = std::time::Instant::now();
-        }
+                p.db.set_config(
+                    &resume_seg_key,
+                    &format!("{}:{}:{}", next_to_write, downloaded_bytes, media_sequence),
+                )
+                .await;
 
-        log_info!(
-            "[hls-download] task {} segment {}/{} done, {} bytes total",
-            p.task_id,
-            seg_idx + 1,
-            segment_count,
-            downloaded_bytes
-        );
+            // Progress reporting (every 200ms)
+            if last_report.elapsed().as_millis() >= 200 {
+                let _ = p
+                    .progress_tx
+                    .send(ProgressUpdate {
+                        task_id: p.task_id.clone(),
+                        downloaded_bytes,
+                        total_bytes: 0, // unknown for HLS
+                        status: 1,
+                        error_message: String::new(),
+                        file_name: String::new(),
+                        segment_details: None,
+                    })
+                    .await;
+                last_report = std::time::Instant::now();
+            }
+
+            // DB persistence (every DB_SAVE_INTERVAL_SECS)
+            if last_db_save.elapsed().as_secs() >= DB_SAVE_INTERVAL_SECS {
+                let _ =
+                    p.db.update_task_progress(&p.task_id, downloaded_bytes)
+                        .await;
+                last_db_save = std::time::Instant::now();
+            }
+
+            log_info!(
+                "[hls-download] task {} segment {}/{} done, {} bytes total",
+                p.task_id,
+                seg_idx + 1,
+                segment_count,
+                downloaded_bytes
+            );
+        }
+    }
+
+    // Ensure producers stop and are reaped before we touch the file further.
+    // On error/cancel the token is already cancelled; either way drain the
+    // handles so no task outlives this function.
+    if fatal_error.is_some() {
+        p.cancel_token.cancel();
+    }
+    // Drop the receiver FIRST: on the error/cancel path the writer stopped
+    // recv'ing, so a producer parked in `tx.send().await` (bounded channel at
+    // capacity) would block forever and hang the join below. Closing the
+    // receiver makes those sends return `Err` immediately, letting every
+    // producer unwind. On the success path the channel is already drained, so
+    // this is a no-op.
+    drop(result_rx);
+    for handle in producers {
+        let _ = handle.await;
+    }
+
+    if let Some(err) = fatal_error {
+        // Persist whatever fully-written prefix we have so a later resume can
+        // continue from there (matches the sequential cancel path).
+        let _ = file.flush().await;
+        let _ =
+            p.db.update_task_progress(&p.task_id, downloaded_bytes)
+                .await;
+        return Err(err);
     }
 
     file.flush().await?;
@@ -1193,6 +1377,74 @@ async fn remux_ts_to_mp4(ts_path: &std::path::Path, task_id: &str) -> Option<Pat
 }
 
 // ---------------------------------------------------------------------------
+// Per-segment download + decrypt (concurrency unit)
+// ---------------------------------------------------------------------------
+
+/// Download a single segment (with retry) and, if encrypted, decrypt it.
+///
+/// This is the unit of work each concurrent task runs. It is purely
+/// download + decrypt: it performs no disk writes, progress reporting, or
+/// checkpointing — those stay on the single ordered writer so byte counts and
+/// on-disk order remain correct under concurrency.
+///
+/// `key_info` is `Some((key_uri, iv))` only for AES-128 segments with a
+/// non-empty key URI; the IV is computed from this segment's own `seg_idx`
+/// (`compute_default_iv`) when not explicitly provided, so AES-128-CBC stays
+/// correct regardless of the order tasks complete in.
+#[allow(clippy::too_many_arguments)]
+async fn download_and_decrypt_segment(
+    client: &Client,
+    uri: &str,
+    cookies: &str,
+    playlist_url: &str,
+    cancel_token: &tokio_util::sync::CancellationToken,
+    task_id: &str,
+    seg_idx: usize,
+    extra_headers: &std::collections::HashMap<String, String>,
+    key_info: Option<&(String, Option<String>)>,
+    key_cache: &KeyCache,
+    media_sequence: u64,
+) -> Result<Vec<u8>, DownloadError> {
+    let seg_data = download_segment_with_retry(
+        client,
+        uri,
+        cookies,
+        playlist_url,
+        cancel_token,
+        task_id,
+        seg_idx,
+        extra_headers,
+    )
+    .await?;
+
+    let Some((key_uri, iv_str)) = key_info else {
+        return Ok(seg_data);
+    };
+
+    // Fetch key (shared cache across all concurrent tasks).
+    let key_bytes = fetch_key(
+        client,
+        key_uri,
+        cookies,
+        // 同源判定以实际列出该密钥的 media playlist 为基准。
+        playlist_url,
+        key_cache,
+        extra_headers,
+    )
+    .await?;
+
+    // Determine IV — explicit IV from the playlist, else derived from this
+    // segment's own index so concurrency never changes the IV.
+    let iv = match iv_str {
+        Some(iv_hex) => parse_iv_hex(iv_hex)?,
+        None => compute_default_iv(media_sequence, seg_idx),
+    };
+
+    let mut data_buf = seg_data;
+    decrypt_segment(&mut data_buf, &key_bytes, &iv, seg_idx)
+}
+
+// ---------------------------------------------------------------------------
 // Per-segment download with retry
 // ---------------------------------------------------------------------------
 
@@ -1330,8 +1582,8 @@ async fn download_segment_once(
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_default_iv, decrypt_segment, is_hls_url, parse_iv_hex, parse_resume_checkpoint,
-        resolve_uri,
+        DEFAULT_HLS_CONCURRENCY, MAX_HLS_CONCURRENCY, compute_default_iv, decrypt_segment,
+        hls_concurrency, is_hls_url, parse_iv_hex, parse_resume_checkpoint, resolve_uri,
     };
     use aes::Aes128;
     use cbc::cipher::block_padding::{NoPadding, Pkcs7};
@@ -1562,5 +1814,44 @@ mod tests {
             resolve_uri("https://cdn.example.com/path/media.m3u8", "seg1.ts"),
             "https://cdn.example.com/path/seg1.ts"
         );
+    }
+
+    // --- #275: concurrency selection bounds ---
+
+    #[test]
+    fn test_hls_concurrency_auto_uses_default() {
+        // segment_count <= 0 means "auto": fall back to DEFAULT, but never
+        // exceed the number of remaining segments.
+        assert_eq!(hls_concurrency(0, 100), DEFAULT_HLS_CONCURRENCY);
+        assert_eq!(hls_concurrency(-1, 100), DEFAULT_HLS_CONCURRENCY);
+        assert_eq!(hls_concurrency(0, 3), 3);
+    }
+
+    #[test]
+    fn test_hls_concurrency_respects_user_value() {
+        assert_eq!(hls_concurrency(4, 100), 4);
+        assert_eq!(hls_concurrency(1, 100), 1);
+    }
+
+    #[test]
+    fn test_hls_concurrency_clamped_to_max() {
+        // Never exceed the connection-pool ceiling even if the user asks for more.
+        assert_eq!(hls_concurrency(999, 100), MAX_HLS_CONCURRENCY);
+        assert_eq!(hls_concurrency(i32::MAX, 100), MAX_HLS_CONCURRENCY);
+    }
+
+    #[test]
+    fn test_hls_concurrency_never_below_one() {
+        // Even with zero remaining (shouldn't happen — guarded earlier), the
+        // semaphore must be created with at least one permit.
+        assert_eq!(hls_concurrency(8, 0), 1);
+        assert_eq!(hls_concurrency(0, 1), 1);
+    }
+
+    #[test]
+    fn test_hls_concurrency_capped_by_remaining() {
+        // Spawning more workers than segments left is wasteful; cap at remaining.
+        assert_eq!(hls_concurrency(16, 5), 5);
+        assert_eq!(hls_concurrency(8, 2), 2);
     }
 }
