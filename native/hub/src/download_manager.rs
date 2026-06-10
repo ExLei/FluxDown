@@ -341,6 +341,10 @@ struct TaskSpeedState {
     /// Used as warmup after prepare/resume to avoid artificial speed spikes
     /// caused by baseline jumps (e.g. resume from non-zero downloaded bytes).
     speed_warmup_remaining: u8,
+    /// Whether the "no cached segments" anomaly has already been logged for
+    /// this task — it indicates a real problem (segment visualization will
+    /// be empty) but repeats on every update, so log it only once.
+    logged_missing_segments: bool,
 }
 
 /// Information needed to start a queued task later.
@@ -1521,17 +1525,18 @@ impl DownloadManager {
             // F020：用任务的鉴权上下文（cookies/referrer/extra_headers）构造
             // probe 的 RequestSpec，使背景 HEAD probe 与真正下载请求一致，
             // 避免鉴权站点把缺鉴权的裸 HEAD 重定向到登录页污染 DB 文件名。
-            let probe_spec = downloader::RequestSpec::from_nm(&crate::native_messaging::DownloadRequest {
-                url: queued.url.clone(),
-                filename: queued.file_name.clone(),
-                referrer: queued.referrer.clone(),
-                cookies: queued.cookies.clone(),
-                headers: Some(queued.extra_headers.clone()),
-                file_size: None,
-                mime_type: None,
-                method: queued.method.clone(),
-                body: queued.body.clone(),
-            });
+            let probe_spec =
+                downloader::RequestSpec::from_nm(&crate::native_messaging::DownloadRequest {
+                    url: queued.url.clone(),
+                    filename: queued.file_name.clone(),
+                    referrer: queued.referrer.clone(),
+                    cookies: queued.cookies.clone(),
+                    headers: Some(queued.extra_headers.clone()),
+                    file_size: None,
+                    mime_type: None,
+                    method: queued.method.clone(),
+                    body: queued.body.clone(),
+                });
             self.pending_queue.push_back(queued);
             // 广播最新队列位置
             self.broadcast_queue_positions();
@@ -1899,8 +1904,7 @@ impl DownloadManager {
             // 塌缩为同一 .ts 并互相 truncate/交错写入而损坏内容。
             if hls_downloader::is_hls_url(&url) {
                 let base = if file_name.is_empty() {
-                    downloader::extract_from_url(&url)
-                        .unwrap_or_else(|| "download.ts".to_string())
+                    downloader::extract_from_url(&url).unwrap_or_else(|| "download.ts".to_string())
                 } else {
                     file_name.clone()
                 };
@@ -1954,17 +1958,18 @@ impl DownloadManager {
             // 构造完整 HTTP 请求事务规格——method/body 来自浏览器扩展，
             // 用于在 form-POST 等非 GET 触发的下载场景中一比一重建原始请求。
             // 参见 downloader.rs 中 RequestSpec / build_request 的设计动机。
-            let spec = downloader::RequestSpec::from_nm(&crate::native_messaging::DownloadRequest {
-                url: url.clone(),
-                filename: file_name.clone(),
-                referrer: referrer.clone(),
-                cookies: cookies.clone(),
-                headers: Some(extra_headers.clone()),
-                file_size: None,
-                mime_type: None,
-                method: method.clone(),
-                body: body.clone(),
-            });
+            let spec =
+                downloader::RequestSpec::from_nm(&crate::native_messaging::DownloadRequest {
+                    url: url.clone(),
+                    filename: file_name.clone(),
+                    referrer: referrer.clone(),
+                    cookies: cookies.clone(),
+                    headers: Some(extra_headers.clone()),
+                    file_size: None,
+                    mime_type: None,
+                    method: method.clone(),
+                    body: body.clone(),
+                });
 
             let params = DownloadParams {
                 task_id: task_id.clone(),
@@ -2121,7 +2126,6 @@ impl DownloadManager {
     }
 
     async fn resume_task_inner(&mut self, task_id: &str) {
-
         if self.active_tasks.contains_key(task_id) {
             // A task can be in active_tokens but already terminal in the DB:
             // this happens when the download task has finished (status=3/4
@@ -2215,7 +2219,7 @@ impl DownloadManager {
                     checksum: t.checksum, // loaded from DB for integrity verification
                     extra_headers: std::collections::HashMap::new(), // 恢复任务无额外请求头
                     selected_file_indices: Vec::new(), // resume tasks have no pre-selection
-                    method: None, // 不持久化 method/body，恢复时按 GET 重发
+                    method: None,         // 不持久化 method/body，恢复时按 GET 重发
                     body: None,
                 });
                 // 入队后立即广播最新队列位置(与 create_task 一致),否则要等后续
@@ -2686,8 +2690,11 @@ impl DownloadManager {
                 // 无法释放 reserved_temp_paths 预订。此处按 DB 中(已 dedup 落库的)
                 // file_name 重建预订路径并主动移除,避免残留到进程重启(否则后续同名
                 // 下载会被误判为占用而 dedup 改名)。HashSet::remove 幂等无副作用。
-                let reserved = PathBuf::from(&t.save_dir)
-                    .join(format!("{}{}", t.file_name, downloader::TEMP_EXT));
+                let reserved = PathBuf::from(&t.save_dir).join(format!(
+                    "{}{}",
+                    t.file_name,
+                    downloader::TEMP_EXT
+                ));
                 self.reserved_temp_paths.remove(&reserved);
             }
             let path = PathBuf::from(&t.save_dir).join(&t.file_name);
@@ -2985,8 +2992,11 @@ impl DownloadManager {
                     // 批量删除在 tokio::spawn 内无法访问 &mut self，故 abort 超时时
                     // on_task_done 永不执行，预订永远不会被释放。在进入 spawn 之前的
                     // &mut self 上下文中主动移除预订（HashSet::remove 幂等，无副作用）。
-                    let reserved = PathBuf::from(&t.save_dir)
-                        .join(format!("{}{}", t.file_name, downloader::TEMP_EXT));
+                    let reserved = PathBuf::from(&t.save_dir).join(format!(
+                        "{}{}",
+                        t.file_name,
+                        downloader::TEMP_EXT
+                    ));
                     self.reserved_temp_paths.remove(&reserved);
                     // 与单任务 delete_task 一致：移除自动重试计数（同样因 abort 超时
                     // 时 on_task_done 不执行而需在 &mut self 上下文主动清理）。task_id
@@ -3630,6 +3640,7 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                 last_sent_status: -1, // never sent yet
                 last_raw_status: update.status,
                 speed_warmup_remaining: if update.status == 1 { 1 } else { 0 },
+                logged_missing_segments: false,
             }
         });
 
@@ -3784,12 +3795,10 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                         .collect()
                 };
 
-                log_info!(
-                    "[seg-vis] sending SegmentProgress for task {}, {} segments, total_bytes={}",
-                    update.task_id,
-                    segs.len(),
-                    update.total_bytes
-                );
+                // Routine per-send logging is intentionally omitted here:
+                // this branch fires up to twice per second per task and the
+                // resulting "sending SegmentProgress" lines carry no
+                // diagnostic value while dominating the log volume.
                 SegmentProgress {
                     task_id: update.task_id.clone(),
                     total_bytes: update.total_bytes,
@@ -3797,12 +3806,17 @@ pub async fn progress_reporter(mut rx: mpsc::Receiver<ProgressUpdate>, db: Db) {
                     segments: final_segs,
                 }
                 .send_signal_to_dart();
-            } else {
+                state.logged_missing_segments = false;
+            } else if !state.logged_missing_segments {
+                // Genuine anomaly (segment panel will stay empty), but it
+                // repeats on every rate-limited send — log once per task
+                // until segments appear again.
                 log_info!(
                     "[seg-vis] NO cached segments for task {}, segment_details in update: {}",
                     update.task_id,
                     update.segment_details.is_some()
                 );
+                state.logged_missing_segments = true;
             }
 
             state.last_sent_status = update.status;
@@ -3930,6 +3944,18 @@ mod tests {
         assert!(
             !is_retriable_error(CANCELLED_ERROR_MESSAGE),
             "cancelled tasks must never be treated as retriable network errors"
+        );
+    }
+
+    /// #379 回归：磁力元数据解析超时的错误消息不能命中
+    /// `is_retriable_error` 关键词（如 "timeout"/"timed out"）。否则
+    /// 死磁力会被自动重试，每轮再烧 5 分钟并在意外时机弹出文件选择框。
+    #[test]
+    fn magnet_metadata_timeout_error_is_not_retriable() {
+        let msg = "magnet metadata resolution took too long (300s) — no peers/DHT response; check trackers or network";
+        assert!(
+            !is_retriable_error(msg),
+            "magnet metadata timeout must not trigger auto-retry"
         );
     }
 }

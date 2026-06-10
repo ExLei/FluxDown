@@ -78,7 +78,6 @@ pub enum TorrentSource {
 
 impl TorrentSource {
     /// Returns `true` if this source is a magnet link.
-    #[allow(dead_code)]
     pub fn is_magnet(&self) -> bool {
         matches!(self, TorrentSource::Magnet(_))
     }
@@ -315,6 +314,53 @@ impl Default for BtConfig {
 // Shared BT Session — singleton owned by DownloadManager
 // ---------------------------------------------------------------------------
 
+/// Remove librqbit's `session.json` (and a possible `session.json.tmp`
+/// leftover) from the persistence folder **while preserving the
+/// `{hash}.bitv` fast-resume bitfields and `{hash}.torrent` metadata
+/// caches**.  Must be called BEFORE `Session::new_with_opts`.
+///
+/// Why (BUG-BT-RESUME-FROM-ZERO — "BT 任务暂停后继续会从零开始"):
+///
+/// FluxDown manages task state in SQLite and re-adds torrents itself on
+/// resume; librqbit's own session restore is not only redundant but
+/// actively harmful:
+///
+/// 1. `Session::new_with_opts` restores every torrent found in
+///    session.json **asynchronously** (opens output files, mmaps the
+///    `.bitv` bitfield, spawns a checking task).
+/// 2. The old "startup cleanup" then called `session.delete(id, false)`
+///    on each restored torrent.  Two fatal consequences: first,
+///    `JsonSessionPersistenceStore::delete` removes **both** the
+///    `{hash}.torrent` AND the `{hash}.bitv` file — the old code's
+///    assumption that `.bitv` survives a `delete(false)` is wrong.
+///    Second, `delete` races the still-running restore initialization:
+///    it takes the torrent's `FileStorage` out from under the checker,
+///    whose sampled piece reads then fail ("file is None"), so librqbit
+///    declares the fastresume data corrupted, clears it and **rewrites
+///    an all-zero `.bitv`**.
+///
+/// Either way, when the task is re-added moments later the piece
+/// bitfield is gone (or all-zero), and the download restarts from
+/// byte 0 even though the staging file still holds valid data.
+///
+/// Deleting session.json up front means the session starts empty: no
+/// restore, no race, no destructive delete.  When the task is re-added,
+/// librqbit looks up `{hash}.bitv` (keyed by info-hash, not session id),
+/// validates it by sampling piece hashes against the staging file, and
+/// resumes from the already-downloaded pieces.
+fn clear_stale_session_state(persistence_folder: &Path) {
+    for name in ["session.json", "session.json.tmp"] {
+        let path = persistence_folder.join(name);
+        match std::fs::remove_file(&path) {
+            Ok(()) => log_info!("[BT] removed stale {name} (fastresume .bitv files preserved)"),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => log_info!(
+                "[BT] failed to remove stale {name}: {e} — old torrents may be restored and rejected as AlreadyManaged"
+            ),
+        }
+    }
+}
+
 /// A shared BT session that holds a dedicated multi-thread runtime and a
 /// single `librqbit::Session`.  All BT tasks share this instance, which
 /// means they share DHT routing tables, tracker connections, and the
@@ -431,6 +477,13 @@ impl SharedBtSession {
         // Thunder, etc.) keep internal data out of user-visible directories.
         let persistence_folder = PathBuf::from(app_data_dir).join("bt_session");
 
+        // CRITICAL: remove the stale session.json BEFORE creating the Session,
+        // so that librqbit does NOT restore torrents from a previous session.
+        // The {hash}.bitv fast-resume bitfields are preserved — see the
+        // function doc of `clear_stale_session_state` for the full rationale
+        // (BUG-BT-RESUME-FROM-ZERO).
+        clear_stale_session_state(&persistence_folder);
+
         // Validate and clamp port range.
         let port_start = bt_config.port_start.max(1024);
         let port_end = bt_config.port_end.max(port_start);
@@ -486,51 +539,11 @@ impl SharedBtSession {
             })
             .map_err(|e| DownloadError::Other(format!("BT session init failed: {e}")))?;
 
-        // Startup cleanup: remove finished AND paused torrents that were
-        // retained in persistence from a previous app session.
-        //
-        // Background: shutdown() calls session.pause() on all handles so
-        // torrents are saved as Paused in session.json.  On the next
-        // startup those Paused entries are reloaded by librqbit.  If the
-        // user then starts downloading the same torrent again,
-        // add_torrent returns AlreadyManaged with a Paused handle.
-        // unpause() is called but the progress loop's first iteration
-        // detects stats.state=Paused (the state transition is async) and
-        // exits immediately as Cancelled, so the download never proceeds.
-        //
-        // The fix: remove ALL persisted torrents at startup — both
-        // finished and paused ones.  FluxDown manages its own task state
-        // in SQLite; the librqbit persistence layer is only used for the
-        // piece-bitfield fast-resume (.bitv files), which survive the
-        // session.delete(false) call (only the session.json entry is
-        // removed).  Paused tasks are resumed via do_resume_task →
-        // add_torrent, which re-loads the .bitv bitfield automatically.
-        //
-        // We only remove them from the librqbit session — the actual
-        // downloaded files are left untouched (delete_files=false).
-        // User-triggered "delete task + files" goes through the normal
-        // delete_task() path which uses delete_files=true.
-        {
-            let all_ids: Vec<usize> =
-                session.with_torrents(|iter| iter.map(|(id, _handle)| id).collect());
-            if !all_ids.is_empty() {
-                log_info!(
-                    "[BT] startup cleanup: removing {} torrent(s) from persistence (finished or paused)",
-                    all_ids.len()
-                );
-                for id in all_ids {
-                    let _ = rt.block_on(session.delete(id.into(), false));
-                }
-            }
-        }
-
-        // Scan save_dir for staging dirs left behind by the session
-        // restoration above.  Session::new_with_opts() loads session.json
-        // and re-opens persisted torrents, which re-creates / touches their
-        // output files (often as 0-byte stubs) BEFORE our cleanup loop can
-        // call session.delete().  The download_manager's startup cleanup in
-        // load_and_send_all_tasks() runs even earlier — before the BT
-        // session exists — so it cannot catch these recreated dirs either.
+        // Scan save_dir for leftover staging dirs from earlier in this app
+        // session (e.g. a cancelled add whose `cleanup_stage` was skipped).
+        // The download_manager's startup cleanup in load_and_send_all_tasks()
+        // only runs once at app launch, while this code runs on every lazy
+        // (re-)creation of the BT session.
         //
         // Remove any staging dir whose contents are all 0-byte (no real
         // downloaded data worth preserving).  Dirs with real data are kept
@@ -1518,6 +1531,22 @@ const STATUS_PREPARING: i32 = 5;
 /// Number of virtual segments for single-file BT progress visualization.
 const BT_VIRTUAL_SEGMENTS: i32 = 16;
 
+/// Minimum interval between verbose `[BT]` progress log lines per task.
+/// Progress is still reported to the UI every poll cycle; only the log
+/// file output is throttled to keep logs compact and useful.
+const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(30);
+
+/// Maximum time to wait for magnet metadata (DHT / peer) resolution before
+/// failing the task (#379).
+///
+/// `session.add_torrent` for a magnet link blocks until metadata is fetched
+/// from peers.  A dead magnet (no peers, DHT blocked by firewall/ISP, all
+/// trackers unreachable) never resolves, which previously left the task in
+/// "preparing" forever and the new-download dialog spinning on
+/// "resolving magnet link" with no feedback or error.  Torrent-file tasks
+/// are exempt — their metadata is local and `add_torrent` returns quickly.
+const MAGNET_METADATA_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// For **multi-file** torrents each file becomes a segment — this naturally
 /// reflects the concurrent piece-based download because different files
 /// accumulate downloaded bytes independently.
@@ -1992,6 +2021,8 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
         // Send "preparing" heartbeats while waiting for metadata.
         let mut add_handle = add_handle;
+        let is_magnet_source = torrent_source.is_magnet();
+        let add_started = Instant::now();
         let h = loop {
             if cancelled.load(Ordering::SeqCst) {
                 // Drop (detach) instead of abort: the spawned add_torrent task
@@ -2001,6 +2032,36 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 // in the session with no way to clean it up later.
                 drop(add_handle);
                 return Err(DownloadError::Cancelled);
+            }
+
+            // Magnet metadata resolution timeout (#379).  Detach the add task
+            // (same rationale as the cancel path above) and register a
+            // pending delete so the torrent is removed from the session if
+            // metadata ever resolves later.  The error message deliberately
+            // avoids `is_retriable_error` keywords ("timeout"/"timed out") —
+            // auto-retrying a dead magnet would just burn another 5 minutes
+            // and pop the file-selection dialog at an unexpected moment.
+            if is_magnet_source && add_started.elapsed() >= MAGNET_METADATA_TIMEOUT {
+                shared_bt.register_pending_delete(&task_id, true).await;
+                drop(add_handle);
+                let msg = format!(
+                    "magnet metadata resolution took too long ({}s) — no peers/DHT response; check trackers or network",
+                    MAGNET_METADATA_TIMEOUT.as_secs()
+                );
+                log_info!("[BT] task={} {}", short_id(&task_id), &msg);
+                let _ = db.update_task_status(&task_id, STATUS_ERROR, &msg).await;
+                let _ = progress_tx
+                    .send(ProgressUpdate {
+                        task_id: task_id.clone(),
+                        downloaded_bytes: 0,
+                        total_bytes: 0,
+                        status: STATUS_ERROR,
+                        error_message: msg.clone(),
+                        file_name: String::new(),
+                        segment_details: None,
+                    })
+                    .await;
+                return Err(DownloadError::Other(msg));
             }
 
             tokio::select! {
@@ -2422,6 +2483,12 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
 
     let mut last_report = Instant::now();
     let mut last_db_save = Instant::now();
+    // Throttle the verbose progress log line: logging on every 500ms poll
+    // floods the log file with megabytes of near-identical lines on long
+    // downloads.  Log immediately on state transitions, otherwise emit a
+    // periodic summary at PROGRESS_LOG_INTERVAL.
+    let mut last_progress_log: Option<Instant> = None;
+    let mut last_logged_status: i32 = -1;
 
     loop {
         // Check cancellation — the manager layer (pause_task / cancel_task)
@@ -2837,24 +2904,30 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 librqbit::TorrentStatsState::Error => STATUS_ERROR,
             };
 
-            log_info!(
-                "[BT] task={} state={:?} progress={}/{} (checked={}, fetched={}) pieces={}/{} down={} B/s up={} B/s peers(live={} connecting={} queued={} seen={} dead={})",
-                short_id(&task_id),
-                stats.state,
-                progress,
-                total,
-                checked_progress,
-                fetched,
-                downloaded_pieces,
-                total_pieces,
-                speed_bps,
-                upload_speed_bps,
-                peers_live,
-                peers_connecting,
-                peers_queued,
-                peers_seen,
-                peers_dead
-            );
+            let should_log = status_code != last_logged_status
+                || last_progress_log.is_none_or(|t| t.elapsed() >= PROGRESS_LOG_INTERVAL);
+            if should_log {
+                log_info!(
+                    "[BT] task={} state={:?} progress={}/{} (checked={}, fetched={}) pieces={}/{} down={} B/s up={} B/s peers(live={} connecting={} queued={} seen={} dead={})",
+                    short_id(&task_id),
+                    stats.state,
+                    progress,
+                    total,
+                    checked_progress,
+                    fetched,
+                    downloaded_pieces,
+                    total_pieces,
+                    speed_bps,
+                    upload_speed_bps,
+                    peers_live,
+                    peers_connecting,
+                    peers_queued,
+                    peers_seen,
+                    peers_dead
+                );
+                last_progress_log = Some(Instant::now());
+                last_logged_status = status_code;
+            }
 
             let seg_details = build_bt_segments(
                 total,
@@ -3215,5 +3288,59 @@ mod tests {
 
         assert!(handle.await.is_ok());
         assert_eq!(counter.load(Ordering::Relaxed), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // clear_stale_session_state — session.json removed, .bitv/.torrent kept
+    // (BUG-BT-RESUME-FROM-ZERO regression).
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn clear_stale_session_state_keeps_fastresume_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_bt_session_test_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        let session_json = dir.join("session.json");
+        let session_tmp = dir.join("session.json.tmp");
+        let bitv = dir.join("d5146f69f1bb6b9d95c8270769ebca7f82c2936a.bitv");
+        let torrent = dir.join("d5146f69f1bb6b9d95c8270769ebca7f82c2936a.torrent");
+        let _ = std::fs::write(&session_json, b"{\"torrents\":{}}");
+        let _ = std::fs::write(&session_tmp, b"{}");
+        let _ = std::fs::write(&bitv, [0xFFu8; 16]);
+        let _ = std::fs::write(&torrent, b"d8:announce0:e");
+
+        super::clear_stale_session_state(&dir);
+
+        // session.json (+ .tmp) must be gone so librqbit does not restore
+        // stale torrents; fastresume bitfields and torrent caches must stay.
+        assert!(!session_json.exists(), "session.json must be removed");
+        assert!(!session_tmp.exists(), "session.json.tmp must be removed");
+        assert!(bitv.exists(), ".bitv fastresume bitfield must be preserved");
+        assert!(
+            torrent.exists(),
+            ".torrent metadata cache must be preserved"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clear_stale_session_state_tolerates_missing_files() {
+        // Folder without session.json (first launch) — must not panic.
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_bt_session_test_missing_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        super::clear_stale_session_state(&dir);
+        // Non-existent folder — must not panic either.
+        super::clear_stale_session_state(&dir.join("does_not_exist"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
