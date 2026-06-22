@@ -27,4 +27,4 @@ jobs:
           script_stop: true
           script: |
             cd ${{ secrets.DEPLOY_PATH }}
-            ./deploy.sh
+            bash deploy.sh
