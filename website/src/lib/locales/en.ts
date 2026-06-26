@@ -668,17 +668,25 @@ const en = {
   "footer.copyright": "© {year} FluxDown. All rights reserved.",
   "footer.builtWith": "Astro + React + Rust",
 
-  // Sponsor (Afdian) — plans are fetched dynamically from API
+  // Sponsor (free-amount payment via zerx pay gateway)
   "sponsor.badge": "Open Source",
   "sponsor.title": "Support ",
   "sponsor.titleHighlight": "FluxDown",
   "sponsor.subtitle":
-    "FluxDown is free and open source forever. Your sponsorship fuels continuous development and keeps the project alive.",
-  "sponsor.cta": "Sponsor on Afdian",
-  "sponsor.ctaHint":
-    "Redirects to afdian.com — a trusted Chinese patronage platform",
-  "sponsor.sponsors": "Our Sponsors",
-  "sponsor.beFirst": "Become the first sponsor!",
+    "FluxDown is free and open source forever. Pick any amount — your support keeps development alive.",
+  "sponsor.ctaHint": "Secure WeChat Pay · scan the QR code to complete payment",
+  "sponsor.pay.cta": "Sponsor",
+  "sponsor.pay.customPlaceholder": "Custom amount",
+  "sponsor.pay.scanTitle": "Scan to pay",
+  "sponsor.pay.scanHint": "Open WeChat and scan the QR code below",
+  "sponsor.pay.waiting": "Waiting for payment…",
+  "sponsor.pay.thanksTitle": "Thank you!",
+  "sponsor.pay.thanksBody": "Your support means the world to FluxDown.",
+  "sponsor.pay.errorTitle": "Payment failed",
+  "sponsor.pay.failed": "Something went wrong. Please try again.",
+  "sponsor.pay.timeout": "Payment timed out. Please try again.",
+  "sponsor.pay.unavailable": "Payment is temporarily unavailable.",
+  "sponsor.pay.retry": "Retry",
 
   // Project Board
   "board.tabLabel": "Issue Tracker",

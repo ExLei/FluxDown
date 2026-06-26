@@ -620,16 +620,25 @@ const zhCN: Messages = {
   "terms.s10.desc":
     "如果您对本服务条款有任何疑问，请通过我们网站的反馈页面与我们联系。",
 
-  // Sponsor (plans are fetched dynamically from Afdian API)
+  // Sponsor (自由付款，接入 zerx pay 网关)
   "sponsor.badge": "支持",
   "sponsor.title": "赞助 ",
   "sponsor.titleHighlight": "FluxDown",
   "sponsor.subtitle":
-    "FluxDown 是完全免费项目。您的赞助将持续推动开发进程，让项目保持活力。",
-  "sponsor.cta": "前往爱发电赞助",
-  "sponsor.ctaHint": "通过爱发电平台安全支付，支持微信 / 支付宝",
-  "sponsor.sponsors": "感谢赞助者",
-  "sponsor.beFirst": "成为第一位赞助者！",
+    "FluxDown 是完全免费项目。任意金额，您的支持将持续推动开发进程。",
+  "sponsor.ctaHint": "微信安全支付 · 扫描二维码完成付款",
+  "sponsor.pay.cta": "赞助",
+  "sponsor.pay.customPlaceholder": "自定义金额",
+  "sponsor.pay.scanTitle": "扫码支付",
+  "sponsor.pay.scanHint": "打开微信扫描下方二维码",
+  "sponsor.pay.waiting": "等待支付中…",
+  "sponsor.pay.thanksTitle": "感谢支持！",
+  "sponsor.pay.thanksBody": "您的支持是 FluxDown 前进的动力。",
+  "sponsor.pay.errorTitle": "支付失败",
+  "sponsor.pay.failed": "出错了，请重试。",
+  "sponsor.pay.timeout": "支付超时，请重试。",
+  "sponsor.pay.unavailable": "支付功能暂时不可用。",
+  "sponsor.pay.retry": "重试",
 
   // Footer
   "footer.desc":

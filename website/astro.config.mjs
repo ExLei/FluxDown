@@ -67,13 +67,18 @@ export default defineConfig({
         optional: true,
       }),
 
-      // ── 可选：爱发电 Open API 凭证 ──
-      AFDIAN_USER_ID: envField.string({
+      // ── 可选：自由付款支付网关（zerx pay）──
+      PAY_GATEWAY_URL: envField.string({
         context: "server",
         access: "secret",
         optional: true,
       }),
-      AFDIAN_TOKEN: envField.string({
+      PAY_APP_ID: envField.string({
+        context: "server",
+        access: "secret",
+        optional: true,
+      }),
+      PAY_APP_SECRET: envField.string({
         context: "server",
         access: "secret",
         optional: true,
