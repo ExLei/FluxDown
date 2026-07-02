@@ -1168,31 +1168,36 @@ fn set_hidden(path: &Path) {
     }
 }
 
-/// At startup, attempt to finish any BT tasks that completed downloading but
-/// whose staging-directory move was interrupted (e.g. the app was force-killed
-/// between `stats.finished` being detected and the `move_path` call completing).
+/// At startup, finish any BT tasks that reached `STATUS_COMPLETED` but whose
+/// staging directory was left behind (cleanup failed/interrupted after the
+/// move loop succeeded, e.g. Windows file handles blocked `remove_dir_all`
+/// and the app was killed before the retry succeeded).
 ///
-/// For each task in `completed_bt_tasks` we check whether a staging directory
-/// still exists at `save_dir/.bt_stage_<task_id>/`.  If it does, we perform
-/// the same move logic as `bt_download_inner` Phase 5:
+/// 适用范围(与 download_manager 的 status==3 过滤一致):**仅**"全部 move
+/// 成功但 staging 清理失败/中断"。move 中途崩溃时任务 status∈{1,2},不进
+/// 本函数——那种情况的恢复路径是 resume + 完成幂等哨兵
+/// (`bt_completion_top_<task_id>`,见 bt_download_inner 完成分支)。
 ///
-/// 1. Look for an entry inside the staging dir whose name matches
-///    `current_file_name` (written to DB during Phase 3 as `resolved_name`).
-///    If not found, fall back to moving **every** non-hidden entry
-///    (mirrors the "staging item not found" fallback in Phase 5).
-/// 2. Move the matched item to `save_dir/<dedup_name>`.
+/// For each task we check whether `save_dir/.bt_stage_<task_id>/` still
+/// exists.  If it does:
+///
+/// 1. Drop empty-shell directories(逐文件降级 move 后残留的空目录骨架,
+///    数据已全部移出)——绝不能被当作数据 rescue,否则 dedup 会把空壳移成
+///    `<name> (1)/` 并把 DB file_name 指过去,真实数据指针丢失。
+/// 2. Look for an entry whose name matches `current_file_name`; move it to
+///    `save_dir/<dedup_name>`.  If not found, fall back to moving **every**
+///    non-hidden entry individually.
 /// 3. Remove the now-empty staging dir.
-/// 4. Return a list of `(task_id, final_name)` pairs so the caller can update
-///    the DB with the correct `file_name`.
+/// 4. Return `(task_id, final_name)` pairs so the caller can update the DB.
 ///
-/// Uses synchronous I/O — called once at startup before any BT session is
-/// active, so there is no concurrency risk.
+/// Uses synchronous I/O — called once at startup (via `spawn_blocking`)
+/// before any BT session is active, so there is no concurrency risk.
 pub fn rescue_stranded_staging_files(
-    completed_bt_tasks: &[(&str, &str, &str)], // (task_id, save_dir, current_file_name)
+    completed_bt_tasks: &[(String, String, String)], // (task_id, save_dir, current_file_name)
 ) -> Vec<(String, String)> {
     let mut updates: Vec<(String, String)> = Vec::new();
 
-    for &(task_id, save_dir, current_file_name) in completed_bt_tasks {
+    for (task_id, save_dir, current_file_name) in completed_bt_tasks {
         let stage_dir = bt_stage_dir(save_dir, task_id);
         if !stage_dir.exists() {
             continue;
@@ -1206,11 +1211,27 @@ pub fn rescue_stranded_staging_files(
 
         let save_path = Path::new(save_dir);
 
-        // Collect non-hidden entries from the staging dir.
+        // Collect non-hidden entries from the staging dir, dropping
+        // empty-shell directories on the spot (see doc item 1).  必须在
+        // fast-path 查找之前过滤:container move 的空壳名恰好精确等于
+        // current_file_name,否则会命中 fast path 被当数据移动。
         let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(&stage_dir) {
             Ok(rd) => rd
                 .filter_map(|e| e.ok())
                 .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
+                .filter(|e| {
+                    let p = e.path();
+                    if p.is_dir() && !stage_dir_has_real_data(&p) {
+                        log_info!(
+                            "[BT] rescue: task={} dropping empty shell dir '{}'",
+                            &task_id[..task_id.len().min(8)],
+                            p.display()
+                        );
+                        let _ = std::fs::remove_dir_all(&p);
+                        return false;
+                    }
+                    true
+                })
                 .collect(),
             Err(e) => {
                 log_info!(
@@ -1241,9 +1262,24 @@ pub fn rescue_stranded_staging_files(
         // ------------------------------------------------------------------
         let preferred = entries
             .iter()
-            .find(|e| e.file_name().to_string_lossy() == current_file_name);
+            .find(|e| e.file_name().to_string_lossy() == current_file_name.as_str());
 
         if let Some(entry) = preferred {
+            // I-5 防御:save_dir/<current_file_name> 已存在 ⟹ 本任务的 move
+            // 循环早已全部成功(status==3 的先决条件),staging 内这个同名条目
+            // 只能是"copy 成功但 remove 被第三方句柄阻塞"留下的残留副本。
+            // 绝不能 dedup 成 `<name> (1)` 再 move——那会把 DB file_name 覆写
+            // 到残留副本上,真正的完整产物反而变成无引用的磁盘孤儿。
+            if save_path.join(current_file_name.as_str()).exists() {
+                log_info!(
+                    "[BT] rescue: task={} final product already present at '{}'; \
+                     dropping stale staging residue",
+                    &task_id[..task_id.len().min(8)],
+                    save_path.join(current_file_name.as_str()).display()
+                );
+                let _ = std::fs::remove_dir_all(&stage_dir);
+                continue;
+            }
             let child_name = entry.file_name();
             let child_name_str = child_name.to_string_lossy();
             let final_name = dedup_name_in_dir(save_path, &child_name_str);
@@ -1292,6 +1328,17 @@ pub fn rescue_stranded_staging_files(
         for entry in &entries {
             let child_name = entry.file_name();
             let child_name_str = child_name.to_string_lossy();
+            // I-5 防御(同 fast path):save_dir 已有同名产物 ⟹ 本条目是
+            // "copy 成功 remove 被阻塞"的残留副本,丢弃而非 dedup 成 `(1)`
+            // 覆写 DB 指针。
+            if save_path.join(child_name_str.as_ref()).exists() {
+                log_info!(
+                    "[BT] rescue: task={} child '{}' already present in save_dir; dropping residue",
+                    &task_id[..task_id.len().min(8)],
+                    child_name_str
+                );
+                continue;
+            }
             let final_child_name = dedup_name_in_dir(save_path, &child_name_str);
             let dst = save_path.join(&final_child_name);
 
@@ -1407,12 +1454,22 @@ fn dedup_name_in_dir(dir: &Path, name: &str) -> String {
 /// `librqbit/file_ops.rs::write_chunk` — only BEP-47 padding files are
 /// skipped).  Those byproducts are cleaned up wholesale by `remove_dir_all`
 /// after all selected files have been moved out.
+///
+/// `reuse_top`:上一次(部分失败的)completion 通过哨兵(config
+/// `bt_completion_top_<task_id>`)记录的最终顶层名。重试时复用同名可让
+/// 降级链把剩余文件 merge 进同一 dst(文件级 rename 的 REPLACE_EXISTING
+/// 语义保证幂等),而不是 fresh dedup 撞名分裂出 `Name (1)/`。带类型
+/// 校验:哨兵名被外部占用为**不匹配的类型**(container 期望目录、单文件
+/// 期望文件)时放弃复用退回 fresh dedup——防御 Windows
+/// `rename(dir, existing_file)` 静默吞文件的实测行为。仅 container 与
+/// 单文件分支适用;flat 多文件分支的逐名 dedup 撞名为 v0 既有行为。
 fn compute_completion_layout(
     save_dir: &Path,
     stage_dir: &Path,
     selected_paths: &[PathBuf],
     all_selected: bool,
     custom_name: &str,
+    reuse_top: Option<&str>,
 ) -> Option<(Vec<(PathBuf, PathBuf)>, String)> {
     if selected_paths.is_empty() {
         return None;
@@ -1468,7 +1525,10 @@ fn compute_completion_layout(
         } else {
             custom_name
         };
-        let final_top = dedup_name_in_dir(save_dir, desired);
+        let final_top = match reuse_top {
+            Some(n) if !save_dir.join(n).exists() || save_dir.join(n).is_dir() => n.to_string(),
+            _ => dedup_name_in_dir(save_dir, desired),
+        };
         let src = stage_dir.join(top);
         let dst = save_dir.join(&final_top);
         return Some((vec![(src, dst)], final_top));
@@ -1487,7 +1547,10 @@ fn compute_completion_layout(
         } else {
             custom_name
         };
-        let final_name = dedup_name_in_dir(save_dir, desired);
+        let final_name = match reuse_top {
+            Some(n) if !save_dir.join(n).exists() || save_dir.join(n).is_file() => n.to_string(),
+            _ => dedup_name_in_dir(save_dir, desired),
+        };
         let src = stage_dir.join(rel);
         let dst = save_dir.join(&final_name);
         return Some((vec![(src, dst)], final_name));
@@ -1565,39 +1628,127 @@ fn compute_completion_layout(
     Some((moves, top_level.unwrap_or_else(|| "download".to_string())))
 }
 
-/// Move a file or directory from `src` to `dst`.
+/// Move a file or directory from `src` to `dst` — 零拷贝优先的三级降级链。
 ///
-/// Tries `std::fs::rename` first (atomic, same filesystem).  If that fails
-/// (e.g. cross-device), falls back to a recursive copy + remove.
+/// 1. `std::fs::rename`:同卷原子零拷贝。Windows 上目录内存在任何打开的
+///    子文件句柄时对**目录** rename 报 ACCESS_DENIED——librqbit 对种子内
+///    全部文件持句柄直到任务删除,`pause()` 只把 `File` 转移进
+///    `TorrentStatePaused` 而不关闭(BUG-BT-DIR-RENAME-2X),因此多文件
+///    种子的整目录 rename 在做种句柄存活期间必然失败。
+/// 2. 目录降级:递归**逐文件** rename——文件级 rename 对 FULL-share 句柄
+///    (Rust/librqbit 默认打开模式)免疫,仍是同卷零拷贝。性能参考:目录
+///    rename ~5ms;逐文件 ~0.1-0.5ms/个,5000 文件最坏 1-2s,典型种子
+///    (<100 文件)<50ms,仅降级路径消耗。
+/// 3. copy + remove 兜底:仅剩真正跨卷(EXDEV)等场景,逐文件发生于
+///    [`move_file`] 内,中途失败清理半成品 dst、保留 src 可重试。
 fn move_path(src: &Path, dst: &Path) -> std::io::Result<()> {
-    // Fast path: atomic rename (works when src and dst are on the same fs).
+    if !src.is_dir() {
+        let mut budget = RETRY_SLEEP_BUDGET;
+        return move_file(src, dst, &mut budget);
+    }
+    // 防御(实测:Windows `rename(dir, existing_file)` 会静默吞掉该文件):
+    // dst 已存在且不是目录 → 不走目录 rename 快路径,直接报错让上层处理
+    // (compute_completion_layout 的哨兵类型校验通常已把这种情况引回
+    // fresh dedup,此处是最后防线)。
+    if dst.exists() && !dst.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "destination exists and is not a directory",
+        ));
+    }
     if std::fs::rename(src, dst).is_ok() {
         return Ok(());
     }
+    let mut budget = RETRY_SLEEP_BUDGET;
+    move_dir_recursive(src, dst, &mut budget)?;
+    // 移空后清掉 src 残留骨架(空目录树);失败无害——完成路径的 staging
+    // 清理(带重试)与启动清理兜底。
+    let _ = std::fs::remove_dir_all(src);
+    Ok(())
+}
 
-    // Slow path: copy then remove.
-    if src.is_dir() {
-        copy_dir_all(src, dst)?;
-        std::fs::remove_dir_all(src)
-    } else {
-        std::fs::copy(src, dst)?;
-        std::fs::remove_file(src)
+/// 单次 [`move_path`] 调用内所有瞬时锁(err 32/33)重试的总睡眠次数上限
+/// (250ms x 8 = 2s 封顶),防大种子 x AV 批量扫描时重试时间线性叠加。
+const RETRY_SLEEP_BUDGET: u32 = 8;
+/// 瞬时锁重试的单次退避间隔(对齐 staging 清理重试先例)。
+const RETRY_DELAY: Duration = Duration::from_millis(250);
+
+/// 移动单个文件:rename(Windows = `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`,
+/// 覆盖已存在 dst,重试幂等)→ 对 ERROR_SHARING_VIOLATION(32)/
+/// ERROR_LOCK_VIOLATION(33) 在预算内退避重试(第三方独占句柄如 AV 扫描,
+/// Rust 默认 FULL-share 句柄不触发)→ copy 兜底。
+///
+/// copy 成功但 remove_file(src) 失败(实测:share=READ 无 DELETE 的第三方
+/// 句柄允许读、不允许删)→ 返回 Ok:dst 已是完整副本,任务目标达成;src
+/// 残留在 staging 内由 staging 清理(带重试)与启动清理移除——绝不能因
+/// "伪失败"把整次 completion 标 ERROR 触发无谓的重验重下。
+fn move_file(src: &Path, dst: &Path, budget: &mut u32) -> std::io::Result<()> {
+    let mut last_err;
+    loop {
+        match std::fs::rename(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // 错误码 32/33 = ERROR_SHARING_VIOLATION/ERROR_LOCK_VIOLATION,
+                // 是 Win32 专属语义;Unix 的 errno 32/33 是 EPIPE/EDOM(rename
+                // 不会返回,但 FUSE 等异常文件系统理论上可能),门控避免在
+                // Unix 上对不可恢复错误做无意义的 2s 退避。
+                #[cfg(windows)]
+                let transient = matches!(e.raw_os_error(), Some(32) | Some(33));
+                #[cfg(not(windows))]
+                let transient = false;
+                last_err = e;
+                if !transient || *budget == 0 {
+                    break;
+                }
+                *budget -= 1;
+                std::thread::sleep(RETRY_DELAY);
+            }
+        }
+    }
+    match std::fs::copy(src, dst) {
+        Ok(_) => {
+            if let Err(e) = std::fs::remove_file(src) {
+                log_info!(
+                    "[BT] move_file: copied but could not remove src '{}' ({}); leaving residue for staging cleanup",
+                    src.display(),
+                    e
+                );
+            }
+            Ok(())
+        }
+        Err(copy_err) => {
+            let _ = std::fs::remove_file(dst); // 半成品清理:不完整 dst 占住最终名 = 不可见磁盘泄漏
+            let _ = copy_err;
+            Err(last_err) // 报更早的 rename 错误(根因)
+        }
     }
 }
 
-/// Recursively copy a directory tree from `src` to `dst`.
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// 递归逐文件移动目录内容(merge 语义:dst 已存在目录 → 并入;实测
+/// create_dir_all 对已存在目录 Ok、对已存在同名文件 Err(AlreadyExists))。
+/// 单个子项失败**不中止兄弟项**(尽量多移,减少下一轮重试量),记录首个
+/// 错误于循环结束后返回——上层将本次 completion 标 ERROR 并保留重试。
+fn move_dir_recursive(src: &Path, dst: &Path, budget: &mut u32) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
+    let mut first_err: Option<std::io::Error> = None;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(&entry.path(), &dst.join(entry.file_name()))?;
-        } else {
-            std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
+        let child_dst = dst.join(entry.file_name());
+        let result = match entry.file_type() {
+            Ok(t) if t.is_dir() => move_dir_recursive(&entry.path(), &child_dst, budget),
+            Ok(_) => move_file(&entry.path(), &child_dst, budget),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = result
+            && first_err.is_none()
+        {
+            first_err = Some(e);
         }
     }
-    Ok(())
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 const STATUS_PREPARING: i32 = 5;
 
@@ -3037,12 +3188,19 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                 // overwrite the first task's file (see F050).  The guard is
                 // held until the end of this block, covering the whole move loop.
                 let _move_guard = shared_bt.lock_completion_move().await;
+                // 完成幂等哨兵:首次尝试把 dedup 选定的顶层名记入 config,
+                // 部分失败重试时复用同名让降级链 merge 进同一 dst,防 fresh
+                // dedup 撞名把数据分裂到 `Name (1)/`(BUG-BT-COMPLETION-SPLIT)。
+                // 锁内读写,与并发同名任务的完成序列全局串行化,无 TOCTOU。
+                let sentinel_key = format!("bt_completion_top_{}", task_id);
+                let reuse_top: Option<String> = db.get_config(&sentinel_key).await.ok().flatten();
                 let layout = compute_completion_layout(
                     &save_path,
                     &stage_dir,
                     &selected_paths,
                     all_selected,
                     &custom_name,
+                    reuse_top.as_deref(),
                 );
                 match layout {
                     None => {
@@ -3056,6 +3214,11 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
                     }
                     Some((moves, top_level_name)) => {
                         let total = moves.len();
+                        // 落哨兵(在 move 循环之前):即使 move 全部失败,重试
+                        // 也会复用同一顶层名。仅在值变化时写,避免重复 IO。
+                        if reuse_top.as_deref() != Some(top_level_name.as_str()) {
+                            let _ = db.set_config(&sentinel_key, &top_level_name).await;
+                        }
                         // 完成移动是阻塞的 std::fs rename / 跨设备递归复制。bt-runtime
                         // 是 multi_thread（worker_threads = cpu_cores.clamp(2,8)），在其
                         // async worker 上直接阻塞会占用一个 worker，跨设备多 GB 复制时
@@ -3180,6 +3343,10 @@ async fn bt_download_inner(p: BtInnerParams) -> Result<(), DownloadError> {
             // 全部移动成功:此刻文件确已落到 save_dir,才写 STATUS_COMPLETED 并
             // 发完成信号——file_name 指向真实存在的磁盘名。
             let _ = db.update_task_status(&task_id, STATUS_COMPLETED, "").await;
+            // 完成落定,删除幂等哨兵(孤儿残留无害:status=3 不再进完成路径)。
+            let _ = db
+                .delete_config(&format!("bt_completion_top_{}", task_id))
+                .await;
 
             // Send the single STATUS_COMPLETED signal with the true file name.
             let _ = progress_tx
@@ -3579,7 +3746,7 @@ mod tests {
             PathBuf::from("dirA/file.txt"),
             PathBuf::from("dirB/file.txt"),
         ];
-        let layout = super::compute_completion_layout(&tmp, &stage, &selected, false, "");
+        let layout = super::compute_completion_layout(&tmp, &stage, &selected, false, "", None);
         let _ = std::fs::remove_dir_all(&tmp);
 
         // Avoid `.unwrap()`/`.expect()` (denied by clippy) — match explicitly.
@@ -3987,5 +4154,381 @@ mod tests {
         );
         let bad = super::TorrentSource::Magnet("magnet:?dn=nohash".to_string());
         assert_eq!(bad.info_hash_hex(), None);
+    }
+
+    // -------------------------------------------------------------------------
+    // move_path 三级降级链 + 完成幂等哨兵 (BUG-BT-DIR-RENAME-2X)。
+    // -------------------------------------------------------------------------
+
+    /// 核心回归守卫(Windows):目录内存在打开的子文件句柄(FULL share =
+    /// Rust/librqbit 默认)时,目录 rename 失败,move_path 必须经逐文件
+    /// rename 降级成功——且是 rename(零拷贝)而非 copy。
+    /// 判别法:move 后经原句柄写入,dst 文件长度反映写入 ⟹ 同一底层文件。
+    #[cfg(windows)]
+    #[test]
+    fn move_path_dir_falls_back_per_file_with_open_handle() {
+        use std::io::{Seek, Write};
+        let base = unique_test_dir("fallback");
+        let src_top = base.join("src").join("Torrent");
+        let _ = std::fs::create_dir_all(src_top.join("sub"));
+        let file_path = src_top.join("sub").join("file.bin");
+        let _ = std::fs::write(&file_path, vec![0x55u8; 4096]);
+        let _ = std::fs::write(src_top.join("a.bin"), b"aaaa");
+        let dst_top = base.join("dst").join("Torrent");
+        let _ = std::fs::create_dir_all(base.join("dst"));
+
+        // FULL-share 打开(read+write:只读句柄无法用于写入判别)。
+        let mut handle = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&file_path)
+        {
+            Ok(h) => h,
+            Err(e) => panic!("open handle: {e}"),
+        };
+
+        let result = super::move_path(&src_top, &dst_top);
+        assert!(result.is_ok(), "move_path failed: {result:?}");
+        // dst 结构完整。
+        assert!(dst_top.join("sub").join("file.bin").exists());
+        assert!(dst_top.join("a.bin").exists());
+        // src 骨架消失。
+        assert!(!src_top.exists(), "src skeleton should be removed");
+
+        // rename/copy 判别:句柄开于 pos=0,先 seek 到末尾再追加 4096 字节
+        // → 若 dst 是同一底层文件(rename),其长度增长;copy 快照不受影响。
+        let _ = handle.seek(std::io::SeekFrom::End(0));
+        let _ = handle.write_all(&vec![0xAAu8; 4096]);
+        let _ = handle.flush();
+        drop(handle);
+        let dst_len = std::fs::metadata(dst_top.join("sub").join("file.bin"))
+            .map(|m| m.len())
+            .unwrap_or(0);
+        assert_eq!(
+            dst_len, 8192,
+            "dst must be the SAME underlying file (rename), not a copy snapshot"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 反向对照:同一句柄场景下裸 std::fs::rename(目录)必失败——记录本
+    /// 修复存在的根因。未来 Windows 若改变此语义(此测试转 FAIL),提示
+    /// 可简化降级链。
+    #[cfg(windows)]
+    #[test]
+    fn raw_dir_rename_fails_with_open_child_handle() {
+        let base = unique_test_dir("rawrename");
+        let src_top = base.join("Torrent");
+        let _ = std::fs::create_dir_all(&src_top);
+        let file_path = src_top.join("file.bin");
+        let _ = std::fs::write(&file_path, b"data");
+
+        let handle = std::fs::File::open(&file_path);
+        assert!(handle.is_ok());
+        let renamed = std::fs::rename(&src_top, base.join("Torrent_renamed"));
+        assert!(
+            renamed.is_err(),
+            "dir rename with open child handle should fail on Windows"
+        );
+        drop(handle);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 瞬时独占锁(share_mode(0),AV 风格)释放后,move_file 在重试预算内
+    /// 以 rename 成功。判别法:share=0 与任何第二句柄互斥,不能用句柄写入
+    /// 法——改用 creation time(rename 保留、copy 产生新文件不保留)。
+    #[cfg(windows)]
+    #[test]
+    fn move_file_retries_transient_lock() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = unique_test_dir("retry");
+        let _ = std::fs::create_dir_all(&base);
+        let src = base.join("locked.bin");
+        let _ = std::fs::write(&src, vec![1u8; 1024]);
+        let src_created = std::fs::metadata(&src).and_then(|m| m.created()).ok();
+
+        let src_clone = src.clone();
+        let locker = std::thread::spawn(move || {
+            // share_mode(0):完全独占——rename 期间报 ERROR_SHARING_VIOLATION。
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&src_clone);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            drop(f);
+        });
+        // 让 locker 先拿到句柄。
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let dst = base.join("moved.bin");
+        let mut budget = super::RETRY_SLEEP_BUDGET;
+        let result = super::move_file(&src, &dst, &mut budget);
+        let _ = locker.join();
+
+        assert!(result.is_ok(), "move_file failed: {result:?}");
+        assert!(dst.exists() && !src.exists());
+        // creation time 一致 ⟹ rename(同一文件);copy 会新建文件。
+        let dst_created = std::fs::metadata(&dst).and_then(|m| m.created()).ok();
+        assert_eq!(
+            src_created, dst_created,
+            "creation time must survive (rename), copy would mint a new one"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// copy 成功但 remove_file(src) 被第三方句柄(可读不可删)阻塞时,
+    /// move_file 必须返回 Ok(dst 已是完整副本)——防"伪失败"把整次
+    /// completion 标 ERROR 触发无谓重验重下。
+    #[cfg(windows)]
+    #[test]
+    fn move_file_copy_succeeds_remove_blocked_returns_ok() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let base = unique_test_dir("copyok");
+        let _ = std::fs::create_dir_all(&base);
+        let src = base.join("held.bin");
+        let _ = std::fs::write(&src, vec![7u8; 2048]);
+
+        // share = READ only(无 DELETE):rename 报 32、copy 可读、remove 失败。
+        let holder = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1) // FILE_SHARE_READ
+            .open(&src);
+        assert!(holder.is_ok());
+
+        let dst = base.join("copied.bin");
+        let mut budget = 0u32; // 预算清零:立即走 copy 兜底
+        let result = super::move_file(&src, &dst, &mut budget);
+        assert!(result.is_ok(), "copy-succeeded case must be Ok: {result:?}");
+        assert_eq!(
+            std::fs::metadata(&dst).map(|m| m.len()).unwrap_or(0),
+            2048,
+            "dst must be a complete copy"
+        );
+        // src 残留(由 staging 清理兜底)——行为符合设计。
+        assert!(src.exists());
+        drop(holder);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// dst 不可达(父目录缺失)时 move_file 干净失败:返回 Err、src 完整
+    /// 可重试、无任何 dst 残留。
+    ///
+    /// 注:本测试中 copy 在创建目标文件之前即失败(NotFound),不产生
+    /// 半成品——`move_file` 内清理行(copy 中途失败删 dst)针对的是
+    /// ENOSPC/覆盖写失败等真正的中途失败,单测无法可靠构造(需磁盘满),
+    /// 该防线由代码审查与 saturating 语义保证。
+    #[test]
+    fn move_file_fails_cleanly_when_dst_unreachable() {
+        let base = unique_test_dir("cleanup");
+        let _ = std::fs::create_dir_all(&base);
+        let src = base.join("data.bin");
+        let _ = std::fs::write(&src, vec![3u8; 512]);
+        // dst 指向不存在的父目录深处 → rename 与 copy 双双失败。
+        let dst = base.join("no_such_parent").join("data.bin");
+
+        let mut budget = 0u32;
+        let result = super::move_file(&src, &dst, &mut budget);
+        assert!(result.is_err(), "must fail when dst parent missing");
+        assert!(!dst.exists(), "no partial dst may remain");
+        assert!(src.exists(), "src must stay intact for retry");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// I-5 回归:status==3 + staging 残留与 save_dir 已有完整产物同名
+    /// (move 循环全部成功后,"copy 成功 remove 被阻塞"留下的副本)时,
+    /// rescue 必须丢弃残留,绝不 dedup 成 `Torrent (1)` 再覆写 DB 指针
+    /// (那会让真实产物变成无引用孤儿)。fast path 与 fallback 均须防御。
+    #[test]
+    fn rescue_drops_residue_when_product_already_in_save_dir() {
+        let save = unique_test_dir("rescue_residue");
+        let task_id = "residue-task-01";
+        // save_dir 内已有完整产物(3 文件)。
+        let product = save.join("Torrent");
+        let _ = std::fs::create_dir_all(product.join("sub"));
+        let _ = std::fs::write(product.join("a.bin"), b"complete-a");
+        let _ = std::fs::write(product.join("b.bin"), b"complete-b");
+        let _ = std::fs::write(product.join("sub").join("c.bin"), b"complete-c");
+        // staging 内同名残留(仅含 1 个文件的副本)。
+        let stage = super::bt_stage_dir(&save.to_string_lossy(), task_id);
+        let residue = stage.join("Torrent");
+        let _ = std::fs::create_dir_all(&residue);
+        let _ = std::fs::write(residue.join("a.bin"), b"complete-a");
+
+        let input = vec![(
+            task_id.to_string(),
+            save.to_string_lossy().into_owned(),
+            "Torrent".to_string(),
+        )];
+        let updates = super::rescue_stranded_staging_files(&input);
+
+        assert!(
+            updates.is_empty(),
+            "residue must not produce DB updates (would repoint file_name)"
+        );
+        assert!(
+            !save.join("Torrent (1)").exists(),
+            "residue must never be dedup-moved to 'Torrent (1)'"
+        );
+        // 完整产物原封不动。
+        assert_eq!(
+            std::fs::read(product.join("a.bin")).unwrap_or_default(),
+            b"complete-a"
+        );
+        assert_eq!(
+            std::fs::read(product.join("sub").join("c.bin")).unwrap_or_default(),
+            b"complete-c"
+        );
+        // staging 连同残留被清理。
+        assert!(!stage.exists(), "staging residue should be dropped");
+        let _ = std::fs::remove_dir_all(&save);
+    }
+
+    /// 哨兵复用:reuse_top 指向 save_dir 内已存在的**目录**(上次部分移动
+    /// 的自身产物)时,container 分支复用同名(merge 继续)而不 dedup 成
+    /// `Torrent (1)`;被外部占用为**文件**时放弃哨兵退回 fresh dedup
+    /// (防御 Windows rename(dir,file) 静默吞文件)。
+    #[test]
+    fn completion_layout_reuses_sentinel_top() {
+        use std::path::PathBuf;
+        let save = unique_test_dir("sentinel");
+        let stage = save.join(".stage");
+        let _ = std::fs::create_dir_all(&stage);
+        let selected = vec![
+            PathBuf::from("Torrent/a.bin"),
+            PathBuf::from("Torrent/sub/b.bin"),
+        ];
+
+        // Case 1: dst 是目录(自身上次产物)→ 复用。
+        let _ = std::fs::create_dir_all(save.join("Torrent"));
+        let layout =
+            super::compute_completion_layout(&save, &stage, &selected, true, "", Some("Torrent"));
+        let (_, top) = match layout {
+            Some(v) => v,
+            None => panic!("layout should be Some"),
+        };
+        assert_eq!(top, "Torrent", "existing dir must be reused, not deduped");
+
+        // Case 2: dst 被外部占用为文件 → 放弃哨兵,fresh dedup。
+        let _ = std::fs::remove_dir_all(save.join("Torrent"));
+        let _ = std::fs::write(save.join("Torrent"), b"unrelated user file");
+        let layout =
+            super::compute_completion_layout(&save, &stage, &selected, true, "", Some("Torrent"));
+        let (_, top) = match layout {
+            Some(v) => v,
+            None => panic!("layout should be Some"),
+        };
+        assert_ne!(
+            top, "Torrent",
+            "sentinel name occupied by a FILE must not be reused (would swallow it)"
+        );
+
+        // Case 3: 无哨兵 → 既有 dedup 行为(名字避开已存在文件)。
+        let layout = super::compute_completion_layout(&save, &stage, &selected, true, "", None);
+        let (_, top) = match layout {
+            Some(v) => v,
+            None => panic!("layout should be Some"),
+        };
+        assert_eq!(top, "Torrent (1)");
+
+        let _ = std::fs::remove_dir_all(&save);
+    }
+
+    /// rescue 必须把"与 current_file_name 精确同名的空壳目录"(fast-path
+    /// 命中场景,逐文件降级 move 后的残留骨架)删除而非当数据移动——
+    /// 否则 dedup 会把空壳移成 `<name> (1)/` 并污染 DB file_name。
+    #[test]
+    fn rescue_skips_empty_shell_dirs() {
+        let save = unique_test_dir("rescue_shell");
+        let task_id = "shelltask-0001";
+        let stage = super::bt_stage_dir(&save.to_string_lossy(), task_id);
+        // 空壳:与 current_file_name 同名、只含空目录树。
+        let _ = std::fs::create_dir_all(stage.join("Torrent").join("sub"));
+
+        let input = vec![(
+            task_id.to_string(),
+            save.to_string_lossy().into_owned(),
+            "Torrent".to_string(),
+        )];
+        let updates = super::rescue_stranded_staging_files(&input);
+
+        assert!(
+            updates.is_empty(),
+            "empty shell must not produce DB updates"
+        );
+        assert!(
+            !save.join("Torrent").exists() && !save.join("Torrent (1)").exists(),
+            "empty shell must not be moved into save_dir"
+        );
+        assert!(!stage.exists(), "staging dir should be cleaned up");
+        let _ = std::fs::remove_dir_all(&save);
+    }
+
+    /// 大 N 降级路径正确性(500 文件 x 3 层嵌套)。打印耗时供人工确认,
+    /// 不做硬性时间断言(CI 计时不稳)。
+    #[test]
+    fn move_dir_recursive_large_n() {
+        let base = unique_test_dir("large_n");
+        let src = base.join("src");
+        for i in 0..5 {
+            for j in 0..10 {
+                let dir = src.join(format!("d{i}")).join(format!("e{j}"));
+                let _ = std::fs::create_dir_all(&dir);
+                for k in 0..10 {
+                    let _ =
+                        std::fs::write(dir.join(format!("f{k}.bin")), [i as u8, j as u8, k as u8]);
+                }
+            }
+        }
+        let dst = base.join("dst");
+        let started = std::time::Instant::now();
+        let mut budget = super::RETRY_SLEEP_BUDGET;
+        let result = super::move_dir_recursive(&src, &dst, &mut budget);
+        println!("move_dir_recursive 500 files took {:?}", started.elapsed());
+        assert!(result.is_ok(), "{result:?}");
+        // 抽查结构与内容。
+        let sample = dst.join("d4").join("e9").join("f9.bin");
+        assert_eq!(std::fs::read(&sample).unwrap_or_default(), vec![4u8, 9, 9]);
+        let mut count = 0usize;
+        fn count_files(dir: &std::path::Path, count: &mut usize) {
+            if let Ok(rd) = std::fs::read_dir(dir) {
+                for e in rd.filter_map(|e| e.ok()) {
+                    if e.path().is_dir() {
+                        count_files(&e.path(), count);
+                    } else {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        count_files(&dst, &mut count);
+        assert_eq!(count, 500);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 单个子项失败不得中止兄弟项:可移动的文件全部移出,函数返回首个错误。
+    #[test]
+    fn move_dir_recursive_continues_after_child_error() {
+        let base = unique_test_dir("continue");
+        let src = base.join("src");
+        let _ = std::fs::create_dir_all(&src);
+        let _ = std::fs::write(src.join("ok1.bin"), b"1");
+        let _ = std::fs::write(src.join("ok2.bin"), b"2");
+        let dst = base.join("dst");
+        let _ = std::fs::create_dir_all(&dst);
+        // 预置一个与 src 子目录同名的**文件**,令该子项的 create_dir_all 失败。
+        let _ = std::fs::create_dir_all(src.join("blocked"));
+        let _ = std::fs::write(src.join("blocked").join("inner.bin"), b"x");
+        let _ = std::fs::write(dst.join("blocked"), b"i am a file");
+
+        let mut budget = super::RETRY_SLEEP_BUDGET;
+        let result = super::move_dir_recursive(&src, &dst, &mut budget);
+        assert!(result.is_err(), "blocked child must surface an error");
+        // 兄弟文件仍全部移出。
+        assert!(dst.join("ok1.bin").exists() && dst.join("ok2.bin").exists());
+        assert!(!src.join("ok1.bin").exists());
+        // 被阻塞子项的数据保留在 src,可重试。
+        assert!(src.join("blocked").join("inner.bin").exists());
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
