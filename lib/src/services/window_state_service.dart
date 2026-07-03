@@ -1,10 +1,16 @@
 import 'dart:async';
+import 'dart:ffi' hide Size;
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' show PlatformDispatcher;
 
+import 'package:ffi/ffi.dart';
 import 'package:flutter/painting.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'log_service.dart';
+import 'win32_toast/win32_bindings.dart';
 
 const _tag = 'WindowState';
 
@@ -31,6 +37,11 @@ const _kMinHeight = 500.0;
 /// 窗口部分拖出屏幕的正常场景。
 const _kMinPosition = -500.0;
 const _kMaxPosition = 20000.0;
+
+/// 恢复位置时要求窗口与显示器的最小重叠边长（物理像素）。
+/// 低于此值视为"实际不可见"（如 2560 宽屏幕上 x=2552 只剩 8px 贴边），
+/// fallback 到居中。100px 足以看到并抓住标题栏。
+const _kMinVisiblePx = 100;
 
 /// 窗口状态持久化服务。
 ///
@@ -172,15 +183,17 @@ class WindowStateService {
       if (hasSavedPosition) {
         final x = _savedX!;
         final y = _savedY!;
-        if (_isPositionValid(x, y)) {
+        if (_isPositionValid(x, y) &&
+            _isRectOnAnyDisplay(x, y, savedWidth, savedHeight)) {
           await windowManager.setPosition(Offset(x, y));
           logInfo(_tag, 'applied position: ($x, $y)');
         } else {
-          // 坐标异常（如上次隐藏到托盘时被错误保存），fallback 到居中
+          // 坐标异常（上次隐藏到托盘时被错误保存），或保存的矩形不再落在
+          // 任何显示器上（如外接显示器已断开），fallback 到居中
           logInfo(
             _tag,
-            'saved position ($x, $y) out of valid range '
-            '[$_kMinPosition, $_kMaxPosition], centering instead',
+            'saved position ($x, $y) invalid or off-screen '
+            '(size ${savedWidth}x$savedHeight), centering instead',
           );
           await windowManager.setAlignment(Alignment.center);
         }
@@ -347,5 +360,64 @@ class WindowStateService {
         x <= _kMaxPosition &&
         y >= _kMinPosition &&
         y <= _kMaxPosition;
+  }
+
+  /// 检查保存的窗口矩形是否以可用的方式落在当前某个显示器上。
+  ///
+  /// 显示器拓扑变化（如拔掉 4K 外接屏后仅剩笔记本屏）时，历史坐标
+  /// 可能整体落在虚拟屏幕之外——粗校验 [-500, 20000] 无法发现，
+  /// 结果是任务栏有图标但窗口不可见。
+  ///
+  /// Windows 判定逻辑：
+  ///   1. window_manager 保存/恢复的是逻辑像素（插件按 devicePixelRatio
+  ///      换算），而 Win32 显示器 API 用物理虚拟屏坐标 → 先按当前窗口
+  ///      DPR 换算。混合 DPI 多屏下不完全精确，但误差只会导致 fallback
+  ///      居中（安全方向），不会产生不可见窗口。
+  ///   2. `MonitorFromRect(MONITOR_DEFAULTTONULL)` 返回 NULL = 零相交。
+  ///   3. 仅相交仍不够：2560 宽屏幕上 x=2552 只剩 8px 贴边，等于不可见。
+  ///      取相交面积最大的显示器，要求重叠区至少 [_kMinVisiblePx]²
+  ///      （足以看到并抓住标题栏）。
+  ///
+  /// 其余平台维持原行为（返回 true，交给 WM 处理）。
+  static bool _isRectOnAnyDisplay(
+    double x,
+    double y,
+    double width,
+    double height,
+  ) {
+    if (!Platform.isWindows) return true;
+    try {
+      final dpr =
+          PlatformDispatcher.instance.implicitView?.devicePixelRatio ?? 1.0;
+      final rect = calloc<RECT>();
+      final mi = calloc<MONITORINFO>();
+      try {
+        rect.ref.left = (x * dpr).round();
+        rect.ref.top = (y * dpr).round();
+        rect.ref.right = ((x + width) * dpr).round();
+        rect.ref.bottom = ((y + height) * dpr).round();
+        final monitor = monitorFromRect(rect, MONITOR_DEFAULTTONULL);
+        if (monitor == 0) return false; // 与任何显示器零相交
+
+        // MonitorFromRect 返回相交面积最大的显示器 → 校验重叠区大小
+        mi.ref.cbSize = sizeOf<MONITORINFO>();
+        if (getMonitorInfoW(monitor, mi) == 0) return true; // 查询失败不阻塞
+        final m = mi.ref.rcMonitor;
+        final overlapW =
+            math.min(rect.ref.right, m.right) -
+            math.max(rect.ref.left, m.left);
+        final overlapH =
+            math.min(rect.ref.bottom, m.bottom) -
+            math.max(rect.ref.top, m.top);
+        return overlapW >= _kMinVisiblePx && overlapH >= _kMinVisiblePx;
+      } finally {
+        calloc.free(rect);
+        calloc.free(mi);
+      }
+    } catch (e) {
+      // FFI 失败（理论上不会发生）时不阻塞恢复流程
+      logInfo(_tag, 'monitor check failed, assuming on-screen: $e');
+      return true;
+    }
   }
 }

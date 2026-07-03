@@ -431,7 +431,8 @@ const int GWL_STYLE = -16;
 const int WS_CAPTION = 0x00C00000;
 const int WS_THICKFRAME = 0x00040000;
 
-// MonitorFromWindow / MonitorFromPoint flags
+// MonitorFromWindow / MonitorFromPoint / MonitorFromRect flags
+const int MONITOR_DEFAULTTONULL = 0;
 const int MONITOR_DEFAULTTONEAREST = 2;
 
 // GetSystemMetrics indices
@@ -493,6 +494,17 @@ typedef _MonitorFromWindow_Dart = int Function(int hwnd, int dwFlags);
 final monitorFromWindow = _user32
     .lookupFunction<_MonitorFromWindow_Native, _MonitorFromWindow_Dart>(
       'MonitorFromWindow',
+    );
+
+// MonitorFromRect
+typedef _MonitorFromRect_Native = IntPtr Function(
+  Pointer<RECT> lprc,
+  Uint32 dwFlags,
+);
+typedef _MonitorFromRect_Dart = int Function(Pointer<RECT> lprc, int dwFlags);
+final monitorFromRect = _user32
+    .lookupFunction<_MonitorFromRect_Native, _MonitorFromRect_Dart>(
+      'MonitorFromRect',
     );
 
 // GetMonitorInfoW
