@@ -1122,6 +1122,47 @@ fn find_or_bootstrap_updater(_zip_path: &str) -> Result<PathBuf, UpdateError> {
 // Windows installers
 // ---------------------------------------------------------------------------
 
+/// Spawn a detached process, working around Windows error 740
+/// (`ERROR_ELEVATION_REQUIRED`, "请求的操作需要提升").
+///
+/// `CreateProcess` fails with 740 when the target executable is marked
+/// "Run as administrator" — set manually via the file-properties
+/// compatibility checkbox, or automatically by the Program Compatibility
+/// Assistant (which is prone to flagging unsigned binaries whose name
+/// contains "updater"). None of the binaries we launch actually need admin
+/// rights (portable updates write to the user-owned install dir; the Inno
+/// installer is built with `PrivilegesRequired=lowest`), so on 740 we retry
+/// once with the `RunAsInvoker` compatibility layer, which overrides both
+/// the HKCU and HKLM compat flags without requiring elevation.
+#[cfg(target_os = "windows")]
+fn spawn_no_elevation(program: &Path, args: &[&str]) -> Result<(), UpdateError> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    const ERROR_ELEVATION_REQUIRED: i32 = 740;
+
+    match std::process::Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.raw_os_error() == Some(ERROR_ELEVATION_REQUIRED) => {
+            log_info!(
+                "[updater] spawn hit ERROR_ELEVATION_REQUIRED (740); retrying with RunAsInvoker: {}",
+                program.display()
+            );
+            std::process::Command::new(program)
+                .args(args)
+                .env("__COMPAT_LAYER", "RunAsInvoker")
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn()
+                .map(drop)
+                .map_err(UpdateError::Io)
+        }
+        Err(e) => Err(UpdateError::Io(e)),
+    }
+}
+
 /// Windows setup update: spawn `fluxdown_updater` and exit immediately.
 ///
 /// The updater waits for this process to exit via `WaitForSingleObject`, then
@@ -1132,17 +1173,13 @@ fn find_or_bootstrap_updater(_zip_path: &str) -> Result<PathBuf, UpdateError> {
 /// trusted, the unblock operation succeeds even with SAC enabled.
 #[cfg(target_os = "windows")]
 fn install_setup(installer_path: &str) -> Result<(), UpdateError> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
     let updater = find_updater_bin()?;
     let pid = std::process::id();
 
-    std::process::Command::new(&updater)
-        .args(["--pid", &pid.to_string(), "--installer", installer_path])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(UpdateError::Io)?;
+    spawn_no_elevation(
+        &updater,
+        &["--pid", &pid.to_string(), "--installer", installer_path],
+    )?;
 
     std::process::exit(0);
 }
@@ -1165,9 +1202,6 @@ fn install_setup(installer_path: &str) -> Result<(), UpdateError> {
 /// and run from the OS temp directory for this one cycle.
 #[cfg(target_os = "windows")]
 fn install_portable(zip_path: &str) -> Result<(), UpdateError> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
     let exe = std::env::current_exe().map_err(UpdateError::Io)?;
     let app_dir = exe
         .parent()
@@ -1182,8 +1216,9 @@ fn install_portable(zip_path: &str) -> Result<(), UpdateError> {
     let updater = find_or_bootstrap_updater(zip_path)?;
     let pid = std::process::id();
 
-    std::process::Command::new(&updater)
-        .args([
+    spawn_no_elevation(
+        &updater,
+        &[
             "--pid",
             &pid.to_string(),
             "--zip",
@@ -1192,10 +1227,8 @@ fn install_portable(zip_path: &str) -> Result<(), UpdateError> {
             &app_dir.to_string_lossy(),
             "--exe",
             &exe_name,
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(UpdateError::Io)?;
+        ],
+    )?;
 
     std::process::exit(0);
 }

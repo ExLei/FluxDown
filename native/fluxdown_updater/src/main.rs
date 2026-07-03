@@ -314,7 +314,7 @@ fn do_portable_zip(zip: &Path, dir: &Path, exe: &str) -> Result<(), UpdaterError
         // Restart the (old) app so the user is not left with nothing running;
         // the app will then show the failure marker on startup.
         let exe_path = dir.join(exe);
-        let _ = process::Command::new(&exe_path).spawn();
+        let _ = spawn_no_elevation(&exe_path, &[]);
         return Err(e);
     }
     log_msg("files copied").ok();
@@ -332,9 +332,7 @@ fn do_portable_zip(zip: &Path, dir: &Path, exe: &str) -> Result<(), UpdaterError
     // Restart the application.
     let exe_path = dir.join(exe);
     log_msg(&format!("restarting: {}", exe_path.display())).ok();
-    process::Command::new(&exe_path)
-        .spawn()
-        .map_err(UpdaterError::Io)?;
+    spawn_no_elevation(&exe_path, &[]).map_err(UpdaterError::Io)?;
 
     Ok(())
 }
@@ -351,14 +349,11 @@ fn do_setup(installer: &Path) -> Result<(), UpdaterError> {
         // is allowed to unblock files on behalf of the user.
         remove_zone_identifier(installer);
 
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        process::Command::new(installer)
-            .args(["/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(UpdaterError::Io)?;
+        spawn_no_elevation(
+            installer,
+            &["/SILENT", "/CLOSEAPPLICATIONS", "/RESTARTAPPLICATIONS"],
+        )
+        .map_err(UpdaterError::Io)?;
 
         Ok(())
     }
@@ -487,6 +482,55 @@ fn do_pkg_arch(package: &Path) -> Result<(), UpdaterError> {
         "arch mode is only supported on Linux".to_string(),
     ))
 }
+
+// ─── Process spawning ─────────────────────────────────────────────────────────
+
+/// Spawn a process, retrying once with the `RunAsInvoker` compatibility layer
+/// when Windows reports `ERROR_ELEVATION_REQUIRED` (os error 740).
+///
+/// 740 appears when the target executable carries a "Run as administrator"
+/// compatibility flag — set manually via the file-properties checkbox, or
+/// automatically by the Program Compatibility Assistant. Nothing we launch
+/// needs elevation (the Inno installer is `PrivilegesRequired=lowest`; the
+/// app itself is asInvoker), so forcing the layer is always safe here.
+///
+/// Also strips an inherited `__COMPAT_LAYER` on the first attempt: the main
+/// app may have launched *us* with `RunAsInvoker` forced, and the layer must
+/// not silently leak into long-lived children like the restarted app.
+fn spawn_no_elevation(program: &Path, args: &[&str]) -> io::Result<process::Child> {
+    let mut cmd = process::Command::new(program);
+    cmd.args(args);
+    cmd.env_remove("__COMPAT_LAYER");
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    match cmd.spawn() {
+        #[cfg(target_os = "windows")]
+        Err(e) if e.raw_os_error() == Some(740) => {
+            log_msg(&format!(
+                "spawn requires elevation (740); retrying with RunAsInvoker: {}",
+                program.display()
+            ))
+            .ok();
+            let mut retry = process::Command::new(program);
+            retry.args(args).env("__COMPAT_LAYER", "RunAsInvoker");
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                retry.creation_flags(CREATE_NO_WINDOW);
+            }
+            retry.spawn()
+        }
+        other => other,
+    }
+}
+
+/// `CREATE_NO_WINDOW`: don't flash a console window for spawned children.
+/// GUI-subsystem executables are unaffected by this flag.
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 // ─── Process waiting ──────────────────────────────────────────────────────────
 
