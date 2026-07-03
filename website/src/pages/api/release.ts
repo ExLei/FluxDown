@@ -324,11 +324,13 @@ export const GET: APIRoute = async () => {
     const published = releases.filter((r) => !r.draft && !r.prerelease);
 
     // 桌面客户端 release：Release 已按组件拆分（v* / extension-v* / website-v*），
-    // 以「v 开头的 tag 且包含 Windows 安装包」为准挑选最新客户端 release，
-    // 同时兼容旧的合并 release 与脚本预创建的空 release
+    // 以「严格三段式 semver tag 且包含 Windows 安装包」为准挑选最新客户端 release，
+    // 同时兼容旧的合并 release 与脚本预创建的空 release。
+    // 必须严格 v<major>.<minor>.<patch>：旧客户端 parse_semver 只接受三段式，
+    // 两段式/带后缀的 tag 会导致其静默不弹更新，这里直接跳过以保护更新通道
     const latest = published.find(
       (r) =>
-        /^v\d/.test(r.tag_name) &&
+        /^v\d+\.\d+\.\d+$/.test(r.tag_name) &&
         r.assets.some(
           (a) =>
             a.name.endsWith("-setup.exe") || a.name.endsWith("-portable.zip"),
