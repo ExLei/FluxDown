@@ -7,6 +7,7 @@ import '../models/custom_category.dart';
 import '../models/download_controller.dart';
 import '../models/download_queue.dart';
 
+import '../services/app_icon_service.dart';
 import '../services/update_service.dart';
 import '../i18n/locale_provider.dart';
 import '../models/settings_provider.dart';
@@ -114,54 +115,45 @@ class _SidebarState extends State<Sidebar> {
         height: 40,
         padding: const EdgeInsets.symmetric(horizontal: 16),
         alignment: Alignment.centerLeft,
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+        // 跟随「设置-外观-应用图标」切换：自定义图标启用时显示其预览
+        child: ListenableBuilder(
+          listenable: AppIconService.instance,
+          builder: (context, _) {
+            final svc = AppIconService.instance;
+            final customPreview = svc.isCustom ? svc.previewPngPath : null;
+            if (customPreview != null) {
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(5),
+                child: Image(
+                  key: ValueKey(svc.previewRevision),
+                  image: FileImage(File(customPreview)),
+                  width: 22,
+                  height: 22,
+                  filterQuality: FilterQuality.medium,
+                  gaplessPlayback: true,
+                ),
+              );
+            }
             // 暗色主题：蓝色箭头 + 透明背景（无白色圆角矩形，避免在深色侧边栏上显得突兀）
             // 亮色主题：完整圆角图标（白底 + 蓝色箭头）
-            if (c.tokens.appearance == Brightness.dark)
-              Image.asset(
+            if (c.tokens.appearance == Brightness.dark) {
+              return Image.asset(
                 'assets/logo/logo_on_dark.png',
                 width: 22,
                 height: 22,
                 filterQuality: FilterQuality.medium,
-              )
-            else
-              ClipRRect(
-                borderRadius: BorderRadius.circular(5),
-                child: Image.asset(
-                  'assets/logo/fluxdown_logo.png',
-                  width: 22,
-                  height: 22,
-                  filterQuality: FilterQuality.medium,
-                ),
+              );
+            }
+            return ClipRRect(
+              borderRadius: BorderRadius.circular(5),
+              child: Image.asset(
+                'assets/logo/fluxdown_logo.png',
+                width: 22,
+                height: 22,
+                filterQuality: FilterQuality.medium,
               ),
-            const SizedBox(width: 9),
-            Text.rich(
-              TextSpan(
-                children: [
-                  TextSpan(
-                    text: 'Flux',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: c.accent,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                  TextSpan(
-                    text: 'Down',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
-                      color: c.textPrimary,
-                      letterSpacing: 0.3,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
+            );
+          },
         ),
       ),
     );

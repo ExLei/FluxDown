@@ -6,6 +6,7 @@ import 'dart:math';
 import 'package:file_selector/file_selector.dart';
 import '../services/file_picker_service.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rinf/rinf.dart';
@@ -17,6 +18,7 @@ import '../models/custom_category.dart';
 import '../models/download_controller.dart';
 import '../models/download_queue.dart';
 import '../models/settings_provider.dart';
+import '../services/app_icon_service.dart';
 import '../services/floating_ball/floating_ball_service.dart';
 import '../services/log_service.dart';
 import '../services/update_service.dart';
@@ -203,6 +205,14 @@ List<SettingsSearchItem> get settingsSearchItems {
       keywords: s.searchKeywordsUiScale,
       icon: LucideIcons.maximize,
     ),
+    if (Platform.isWindows)
+      SettingsSearchItem(
+        category: SettingsCategory.appearance,
+        label: s.appIcon,
+        description: s.appIconDesc,
+        keywords: s.searchKeywordsAppIcon,
+        icon: LucideIcons.image,
+      ),
     SettingsSearchItem(
       category: SettingsCategory.download,
       label: s.defaultSaveDir,
@@ -1808,6 +1818,15 @@ class _AppearanceContent extends StatelessWidget {
           vertical: true,
           child: const _UiScaleSelector(),
         ),
+        if (Platform.isWindows) ...[
+          const SizedBox(height: 10),
+          _SettingCard(
+            label: s.appIcon,
+            description: s.appIconDesc,
+            vertical: true,
+            child: const _AppIconSelector(),
+          ),
+        ],
       ],
     );
   }
@@ -1906,6 +1925,227 @@ class _UiScaleChipState extends State<_UiScaleChip> {
           ),
         ),
       ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────
+// 应用图标选择器（仅 Windows）
+// ─────────────────────────────────────────────
+
+class _AppIconSelector extends StatefulWidget {
+  const _AppIconSelector();
+
+  @override
+  State<_AppIconSelector> createState() => _AppIconSelectorState();
+}
+
+class _AppIconSelectorState extends State<_AppIconSelector> {
+  bool _busy = false;
+
+  /// 「自定义」点击逻辑：
+  /// - 未启用但曾导入过 → 直接切回上次的自定义图标；
+  /// - 已启用自定义 → 重新选图（更换）；
+  /// - 从未导入 → 选图。
+  Future<void> _onCustomTap() async {
+    final svc = AppIconService.instance;
+    if (!svc.isCustom && svc.hasCustomIcon) {
+      await svc.useCustom();
+    } else {
+      await _pickImage();
+    }
+  }
+
+  Future<void> _pickImage() async {
+    final s = LocaleScope.of(context);
+    setState(() => _busy = true);
+    try {
+      final files = await FilePickerService.pickFiles(
+        dialogTitle: s.appIconChooseImage,
+        allowedExtensions: const ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'ico'],
+      );
+      if (files == null || files.isEmpty) return;
+      await AppIconService.instance.importAndApply(files.first.path);
+    } catch (e, stack) {
+      logError('AppIconSelector', 'failed to apply custom icon', e, stack);
+      if (mounted) {
+        ShadSonner.of(context).show(
+          ShadToast.destructive(
+            title: Text(LocaleScope.of(context).appIconApplyFailed),
+            description: Text(e.toString()),
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// 弹窗放大查看自定义图标（预览源为 256px PNG）
+  void _showPreviewDialog(String path, int revision) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    showShadDialog(
+      context: context,
+      barrierColor: c.dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => ShadDialog(
+        title: Text(s.appIcon),
+        actions: [
+          ShadButton.outline(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text(s.close),
+          ),
+        ],
+        child: Padding(
+          padding: const EdgeInsets.only(top: 16),
+          child: _IconZoomPreview(path: path, revision: revision),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    return ListenableBuilder(
+      listenable: AppIconService.instance,
+      builder: (context, _) {
+        final svc = AppIconService.instance;
+        final previewPath = svc.previewPngPath;
+        return Row(
+          children: [
+            _UiScaleChip(
+              label: s.appIconDefault,
+              selected: !svc.isCustom,
+              isDefault: true,
+              colors: c,
+              onTap: () {
+                if (!_busy) svc.useDefault();
+              },
+            ),
+            const SizedBox(width: 6),
+            _UiScaleChip(
+              label: s.appIconCustom,
+              selected: svc.isCustom,
+              isDefault: false,
+              colors: c,
+              onTap: () {
+                if (!_busy) _onCustomTap();
+              },
+            ),
+            if (previewPath != null) ...[
+              const SizedBox(width: 12),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: () =>
+                      _showPreviewDialog(previewPath, svc.previewRevision),
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: c.border.withValues(alpha: 0.5),
+                      ),
+                      color: c.surface1,
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(5),
+                      child: Image(
+                        key: ValueKey(svc.previewRevision),
+                        image: FileImage(File(previewPath)),
+                        width: 34,
+                        height: 34,
+                        filterQuality: FilterQuality.medium,
+                        gaplessPlayback: true,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// 支持滚轮缩放的图标预览视口。
+///
+/// 悬停在视口上滚动滚轮即可放大/缩小，图标按当前尺寸自适应渲染；
+/// 大倍率下切换为最近邻采样，保留像素边缘便于检查图标细节。
+class _IconZoomPreview extends StatefulWidget {
+  final String path;
+  final int revision;
+
+  const _IconZoomPreview({required this.path, required this.revision});
+
+  @override
+  State<_IconZoomPreview> createState() => _IconZoomPreviewState();
+}
+
+class _IconZoomPreviewState extends State<_IconZoomPreview> {
+  static const _baseSide = 160.0;
+  static const _minScale = 0.25;
+  static const _maxScale = 6.0;
+  static const _step = 1.15;
+
+  double _scale = 1.0;
+
+  void _onPointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+    final factor = event.scrollDelta.dy < 0 ? _step : 1 / _step;
+    setState(() {
+      _scale = (_scale * factor).clamp(_minScale, _maxScale);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final s = LocaleScope.of(context);
+    final c = AppColors.of(context);
+    final side = _baseSide * _scale;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Listener(
+          onPointerSignal: _onPointerSignal,
+          child: Container(
+            width: double.infinity,
+            height: 320,
+            decoration: BoxDecoration(
+              color: c.surface1,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: c.border.withValues(alpha: 0.4)),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Center(
+                child: Image(
+                  key: ValueKey(widget.revision),
+                  image: FileImage(File(widget.path)),
+                  width: side,
+                  height: side,
+                  fit: BoxFit.contain,
+                  filterQuality:
+                      _scale > 2 ? FilterQuality.none : FilterQuality.high,
+                  gaplessPlayback: true,
+                ),
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          '${side.round()} px · ${s.appIconZoomHint}',
+          style: TextStyle(fontSize: 11, color: c.textMuted),
+        ),
+      ],
     );
   }
 }
@@ -3394,10 +3634,14 @@ class _LocalServerCardState extends State<_LocalServerCard> {
   late TextEditingController _portController;
   late TextEditingController _tokenController;
 
+  /// 本次应用会话启动时的开关值（跨卡片重建保留，用于判断是否待重启生效）
+  static bool? _sessionInitialEnabled;
+
   @override
   void initState() {
     super.initState();
     final sp = widget.settingsProvider;
+    _sessionInitialEnabled ??= sp.localServerEnabled;
     _portController = TextEditingController(text: sp.localServerPort.toString());
     _tokenController = TextEditingController(text: sp.localServerToken);
   }
@@ -3521,6 +3765,38 @@ class _LocalServerCardState extends State<_LocalServerCard> {
               ),
             ],
           ),
+          if (_sessionInitialEnabled != null &&
+              enabled != _sessionInitialEnabled) ...[
+            const SizedBox(height: 10),
+            // 待重启警示条
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: c.statusWarning.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(
+                  color: c.statusWarning.withValues(alpha: 0.35),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    LucideIcons.triangleAlert,
+                    size: 14,
+                    color: c.statusWarning,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      s.localServerToggleRestartHint,
+                      style: TextStyle(fontSize: 12, color: c.textSecondary),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
           if (enabled) ...[
             const SizedBox(height: 14),
             // 端口行

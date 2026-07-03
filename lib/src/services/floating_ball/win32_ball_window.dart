@@ -111,6 +111,22 @@ class Win32BallWindow {
     if (_hwnd != 0) return;
     ensureLayeredWindowClass(_className);
 
+    // 清理僵尸球窗口：热重启后旧 isolate 的窗口仍在（驱动它的 Dart Timer
+    // 已死 → 不可拖动），本 isolate _hwnd==0 保证同类窗口必为僵尸。
+    final zombieClassPtr = _className.toNativeUtf16();
+    try {
+      var zombie = findWindowW(zombieClassPtr, nullptr);
+      var guard = 0;
+      while (zombie != 0 && guard < 8) {
+        logInfo(_tag, 'destroying zombie ball window hwnd=$zombie');
+        if (destroyWindow(zombie) == 0) break;
+        zombie = findWindowW(zombieClassPtr, nullptr);
+        guard++;
+      }
+    } finally {
+      calloc.free(zombieClassPtr);
+    }
+
     final classNamePtr = _className.toNativeUtf16();
     final titlePtr = ''.toNativeUtf16();
     try {

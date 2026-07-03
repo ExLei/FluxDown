@@ -529,6 +529,18 @@ class S {
   String get uiScaleDesc =>
       _t('调整界面整体缩放比例', 'Adjust the overall interface scale');
 
+  String get appIcon => _t('应用图标', 'App Icon');
+  String get appIconDesc => _t(
+    '自定义窗口、任务栏与托盘使用的应用图标',
+    'Customize the icon used by the window, taskbar and tray',
+  );
+  String get appIconDefault => _t('默认', 'Default');
+  String get appIconCustom => _t('自定义', 'Custom');
+  String get appIconChooseImage => _t('选择图片…', 'Choose Image…');
+  String get appIconApplyFailed =>
+      _t('设置应用图标失败', 'Failed to set app icon');
+  String get appIconZoomHint => _t('滚轮缩放', 'Scroll to zoom');
+
   // ─────────────────────────────────────────────
   // 内置主题名称
   // ─────────────────────────────────────────────
@@ -779,6 +791,10 @@ class S {
   String get localServerAddressCopied => _t('RPC 地址已复制', 'RPC URL copied');
   String get localServerRestartHint =>
       _t('修改端口后需重启应用生效', 'Restart the app after changing the port');
+  String get localServerToggleRestartHint => _t(
+    '此更改需重启应用后生效',
+    'Restart the app for this change to take effect',
+  );
   List<String> get searchKeywordsLocalServer => _t(
     'rpc,油猴,脚本,接管,本地,服务,端口,token,密钥,浏览器',
     'rpc,userscript,tampermonkey,capture,local,server,port,token,secret,browser',
@@ -1018,6 +1034,10 @@ class S {
   List<String> get searchKeywordsUiScale =>
       _t('缩放,界面,比例,放大,缩小,DPI', 'scale,zoom,interface,size,DPI').split(',')
         ..addAll(['scale', 'zoom', 'size', 'dpi']);
+  List<String> get searchKeywordsAppIcon =>
+      _t('应用图标,图标,任务栏,托盘,自定义', 'app icon,icon,taskbar,tray,custom')
+          .split(',')
+        ..addAll(['icon', 'logo', 'taskbar', 'tray']);
   List<String> get searchKeywordsSaveDir =>
       _t('保存,目录,路径,文件夹', 'save,directory,path,folder').split(',')
         ..addAll(['save', 'directory', 'path', 'folder']);

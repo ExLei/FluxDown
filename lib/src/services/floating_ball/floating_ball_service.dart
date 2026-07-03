@@ -25,6 +25,7 @@ import '../../models/settings_provider.dart';
 import '../../theme/theme_provider.dart';
 import '../../widgets/quick_download_dialog.dart';
 import '../analytics_service.dart';
+import '../app_icon_service.dart';
 import '../log_service.dart';
 import '../tray_service.dart';
 import 'floating_ball_controller.dart';
@@ -119,8 +120,9 @@ class FloatingBallService {
     }
     _transitioning = true;
     try {
-      // 0. 预解码 logo（幂等；idle 态球心图标）
+      // 0. 预解码 logo（幂等；idle 态球心图标，跟随应用图标自定义）
       await ensureBallLogoLoaded();
+      AppIconService.instance.addListener(_onAppIconChanged);
 
       // 1. 订阅数据层
       _controller = FloatingBallController(downloads: downloads, theme: theme)
@@ -190,6 +192,7 @@ class FloatingBallService {
   void _teardown() {
     _heartbeat?.cancel();
     _heartbeat = null;
+    AppIconService.instance.removeListener(_onAppIconChanged);
     _controller?.removeListener(_onDataChanged);
     _controller?.dispose();
     _controller = null;
@@ -237,6 +240,17 @@ class FloatingBallService {
   void _onDataChanged() {
     if (!_enabled) return;
     unawaited(_renderAndPush());
+  }
+
+  /// 应用图标切换（设置-外观）→ 重载球心 logo 并整体重绘
+  void _onAppIconChanged() {
+    unawaited(_refreshLogo());
+  }
+
+  Future<void> _refreshLogo() async {
+    await ensureBallLogoLoaded();
+    if (!_enabled) return;
+    await _rerenderAll();
   }
 
   Future<void> _rerenderAll() async {

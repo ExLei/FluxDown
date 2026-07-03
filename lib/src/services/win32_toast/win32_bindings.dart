@@ -175,6 +175,12 @@ final getModuleHandleW = _kernel32
       'GetModuleHandleW',
     );
 
+// GetLastError
+typedef _GetLastError_Native = Uint32 Function();
+typedef _GetLastError_Dart = int Function();
+final getLastError = _kernel32
+    .lookupFunction<_GetLastError_Native, _GetLastError_Dart>('GetLastError');
+
 // =============================================================================
 // user32.dll
 // =============================================================================
@@ -188,6 +194,14 @@ final registerClassExW = _user32
     .lookupFunction<_RegisterClassExW_Native, _RegisterClassExW_Dart>(
       'RegisterClassExW',
     );
+
+// FindWindowW
+typedef _FindWindowW_Native =
+    IntPtr Function(Pointer<Utf16> lpClassName, Pointer<Utf16> lpWindowName);
+typedef _FindWindowW_Dart =
+    int Function(Pointer<Utf16> lpClassName, Pointer<Utf16> lpWindowName);
+final findWindowW = _user32
+    .lookupFunction<_FindWindowW_Native, _FindWindowW_Dart>('FindWindowW');
 
 // CreateWindowExW
 typedef _CreateWindowExW_Native =

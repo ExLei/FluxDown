@@ -20,6 +20,7 @@ import 'src/services/floating_ball/floating_ball_service.dart';
 import 'src/services/floating_ball/wayland_degradation_service.dart';
 import 'src/services/hls_quality_service.dart';
 import 'src/services/bt_file_selection_service.dart';
+import 'src/services/app_icon_service.dart';
 import 'src/services/analytics_service.dart';
 import 'src/services/log_service.dart';
 import 'src/services/notification_service.dart';
@@ -186,6 +187,11 @@ Future<void> main(List<String> args) async {
     await TrayService.instance.setIsDark(trayIsDark);
     logInfo('main', 'tray isDark=$trayIsDark (from app theme: $mode)');
   }
+
+  // 恢复用户自定义的应用图标（窗口/任务栏/托盘）。
+  // WM_SETICON 仅对当前进程生效，需每次启动重新应用；默认图标来自 exe 资源，无需处理。
+  await AppIconService.instance.init();
+  logInfo('main', 'app icon service initialized');
 
   logInfo('main', 'initializing Rust runtime...');
   await initializeRust(assignRustSignal);

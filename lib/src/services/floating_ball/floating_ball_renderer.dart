@@ -8,6 +8,7 @@
 /// - macOS/Linux：straight-alpha RGBA（channel pushBitmap）
 library;
 
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -17,6 +18,7 @@ import 'package:flutter/services.dart' show rootBundle;
 import 'package:shadcn_ui/shadcn_ui.dart';
 
 import '../../theme/flux_theme_tokens.dart';
+import '../app_icon_service.dart';
 import '../log_service.dart';
 import '../native_overlay/offscreen_rasterizer.dart';
 
@@ -27,17 +29,38 @@ import '../native_overlay/offscreen_rasterizer.dart';
 /// 已解码的 logo 位图；null = 尚未加载（渲染时回退箭头图标）。
 ui.Image? ballLogoImage;
 
-/// 预解码 logo（幂等）。FloatingBallService.enable() 前 await 一次。
+/// 当前已加载的 logo 来源标识（`asset` 或 `custom#<revision>`），
+/// 用于在应用图标切换后触发重载。
+String? _loadedLogoKey;
+
+/// 预解码 logo（按来源幂等）。FloatingBallService.enable() 前 await 一次；
+/// 应用图标切换后再次调用即重载为新来源。
+///
+/// 来源跟随「设置-外观-应用图标」：自定义图标启用且预览 PNG 存在时用预览
+/// （256px），否则用内置 asset logo。
 Future<void> ensureBallLogoLoaded() async {
-  if (ballLogoImage != null) return;
+  final iconSvc = AppIconService.instance;
+  final customPath = iconSvc.isCustom ? iconSvc.previewPngPath : null;
+  final key = customPath == null
+      ? 'asset'
+      : 'custom#${iconSvc.previewRevision}';
+  if (ballLogoImage != null && _loadedLogoKey == key) return;
   try {
-    final data = await rootBundle.load('assets/logo/fluxdown_logo.png');
+    final Uint8List bytes;
+    if (customPath != null) {
+      bytes = await File(customPath).readAsBytes();
+    } else {
+      final data = await rootBundle.load('assets/logo/fluxdown_logo.png');
+      bytes = data.buffer.asUint8List();
+    }
     final codec = await ui.instantiateImageCodec(
-      data.buffer.asUint8List(),
+      bytes,
       // 按最大 3x DPI 预留解码尺寸，避免上采样发糊
       targetWidth: ((kBallDiameter - 10) * 3).round(),
     );
+    // 旧位图不主动 dispose：在途渲染可能仍引用，交由 GC finalizer 回收
     ballLogoImage = (await codec.getNextFrame()).image;
+    _loadedLogoKey = key;
   } catch (e) {
     logError('BallRenderer', 'logo decode failed, fallback icon', e);
   }

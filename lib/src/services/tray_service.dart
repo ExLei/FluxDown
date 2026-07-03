@@ -27,6 +27,9 @@ class TrayService with TrayListener {
   String? _winTrayLightPath; // 深蓝色箭头 — 适配浅色任务栏
   // 当前有效的深/浅色状态，初始值跟随系统，后续由 setIsDark() 驱动
   bool _isDark = false;
+  // 自定义应用图标覆盖（由 AppIconService 驱动）：非 null 时托盘固定使用
+  // 该 ICO 文件，忽略深/浅色变体
+  String? _customIconPath;
 
   /// 应用退出回调 — 由外部（如 _FluxDownAppState）设置以实现优雅退出。
   /// 回调中应等待待处理通知、销毁托盘、再销毁窗口。
@@ -133,8 +136,10 @@ class TrayService with TrayListener {
   // Windows 深/浅色模式托盘图标切换
   // ─────────────────────────────────────────────
 
-  /// 返回当前 _isDark 对应的 Windows 托盘图标路径
+  /// 返回当前生效的 Windows 托盘图标路径（自定义覆盖优先）
   String _windowsTrayIconPath() {
+    final custom = _customIconPath;
+    if (custom != null) return custom;
     return _isDark ? (_winTrayDarkPath ?? '') : (_winTrayLightPath ?? '');
   }
 
@@ -144,6 +149,7 @@ class TrayService with TrayListener {
     if (!Platform.isWindows) return;
     if (_isDark == isDark) return; // 无变化，跳过
     _isDark = isDark;
+    if (_customIconPath != null) return; // 自定义图标覆盖中，深浅色不影响托盘
     if (!_initialized || _isExiting) return;
     final newPath = _windowsTrayIconPath();
     logInfo(_tag, 'setIsDark($isDark) → $newPath');
@@ -151,6 +157,22 @@ class TrayService with TrayListener {
       await trayManager.setIcon(newPath, isTemplate: false);
     } catch (e, stack) {
       logError(_tag, 'setIsDark: failed to update tray icon', e, stack);
+    }
+  }
+
+  /// 设置或清除自定义托盘图标覆盖（由 AppIconService 调用）。
+  /// [path] 为 null 时恢复深/浅色默认图标。
+  Future<void> setCustomIcon(String? path) async {
+    if (!Platform.isWindows) return;
+    if (_customIconPath == path) return; // 无变化，跳过
+    _customIconPath = path;
+    if (!_initialized || _isExiting) return;
+    final newPath = _windowsTrayIconPath();
+    logInfo(_tag, 'setCustomIcon($path) → $newPath');
+    try {
+      await trayManager.setIcon(newPath, isTemplate: false);
+    } catch (e, stack) {
+      logError(_tag, 'setCustomIcon: failed to update tray icon', e, stack);
     }
   }
 

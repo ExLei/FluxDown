@@ -49,10 +49,17 @@ void ensureLayeredWindowClass(String className) {
 
     final atom = registerClassExW(wndClass);
     if (atom == 0) {
-      throw StateError('RegisterClassExW failed for $className');
+      final err = getLastError();
+      // 1410 = ERROR_CLASS_ALREADY_EXISTS：类表是进程级的，Dart 热重启后
+      // isolate 重建导致守卫集合清空，但 OS 侧类仍在 — 视为已注册继续。
+      if (err != 1410) {
+        throw StateError('RegisterClassExW failed for $className, error=$err');
+      }
+      logInfo(_tag, 'window class already exists (reused): $className');
+    } else {
+      logInfo(_tag, 'window class registered: $className, atom=$atom');
     }
     _registeredClasses.add(className);
-    logInfo(_tag, 'window class registered: $className, atom=$atom');
   } finally {
     calloc.free(wndClass);
     calloc.free(classNamePtr);

@@ -82,6 +82,8 @@ ShadThemeData buildThemeFromTokens(FluxThemeTokens tokens) {
           ),
         ],
       ),
+      primaryToastTheme: _primaryToastTheme(tokens),
+      destructiveToastTheme: _destructiveToastTheme(tokens, colorScheme),
     );
   } else {
     _cachedThemeData = ShadThemeData(
@@ -95,10 +97,82 @@ ShadThemeData buildThemeFromTokens(FluxThemeTokens tokens) {
       outlineButtonTheme: ShadButtonTheme(
         hoverBackgroundColor: tokens.elementHover,
       ),
+      primaryToastTheme: _primaryToastTheme(tokens),
+      destructiveToastTheme: _destructiveToastTheme(tokens, colorScheme),
     );
   }
 
   return _cachedThemeData!;
+}
+
+/// Toast 通用布局（紧凑卡片，统一宽度，右下角堆叠美观）
+const _toastPadding = EdgeInsets.symmetric(horizontal: 16, vertical: 12);
+const _toastConstraints = BoxConstraints(minWidth: 320, maxWidth: 380);
+final _toastRadius = BorderRadius.circular(10);
+
+List<BoxShadow> _toastShadows(FluxThemeTokens tokens) => [
+  BoxShadow(
+    color: tokens.shadow.withValues(alpha: 0.16),
+    blurRadius: 16,
+    offset: const Offset(0, 6),
+  ),
+  BoxShadow(
+    color: tokens.shadow.withValues(alpha: 0.08),
+    blurRadius: 4,
+    offset: const Offset(0, 2),
+  ),
+];
+
+/// 普通 toast — 悬浮卡片底色 + 紧凑排版
+ShadToastTheme _primaryToastTheme(FluxThemeTokens tokens) {
+  return ShadToastTheme(
+    backgroundColor: tokens.dialogBackground,
+    border: ShadBorder.all(color: tokens.border, width: 1),
+    radius: _toastRadius,
+    shadows: _toastShadows(tokens),
+    padding: _toastPadding,
+    constraints: _toastConstraints,
+    titleStyle: TextStyle(
+      fontFamily: _fontFamily,
+      fontSize: 13,
+      fontWeight: FontWeight.w500,
+      color: tokens.textPrimary,
+    ),
+    descriptionStyle: TextStyle(
+      fontFamily: _fontFamily,
+      fontSize: 12,
+      color: tokens.textSecondary,
+    ),
+  );
+}
+
+/// 错误 toast — 保留 destructive 底色，排版与普通 toast 一致
+ShadToastTheme _destructiveToastTheme(
+  FluxThemeTokens tokens,
+  ShadColorScheme colorScheme,
+) {
+  return ShadToastTheme(
+    backgroundColor: colorScheme.destructive,
+    border: ShadBorder.all(
+      color: colorScheme.destructive.withValues(alpha: 0.5),
+      width: 1,
+    ),
+    radius: _toastRadius,
+    shadows: _toastShadows(tokens),
+    padding: _toastPadding,
+    constraints: _toastConstraints,
+    titleStyle: TextStyle(
+      fontFamily: _fontFamily,
+      fontSize: 13,
+      fontWeight: FontWeight.w500,
+      color: colorScheme.destructiveForeground,
+    ),
+    descriptionStyle: TextStyle(
+      fontFamily: _fontFamily,
+      fontSize: 12,
+      color: colorScheme.destructiveForeground.withValues(alpha: 0.9),
+    ),
+  );
 }
 
 /// 从 Token 构建 ShadColorScheme
