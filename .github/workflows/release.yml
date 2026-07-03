@@ -422,7 +422,10 @@ jobs:
           echo "::notice::Chrome extension v${VERSION} submitted to Web Store review"
 
       # ── Edge Add-ons 商店自动发布（需 EDGE_CLIENT_ID / EDGE_API_KEY / EDGE_PRODUCT_ID）──
-      # Edge 复用 Chrome MV3 zip（同为 MV3）。API v1.1：ApiKey 鉴权。
+      # Edge 复用 Chrome MV3 构建（同为 MV3），但 Edge 商店拒绝 manifest 含 key 字段的包
+      # （PackageValidationError: "The manifest shouldn't contain the key field"），
+      # 而 Chrome 侧载固定扩展 ID 依赖 key（见 fluxDown/wxt.config.ts），
+      # 因此上传前解包剔除 key 重新打一个 Edge 专用 zip。API v1.1：ApiKey 鉴权。
       # ⚠️  API key 每 72 天过期，过期后需在 Partner Center → Publish API 重新生成并更新 EDGE_API_KEY secret。
       - name: Publish Edge extension to Edge Add-ons
         continue-on-error: true
@@ -433,9 +436,21 @@ jobs:
           VERSION: ${{ steps.version.outputs.VERSION }}
         run: |
           set -uo pipefail
-          ZIP_FILE="build/extension/FluxDown-${VERSION}-chrome.zip"
+          CHROME_ZIP="build/extension/FluxDown-${VERSION}-chrome.zip"
           BASE="https://api.addons.microsoftedge.microsoft.com/v1/products/${EDGE_PRODUCT_ID}"
           AUTH=(-H "Authorization: ApiKey ${EDGE_API_KEY}" -H "X-ClientID: ${EDGE_CLIENT_ID}")
+
+          # 0) 重打 Edge 专用包：剔除 manifest.json 中的 key 字段
+          PKG_DIR=$(mktemp -d)
+          unzip -q "$CHROME_ZIP" -d "$PKG_DIR"
+          MANIFEST=$(find "$PKG_DIR" -maxdepth 2 -name manifest.json | head -1)
+          if [ -z "$MANIFEST" ]; then
+            echo "::error::manifest.json not found in ${CHROME_ZIP}"; exit 1
+          fi
+          python3 -c "import json,sys;p=sys.argv[1];m=json.load(open(p));m.pop('key',None);open(p,'w').write(json.dumps(m,indent=2))" "$MANIFEST"
+          ZIP_FILE="$PWD/build/extension/FluxDown-${VERSION}-edge.zip"
+          (cd "$PKG_DIR" && zip -qr "$ZIP_FILE" .)
+          echo "Edge package rebuilt without manifest key: $ZIP_FILE"
 
           # 1) 上传 zip 包到 draft（202 + Location 头携带 operationID）
           echo "Uploading ${ZIP_FILE} to Edge Add-ons..."
