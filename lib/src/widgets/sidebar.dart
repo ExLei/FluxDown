@@ -114,57 +114,85 @@ class _SidebarState extends State<Sidebar> {
       child: Container(
         height: 40,
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        alignment: Alignment.centerLeft,
-        // 跟随「设置-外观-应用图标」切换：内置闪电/自定义图标启用时显示其预览
-        child: ListenableBuilder(
-          listenable: AppIconService.instance,
-          builder: (context, _) {
-            final svc = AppIconService.instance;
-            if (svc.isBolt) {
-              return ClipRRect(
-                borderRadius: BorderRadius.circular(5),
-                child: Image.asset(
-                  AppIconService.builtinBoltAsset,
-                  width: 22,
-                  height: 22,
-                  filterQuality: FilterQuality.medium,
-                ),
-              );
-            }
-            final customPreview = svc.isCustom ? svc.previewPngPath : null;
-            if (customPreview != null) {
-              return ClipRRect(
-                borderRadius: BorderRadius.circular(5),
-                child: Image(
-                  key: ValueKey(svc.previewRevision),
-                  image: FileImage(File(customPreview)),
-                  width: 22,
-                  height: 22,
-                  filterQuality: FilterQuality.medium,
-                  gaplessPlayback: true,
-                ),
-              );
-            }
-            // 暗色主题：蓝色箭头 + 透明背景（无白色圆角矩形，避免在深色侧边栏上显得突兀）
-            // 亮色主题：完整圆角图标（白底 + 蓝色箭头）
-            if (c.tokens.appearance == Brightness.dark) {
-              return Image.asset(
-                'assets/logo/logo_on_dark.png',
-                width: 22,
-                height: 22,
-                filterQuality: FilterQuality.medium,
-              );
-            }
-            return ClipRRect(
-              borderRadius: BorderRadius.circular(5),
-              child: Image.asset(
-                'assets/logo/fluxdown_logo.png',
-                width: 22,
-                height: 22,
-                filterQuality: FilterQuality.medium,
+        child: Row(
+          children: [
+            // 跟随「设置-外观-应用图标」切换：内置闪电/自定义图标启用时显示其预览
+            ListenableBuilder(
+              listenable: AppIconService.instance,
+              builder: (context, _) {
+                final svc = AppIconService.instance;
+                if (svc.isBolt) {
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(5),
+                    child: Image.asset(
+                      AppIconService.builtinBoltAsset,
+                      width: 22,
+                      height: 22,
+                      filterQuality: FilterQuality.medium,
+                    ),
+                  );
+                }
+                final customPreview = svc.isCustom ? svc.previewPngPath : null;
+                if (customPreview != null) {
+                  return ClipRRect(
+                    borderRadius: BorderRadius.circular(5),
+                    child: Image(
+                      key: ValueKey(svc.previewRevision),
+                      image: FileImage(File(customPreview)),
+                      width: 22,
+                      height: 22,
+                      filterQuality: FilterQuality.medium,
+                      gaplessPlayback: true,
+                    ),
+                  );
+                }
+                // 暗色主题：蓝色箭头 + 透明背景（无白色圆角矩形，避免在深色侧边栏上显得突兀）
+                // 亮色主题：完整圆角图标（白底 + 蓝色箭头）
+                if (c.tokens.appearance == Brightness.dark) {
+                  return Image.asset(
+                    'assets/logo/logo_on_dark.png',
+                    width: 22,
+                    height: 22,
+                    filterQuality: FilterQuality.medium,
+                  );
+                }
+                return ClipRRect(
+                  borderRadius: BorderRadius.circular(5),
+                  child: Image.asset(
+                    'assets/logo/fluxdown_logo.png',
+                    width: 22,
+                    height: 22,
+                    filterQuality: FilterQuality.medium,
+                  ),
+                );
+              },
+            ),
+            const SizedBox(width: 9),
+            Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: 'Flux',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: c.accent,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                  TextSpan(
+                    text: 'Down',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: c.textPrimary,
+                      letterSpacing: 0.3,
+                    ),
+                  ),
+                ],
               ),
-            );
-          },
+            ),
+          ],
         ),
       ),
     );
