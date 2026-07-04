@@ -25,6 +25,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Diagnostics_ToolHelp",
 ] }
 
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1.31"
+
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 # tar.gz extraction for Linux/macOS portable builds (pure-Rust backend, no system libs needed).
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
