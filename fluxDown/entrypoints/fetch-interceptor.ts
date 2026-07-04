@@ -35,6 +35,8 @@ export default defineUnlistedScript(() => {
       lower.startsWith("audio/") ||
       lower === "application/vnd.apple.mpegurl" ||
       lower === "application/x-mpegurl" ||
+      lower === "application/mpegurl" ||
+      lower === "application/octet-stream-m3u8" ||
       lower === "application/dash+xml"
     );
   }

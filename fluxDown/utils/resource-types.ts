@@ -200,7 +200,7 @@ const EXTENSION_CATEGORIES: Record<ResourceType, string[]> = {
     "flatpak",
   ],
   torrent: ["torrent"],
-  stream: ["m3u8", "mpd"],
+  stream: ["m3u8", "m3u", "mpd"],
   subtitle: ["vtt", "srt", "ass", "ssa", "sub", "idx", "sup", "lrc"],
   magnet: [],
   other: [],
@@ -239,6 +239,8 @@ const MIME_CATEGORIES: Record<string, ResourceType> = {
   // 流媒体清单
   "application/vnd.apple.mpegurl": "stream",
   "application/x-mpegurl": "stream",
+  "application/mpegurl": "stream",
+  "application/octet-stream-m3u8": "stream",
   "application/dash+xml": "stream",
   // 文档
   "application/pdf": "document",
@@ -649,7 +651,12 @@ export function isSniffableContentType(contentType: string): boolean {
 
   if (ct.startsWith("video/") || ct.startsWith("audio/")) return true;
 
-  if (ct === "application/vnd.apple.mpegurl" || ct === "application/x-mpegurl")
+  if (
+    ct === "application/vnd.apple.mpegurl" ||
+    ct === "application/x-mpegurl" ||
+    ct === "application/mpegurl" ||
+    ct === "application/octet-stream-m3u8"
+  )
     return true;
   if (ct === "application/dash+xml") return true;
   if (
@@ -684,6 +691,22 @@ export function isSniffableContentType(contentType: string): boolean {
   if (ct.startsWith("application/vnd.ms-")) return true;
 
   return false;
+}
+
+/**
+ * 判断 URL 扩展名是否指向可嗅探的媒体/可下载资源。
+ *
+ * 独立于 Content-Type 的判定路径：当服务器对媒体文件返回不规范的
+ * Content-Type（text/plain、binary/octet-stream、空值、错误的 text/html）时，
+ * 靠 URL 扩展名兜底命中。对标 cat-catch 的 CheckExtension 判定路径。
+ *
+ * 排除 image/other/magnet：媒体嗅探器不收图片（与 isSniffableContentType 一致，
+ * 图片噪音大），magnet/other 无扩展名意义。下游 isWorthShowing 仍做分片/小文件过滤。
+ */
+export function isSniffableExtension(url: string): boolean {
+  const type = EXT_TO_TYPE.get(extractExtension(url));
+  if (!type) return false;
+  return type !== "image" && type !== "other" && type !== "magnet";
 }
 
 // ===== 可信度计算 =====

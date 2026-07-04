@@ -44,6 +44,7 @@ import type { DownloadItemInfo } from "@/utils/settings";
 import { initI18n, t } from "@/utils/i18n";
 import {
   isSniffableContentType,
+  isSniffableExtension,
   classifyResource,
   extractFilenameFromUrl,
 } from "@/utils/resource-types";
@@ -742,7 +743,8 @@ export default defineBackground(() => {
           .toLowerCase()
           .startsWith("attachment");
 
-        if (!isSniffable && !isAttachment) return;
+        if (!isSniffable && !isAttachment && !isSniffableExtension(details.url))
+          return;
 
         // 提取文件名
         let filename = "";
