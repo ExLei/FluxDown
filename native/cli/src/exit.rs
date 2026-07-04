@@ -10,6 +10,7 @@
 //!
 //! assert_eq!(ExitCode::Success as i32, 0);
 //! assert_eq!(ExitCode::Unknown as i32, 1);
+//! assert_eq!(ExitCode::Unfinished as i32, 7);
 //! ```
 
 /// aria2 风格退出码子集（只保留 CLI 实际会返回的类别）。
@@ -30,6 +31,8 @@ pub enum ExitCode {
     Auth = 24,
     /// 参数非法（400 / 用户输入错误）。
     BadRequest = 32,
+    /// 用户中断（Ctrl-C）时仍有未完成下载（对齐 aria2 code 7）。
+    Unfinished = 7,
 }
 
 impl ExitCode {

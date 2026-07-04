@@ -10,6 +10,8 @@ use fluxdown_cli::config::{CliConfig, ConfigError};
 use fluxdown_cli::exit::ExitCode;
 use fluxdown_cli::format::{human_bytes, percent, status_name, truncate};
 
+mod local;
+
 /// 默认服务基址（本机 API 服务，仅监听 127.0.0.1）。
 const DEFAULT_URL: &str = "http://127.0.0.1:17800";
 
@@ -107,6 +109,10 @@ struct AddArgs {
     /// Checksum 校验，格式 `algo=hexhash`。
     #[arg(long)]
     checksum: Option<String>,
+    /// 不连接运行中的服务，在本进程内嵌下载引擎独立完成下载
+    /// （一次性阻塞至完成/失败；Ctrl-C 中断为暂停并退出，退出码 7）。
+    #[arg(long)]
+    local: bool,
 }
 
 #[derive(Debug, Args)]
@@ -224,6 +230,20 @@ async fn run(cli: Cli) -> i32 {
             Err(e) => {
                 eprintln!("fluxdown: {e}");
                 e.exit().code()
+            }
+        };
+    }
+
+    // add --local：内嵌引擎独立下载，在构造 ApiClient 之前分流（不需要 base/token）。
+    if matches!(&cli.command, Command::Add(a) if a.local) {
+        let Command::Add(a) = cli.command else {
+            unreachable!("guarded by matches! above")
+        };
+        return match local::run_add_local(*a, json).await {
+            Ok(()) => ExitCode::Success.code(),
+            Err(e) => {
+                eprintln!("fluxdown: {e}");
+                e.exit.code()
             }
         };
     }

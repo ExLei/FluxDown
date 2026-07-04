@@ -1199,6 +1199,7 @@ dependencies = [
  "clap",
  "directories",
  "fluxdown_api",
+ "fluxdown_engine",
  "reqwest",
  "serde",
  "serde_json",

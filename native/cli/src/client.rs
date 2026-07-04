@@ -23,7 +23,19 @@ pub struct ClientError {
 }
 
 impl ClientError {
-    fn new(message: impl Into<String>, exit: ExitCode) -> Self {
+    /// 构造一个携带 aria2 退出码的客户端错误。
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fluxdown_cli::client::ClientError;
+    /// use fluxdown_cli::exit::ExitCode;
+    ///
+    /// let e = ClientError::new("boom", ExitCode::Unknown);
+    /// assert_eq!(e.message, "boom");
+    /// assert_eq!(e.exit, ExitCode::Unknown);
+    /// ```
+    pub fn new(message: impl Into<String>, exit: ExitCode) -> Self {
         Self {
             message: message.into(),
             exit,
