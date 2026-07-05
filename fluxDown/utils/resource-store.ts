@@ -32,6 +32,25 @@ const CONFIDENCE_ORDER: Record<ConfidenceLevel, number> = {
   low: 1,
 };
 
+/** 每 tab 资源硬上限：防深扫 / 长会话 SPA 累积把内存与排序成本推高。 */
+const MAX_RESOURCES_PER_TAB = 500;
+
+/** 达上限时淘汰一条「最低置信度、最旧」的资源，为新资源腾位（纯防御，不改去重语义）。 */
+function evictLowest(resourceMap: Map<string, DetectedResource>): void {
+  let victimKey: string | undefined;
+  let victimScore = Infinity;
+  let victimAt = Infinity;
+  for (const [key, r] of resourceMap) {
+    const score = CONFIDENCE_ORDER[r.confidence];
+    if (score < victimScore || (score === victimScore && r.detectedAt < victimAt)) {
+      victimScore = score;
+      victimAt = r.detectedAt;
+      victimKey = key;
+    }
+  }
+  if (victimKey !== undefined) resourceMap.delete(victimKey);
+}
+
 // ===== 公开 API =====
 
 /**
@@ -97,6 +116,9 @@ export function addResources(
     };
 
     if (isWorthShowing(resource)) {
+      if (resourceMap.size >= MAX_RESOURCES_PER_TAB) {
+        evictLowest(resourceMap);
+      }
       resourceMap.set(id, resource);
       newCount++;
     }

@@ -6,6 +6,16 @@
  *
  * 与 Content Script（Isolated World）通过 CustomEvent 通信。
  */
+
+// cat-catch(GPL-3.0) 嗅探思路的复用：JSON 内嵌媒体 URL 深扫见 utils/media-sniff.ts 归属说明。
+// 本文件新增的响应体流式部分读取为 FluxDown 自研，非 cat-catch 代码移植。
+import {
+  isHttpUrl,
+  isSkippableCt,
+  sniffManifestMagic,
+  looksLikeJson,
+  scanForMediaUrls,
+} from "@/utils/media-sniff";
 export default defineUnlistedScript(() => {
   // 防止重复注入
   if ((window as any).__fluxdown_interceptor__) return;
@@ -116,6 +126,75 @@ export default defineUnlistedScript(() => {
     );
   }
 
+  // ===== 响应体清单 / JSON 深扫（cat-catch 思路增强；纯函数见 utils/media-sniff.ts）=====
+  // 门槛：仅对「非媒体 CT + 非流 URL + http + 非可跳过 CT + 体积可控」的响应读体，
+  // 避免大文件 / 流式响应被 clone-read 强制整体缓冲拖爆内存。
+  const MAX_SNIFF_CL = 2 * 1024 * 1024; // Content-Length 门槛：>2MB 不读
+  const MAX_SNIFF_READ = 512 * 1024; // 累积读上限：清单 / JSON API 均远小于此
+
+  /** 对已取到的响应体文本做清单前缀判定 + JSON 内嵌媒体 URL 深扫，命中即上报。 */
+  function sniffTextForMedia(
+    text: string,
+    url: string,
+    ct: string,
+    type: "fetch-detected" | "xhr-detected",
+  ): void {
+    try {
+      if (!text) return;
+      const magic = sniffManifestMagic(text.slice(0, 512));
+      if (magic) {
+        notify(type, url, magic);
+        return;
+      }
+      if (text.length <= MAX_SNIFF_CL && looksLikeJson(ct, text)) {
+        // 主世界原生 JSON.parse（未打补丁）；深扫结果按内层绝对 URL 上报
+        const obj = JSON.parse(text);
+        for (const mediaUrl of scanForMediaUrls(obj, url)) {
+          notify(type, mediaUrl);
+        }
+      }
+    } catch {
+      // 嗅探异常绝不冒泡
+    }
+  }
+
+  /** 有界累积读取响应体（clone），最多 8 次 read 或 512KB，随后判定；fire-and-forget。 */
+  async function readBodyAndSniff(
+    response: Response,
+    url: string,
+    ct: string,
+  ): Promise<void> {
+    const body = response.body;
+    if (!body) return;
+    const reader = body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    try {
+      for (let i = 0; i < 8 && total < MAX_SNIFF_READ; i++) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          chunks.push(value);
+          total += value.length;
+        }
+      }
+    } finally {
+      try {
+        await reader.cancel();
+      } catch {
+        /* 取消失败无妨 */
+      }
+    }
+    const buf = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) {
+      buf.set(c, off);
+      off += c.length;
+    }
+    const text = new TextDecoder().decode(buf);
+    sniffTextForMedia(text, url, ct, "fetch-detected");
+  }
+
   // ===== 拦截 Fetch API =====
 
   const originalFetch = window.fetch;
@@ -134,8 +213,12 @@ export default defineUnlistedScript(() => {
     }
 
     // 请求阶段：检测流媒体 URL
-    if (url && isStreamingUrl(url)) {
-      notify("fetch-detected", url, classifyStreamUrl(url));
+    try {
+      if (url && isStreamingUrl(url)) {
+        notify("fetch-detected", url, classifyStreamUrl(url));
+      }
+    } catch {
+      // 嗅探绝不打断页面请求（#329 #337）
     }
 
     // 调用原始 fetch，检查响应
@@ -156,6 +239,17 @@ export default defineUnlistedScript(() => {
         // 检查响应 URL 是否是流媒体（可能是重定向后的 URL）
         if (finalUrl && finalUrl !== url && isStreamingUrl(finalUrl)) {
           notify("fetch-detected", finalUrl, ct || classifyStreamUrl(finalUrl));
+        }
+
+        // 响应体清单 / JSON 深扫：覆盖「通用 CT + 非 .m3u8 URL」的清单与 JSON 内嵌媒体 URL
+        if (
+          !isMediaContentType(ct) &&
+          !isStreamingUrl(finalUrl) &&
+          isHttpUrl(finalUrl) &&
+          !isSkippableCt(ct) &&
+          (!cl || parseInt(cl, 10) <= MAX_SNIFF_CL)
+        ) {
+          readBodyAndSniff(response.clone(), finalUrl, ct).catch(() => {});
         }
 
         // 拦截一次性 CDN 下载 URL（如蓝奏云 /ajaxm.php）
@@ -229,6 +323,31 @@ export default defineUnlistedScript(() => {
             responseUrl,
             ct || classifyStreamUrl(responseUrl),
           );
+        }
+
+        // 响应体清单 / JSON 深扫（XHR）
+        if (
+          !isMediaContentType(ct) &&
+          !isStreamingUrl(responseUrl) &&
+          isHttpUrl(responseUrl) &&
+          !isSkippableCt(ct)
+        ) {
+          const rt = this.responseType;
+          if (rt === "" || rt === "text") {
+            sniffTextForMedia(this.responseText, responseUrl, ct, "xhr-detected");
+          } else if (
+            rt === "json" &&
+            this.response &&
+            typeof this.response === "object"
+          ) {
+            for (const mediaUrl of scanForMediaUrls(this.response, responseUrl)) {
+              notify("xhr-detected", mediaUrl);
+            }
+          } else if (rt === "arraybuffer" && this.response instanceof ArrayBuffer) {
+            const prefix = new Uint8Array(this.response).subarray(0, 512);
+            const magic = sniffManifestMagic(new TextDecoder().decode(prefix));
+            if (magic) notify("xhr-detected", responseUrl, magic);
+          }
         }
 
         // 拦截一次性 CDN 下载 URL（如蓝奏云 /ajaxm.php）

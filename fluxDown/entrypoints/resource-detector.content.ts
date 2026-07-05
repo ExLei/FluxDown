@@ -87,7 +87,11 @@ export default defineContentScript({
         | undefined;
       if (!detail || !detail.url) return;
 
-      const mappedType = mapFetchEventType(detail.type, detail.contentType);
+      const mappedType = mapFetchEventType(
+        detail.type,
+        detail.contentType,
+        detail.url,
+      );
 
       // MSE is a page-level capability signal (URL = page URL), not a downloadable resource
       if (detail.type === "mse-detected") return;
@@ -592,6 +596,7 @@ export default defineContentScript({
     function mapFetchEventType(
       type: string,
       contentType?: string,
+      url?: string,
     ): ResourceType {
       if (type === "hls-manifest" || type === "dash-manifest") return "stream";
       // Also classify by contentType for fetch-detected events that carry stream info
@@ -603,6 +608,12 @@ export default defineContentScript({
       if (contentType) {
         const byMime = classifyByMime(contentType);
         if (byMime !== "other") return byMime;
+      }
+      // 深扫命中的裸媒体 URL（无 contentType）按 URL 扩展名回退分类（mp4/mp3/m3u8/zip 等），
+      // 避免落入 other → computeConfidence 给 low。见集成计划组 3.2。
+      if (url) {
+        const byUrlExt = classifyByUrlExtension(url);
+        if (byUrlExt !== "other") return byUrlExt;
       }
       return "other";
     }
