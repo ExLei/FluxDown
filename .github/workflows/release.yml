@@ -2044,8 +2044,8 @@ jobs:
           ARM_ZIP="FluxDown-${VERSION}-windows-arm64-portable.zip"
           curl -fsSL -o x64.zip "${BASE}/${X64_ZIP}"
           curl -fsSL -o arm.zip "${BASE}/${ARM_ZIP}"
-          X64_HASH=$(sha256sum x64.zip | awk '{print toupper($1)}')
-          ARM_HASH=$(sha256sum arm.zip | awk '{print toupper($1)}')
+          X64_HASH=$(sha256sum x64.zip | awk '{print $1}')
+          ARM_HASH=$(sha256sum arm.zip | awk '{print $1}')
           rm -f x64.zip arm.zip
           python3 - <<PY
           import json
