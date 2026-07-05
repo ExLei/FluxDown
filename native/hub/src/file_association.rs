@@ -219,8 +219,208 @@ mod inner {
     }
 }
 
-// Non-Linux, non-Windows stubs.
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+// macOS implementation — uses Launch Services to query / set the default
+// handler for the `.torrent` UTI (`org.bittorrent.torrent`, declared in
+// `macos/Runner/Info.plist` via CFBundleDocumentTypes + UTImportedTypeDeclarations).
+#[cfg(target_os = "macos")]
+mod inner {
+    use crate::logger::log_info;
+    use std::ffi::{CString, c_char, c_void};
+    use std::io;
+
+    /// The `.torrent` uniform type identifier declared in Info.plist.
+    const TORRENT_UTI: &str = "org.bittorrent.torrent";
+    /// `kLSRolesAll` — match any role (viewer/editor/shell).
+    const LS_ROLES_ALL: u32 = 0xFFFF_FFFF;
+    /// `kCFStringEncodingUTF8`.
+    const CF_ENCODING_UTF8: u32 = 0x0800_0100;
+
+    type CFStringRef = *const c_void;
+    type CFBundleRef = *const c_void;
+    type CFAllocatorRef = *const c_void;
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFStringCreateWithCString(
+            alloc: CFAllocatorRef,
+            c_str: *const c_char,
+            encoding: u32,
+        ) -> CFStringRef;
+        fn CFStringGetCStringPtr(the_string: CFStringRef, encoding: u32) -> *const c_char;
+        fn CFStringGetCString(
+            the_string: CFStringRef,
+            buffer: *mut c_char,
+            buffer_size: isize,
+            encoding: u32,
+        ) -> u8;
+        fn CFRelease(cf: *const c_void);
+        fn CFBundleGetMainBundle() -> CFBundleRef;
+        fn CFBundleGetIdentifier(bundle: CFBundleRef) -> CFStringRef;
+    }
+
+    #[link(name = "CoreServices", kind = "framework")]
+    unsafe extern "C" {
+        fn LSCopyDefaultRoleHandlerForContentType(
+            content_type: CFStringRef,
+            role: u32,
+        ) -> CFStringRef;
+        fn LSSetDefaultRoleHandlerForContentType(
+            content_type: CFStringRef,
+            role: u32,
+            handler_bundle_id: CFStringRef,
+        ) -> i32;
+    }
+
+    /// RAII guard that releases a Core Foundation reference on drop.
+    ///
+    /// Only wraps references we own (returned from `Create`/`Copy` functions).
+    /// A null pointer is treated as "nothing to release".
+    struct CfOwned(CFStringRef);
+
+    impl Drop for CfOwned {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `self.0` is a non-null CF reference we own (obtained
+                // from a Create/Copy call), released exactly once here.
+                unsafe { CFRelease(self.0) };
+            }
+        }
+    }
+
+    /// Create an owned `CFString` from a Rust `&str`.
+    fn cf_string(s: &str) -> Result<CfOwned, io::Error> {
+        let c = CString::new(s).map_err(|_| io::Error::other("string contains interior NUL"))?;
+        // SAFETY: `c` is a valid NUL-terminated C string that outlives the call;
+        // the default allocator (null) copies the bytes into the new CFString.
+        let cf = unsafe { CFStringCreateWithCString(std::ptr::null(), c.as_ptr(), CF_ENCODING_UTF8) };
+        if cf.is_null() {
+            return Err(io::Error::other("CFStringCreateWithCString failed"));
+        }
+        Ok(CfOwned(cf))
+    }
+
+    /// Convert a borrowed (non-owned) `CFStringRef` to a Rust `String`.
+    fn cf_to_string(cf: CFStringRef) -> Option<String> {
+        if cf.is_null() {
+            return None;
+        }
+        // Fast path: some CFStrings expose their UTF-8 buffer directly.
+        // SAFETY: `cf` is a valid CFStringRef; the returned pointer, if
+        // non-null, is owned by `cf` and valid for the lifetime of `cf`.
+        let ptr = unsafe { CFStringGetCStringPtr(cf, CF_ENCODING_UTF8) };
+        if !ptr.is_null() {
+            // SAFETY: `ptr` is a valid NUL-terminated UTF-8 buffer owned by `cf`.
+            return unsafe { std::ffi::CStr::from_ptr(ptr) }
+                .to_str()
+                .ok()
+                .map(str::to_owned);
+        }
+        // Slow path: copy into a local buffer (bundle ids are short).
+        let mut buf = [0_i8; 512];
+        // SAFETY: `buf` is a valid writable buffer of `buf.len()` bytes; the
+        // function NUL-terminates within that bound on success. Returns a CF
+        // `Boolean` (u8): non-zero means the whole string was written.
+        let ok = unsafe {
+            CFStringGetCString(
+                cf,
+                buf.as_mut_ptr().cast::<c_char>(),
+                buf.len() as isize,
+                CF_ENCODING_UTF8,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        // SAFETY: on success the buffer holds a NUL-terminated C string.
+        unsafe { std::ffi::CStr::from_ptr(buf.as_ptr().cast::<c_char>()) }
+            .to_str()
+            .ok()
+            .map(str::to_owned)
+    }
+
+    /// Return this app's bundle identifier (e.g. `dev.zerx.fluxdown`).
+    fn main_bundle_id() -> Option<String> {
+        // SAFETY: `CFBundleGetMainBundle` returns a borrowed (non-owned) ref or
+        // null; `CFBundleGetIdentifier` likewise returns a borrowed ref — neither
+        // is released here.
+        let id = unsafe {
+            let bundle = CFBundleGetMainBundle();
+            if bundle.is_null() {
+                return None;
+            }
+            CFBundleGetIdentifier(bundle)
+        };
+        cf_to_string(id)
+    }
+
+    /// Check whether `.torrent` files are currently associated with FluxDown.
+    ///
+    /// Queries the default role handler for the torrent UTI and compares its
+    /// bundle id (case-insensitively) with this app's bundle id.
+    pub fn is_associated() -> bool {
+        let Ok(uti) = cf_string(TORRENT_UTI) else {
+            return false;
+        };
+        // SAFETY: `uti.0` is a valid CFStringRef; the returned handler ref is
+        // owned by us and released via the `CfOwned` guard below.
+        let handler = CfOwned(unsafe { LSCopyDefaultRoleHandlerForContentType(uti.0, LS_ROLES_ALL) });
+        let Some(handler_id) = cf_to_string(handler.0) else {
+            return false;
+        };
+        match main_bundle_id() {
+            Some(mine) => handler_id.eq_ignore_ascii_case(&mine),
+            None => false,
+        }
+    }
+
+    /// Register FluxDown as the default handler for `.torrent` files.
+    ///
+    /// The app must already be registered with Launch Services (which happens
+    /// automatically the first time the bundle — declaring the UTI in
+    /// Info.plist — is scanned or launched by the system).
+    pub fn associate() -> Result<(), io::Error> {
+        let bundle_id =
+            main_bundle_id().ok_or_else(|| io::Error::other("main bundle id unavailable"))?;
+        let uti = cf_string(TORRENT_UTI)?;
+        let id = cf_string(&bundle_id)?;
+        // SAFETY: both `uti.0` and `id.0` are valid CFStringRefs alive for the
+        // duration of the call; the function does not take ownership of them.
+        let status = unsafe { LSSetDefaultRoleHandlerForContentType(uti.0, LS_ROLES_ALL, id.0) };
+        if status != 0 {
+            return Err(io::Error::other(format!(
+                "LSSetDefaultRoleHandlerForContentType failed (OSStatus={status})"
+            )));
+        }
+        log_info!("[file_assoc] associated .torrent with FluxDown (bundle={bundle_id})");
+        Ok(())
+    }
+
+    /// Remove FluxDown as the default handler for `.torrent` files.
+    ///
+    /// Launch Services has no "unset" primitive; setting the handler to an empty
+    /// bundle id hands the type back to the system default. Only acts if we
+    /// currently own the association (don't clobber another app's choice).
+    pub fn disassociate() -> Result<(), io::Error> {
+        if !is_associated() {
+            log_info!("[file_assoc] not associated to FluxDown, skipping removal");
+            return Ok(());
+        }
+        let uti = cf_string(TORRENT_UTI)?;
+        let empty = cf_string("")?;
+        // SAFETY: `uti.0` and `empty.0` are valid CFStringRefs alive for the call.
+        let status = unsafe { LSSetDefaultRoleHandlerForContentType(uti.0, LS_ROLES_ALL, empty.0) };
+        if status != 0 {
+            return Err(io::Error::other(format!(
+                "LSSetDefaultRoleHandlerForContentType (clear) failed (OSStatus={status})"
+            )));
+        }
+        log_info!("[file_assoc] removed .torrent association");
+        Ok(())
+    }
+}
+
+// Fallback stubs for platforms without a native implementation.
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
 mod inner {
     use std::io;
 
