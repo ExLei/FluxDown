@@ -3,7 +3,7 @@ title: 安装
 description: 在 Windows、macOS 或 Linux 上安装 FluxDown,完成首次启动配置。
 section: getting-started
 order: 1
-sourceHash: "51a879734941"
+sourceHash: "a1a13e28f12b"
 ---
 
 FluxDown 为 Windows、macOS、Linux 三大平台提供完整的原生构建,每个安装包内置相同的 Rust 下载引擎与相同的界面——没有"精简版",也不需要注册账号。
@@ -24,6 +24,26 @@ FluxDown 为 Windows、macOS、Linux 三大平台提供完整的原生构建,每
 - **便携版** —— `FluxDown-<版本号>-windows-<架构>-portable.zip`。解压到任意目录后运行 `flux_down.exe` 即可,除首次启动时你主动选择的项目外,不会在解压目录之外写入任何内容。
 
 安装包未做代码签名,首次运行时 Windows SmartScreen 可能提示"未知发布者"。点击**更多信息 → 仍要运行**即可继续。
+
+### Scoop
+
+如果你使用 [Scoop](https://scoop.sh) 包管理器,可从任一源一条命令安装 FluxDown:
+
+- **官方源**(社区维护的 `extras`):
+
+  ```powershell
+  scoop bucket add extras
+  scoop install fluxdown
+  ```
+
+- **自托管源**(直接来自本仓库,始终为最新发布版):
+
+  ```powershell
+  scoop bucket add fluxdown https://github.com/zerx-lab/FluxDown
+  scoop install fluxdown/fluxdown
+  ```
+
+两种方式均安装便携版,并在升级时保留你的 `settings.json`。随时用 `scoop update fluxdown` 更新。
 
 ## macOS
 

@@ -322,6 +322,15 @@ const zhCN: Messages = {
     "启动后访问 http://localhost:17800，管理 token 在首次启动日志中打印（仅显示一次）。",
   "dl.dockerCopy": "复制",
   "dl.dockerCopied": "已复制",
+  "dl.scoopTitle": "使用 Scoop 安装",
+  "dl.scoopDesc":
+    "Windows 包管理器 —— 一条命令安装并保持更新。可选官方源或我们的自托管源。",
+  "dl.scoopOfficial": "官方源",
+  "dl.scoopSelfHosted": "自托管源",
+  "dl.scoopOfficialHint":
+    "从 Scoop 社区维护的 extras 源安装，随时用 scoop update fluxdown 更新。",
+  "dl.scoopSelfHostedHint":
+    "直接从 FluxDown 仓库源安装，始终跟随最新发布版，用 scoop update fluxdown 更新。",
   "dl.availableNow": "立即可用",
   "dl.comingSoon": "即将推出",
   "dl.downloadBtn": "下载",

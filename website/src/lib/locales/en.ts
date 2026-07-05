@@ -331,6 +331,15 @@ const en = {
     "Then open http://localhost:17800 — the admin token is printed to the logs on first start (visible only once).",
   "dl.dockerCopy": "Copy",
   "dl.dockerCopied": "Copied!",
+  "dl.scoopTitle": "Install via Scoop",
+  "dl.scoopDesc":
+    "Windows package manager — one command to install and stay up to date. Pick the official bucket or our self-hosted bucket.",
+  "dl.scoopOfficial": "Official bucket",
+  "dl.scoopSelfHosted": "Self-hosted bucket",
+  "dl.scoopOfficialHint":
+    "Installs from Scoop's community-maintained extras bucket. Update anytime with scoop update fluxdown.",
+  "dl.scoopSelfHostedHint":
+    "Installs straight from the FluxDown repository bucket, always tracking the newest release. Update with scoop update fluxdown.",
   "dl.availableNow": "Available Now",
   "dl.comingSoon": "Coming Soon",
   "dl.downloadBtn": "Download",

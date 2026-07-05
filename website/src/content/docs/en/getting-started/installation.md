@@ -24,6 +24,26 @@ Grab a build from the [download page](/#download). Two options, both offered for
 
 The build isn't code-signed, so Windows SmartScreen may flag it as coming from an "unknown publisher" the first time you run it. Click **More info → Run anyway** to continue.
 
+### Scoop
+
+If you use the [Scoop](https://scoop.sh) package manager, install FluxDown with a single command from either source:
+
+- **Official bucket** (community-maintained `extras`):
+
+  ```powershell
+  scoop bucket add extras
+  scoop install fluxdown
+  ```
+
+- **Self-hosted bucket** (straight from this repository, always the newest release):
+
+  ```powershell
+  scoop bucket add fluxdown https://github.com/zerx-lab/FluxDown
+  scoop install fluxdown/fluxdown
+  ```
+
+Both install the portable build and keep your `settings.json` across upgrades. Update anytime with `scoop update fluxdown`.
+
 ## macOS
 
 - **DMG** — `FluxDown-<version>-macos-<arch>.dmg` (`arm64` for Apple Silicon, `x64` for Intel). Open it and drag FluxDown into **Applications**.

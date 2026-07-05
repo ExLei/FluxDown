@@ -54,6 +54,13 @@ const DOCKER_COMPOSE_YML = `services:
 volumes:
   fluxdown-data:`;
 
+// Scoop 安装命令：官方源（extras bucket）与自托管源（本仓库 bucket）
+const SCOOP_OFFICIAL_CMD = `scoop bucket add extras
+scoop install fluxdown`;
+
+const SCOOP_SELFHOSTED_CMD = `scoop bucket add fluxdown https://github.com/zerx-lab/FluxDown
+scoop install fluxdown/fluxdown`;
+
 /* Windows logo — not available in Simple Icons (trademark), use inline SVG */
 function WindowsLogo({ className }: { className?: string }) {
   return (
@@ -155,6 +162,23 @@ export default function DownloadSection() {
       /* clipboard unavailable — ignore */
     }
   }, [dockerTab]);
+
+  const [scoopSource, setScoopSource] = useState<"official" | "selfhosted">(
+    "official",
+  );
+  const [scoopCopied, setScoopCopied] = useState(false);
+
+  const handleScoopCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(
+        scoopSource === "official" ? SCOOP_OFFICIAL_CMD : SCOOP_SELFHOSTED_CMD,
+      );
+      setScoopCopied(true);
+      setTimeout(() => setScoopCopied(false), 2000);
+    } catch {
+      /* clipboard unavailable — ignore */
+    }
+  }, [scoopSource]);
 
   useEffect(() => {
     fetch("/api/release")
@@ -931,6 +955,84 @@ export default function DownloadSection() {
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* Scoop 安装（Windows 包管理器）*/}
+          <motion.div
+            className="max-w-4xl mx-auto mb-16"
+            initial={{ opacity: 0, y: 20 }}
+            whileInView={{ opacity: 1, y: 0 }}
+            viewport={{ once: true }}
+            transition={{ duration: 0.5, delay: 0.15 }}
+          >
+            <div className="rounded-xl border border-dark-border/60 bg-dark-surface1 p-5">
+              <div className="flex items-center gap-3 mb-3">
+                <div className="w-10 h-10 rounded-lg bg-dark-surface2 border border-dark-border/50 flex items-center justify-center flex-shrink-0">
+                  <Terminal className="w-5 h-5 text-brand-blue" />
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-sm font-semibold text-dark-text">
+                    {t("dl.scoopTitle")}
+                  </h3>
+                  <p className="text-xs text-dark-text-muted mt-0.5">
+                    {t("dl.scoopDesc")}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-2 mb-3">
+                {/* 源切换：官方 / 自托管 */}
+                <div className="flex items-center gap-1 rounded-lg bg-dark-surface2 p-1">
+                  {(
+                    [
+                      { key: "official", label: t("dl.scoopOfficial") },
+                      { key: "selfhosted", label: t("dl.scoopSelfHosted") },
+                    ] as const
+                  ).map((tab) => (
+                    <button
+                      key={tab.key}
+                      type="button"
+                      onClick={() => setScoopSource(tab.key)}
+                      className={`px-3 py-1 rounded-md text-[11px] font-semibold transition-colors ${
+                        scoopSource === tab.key
+                          ? "bg-brand-blue/20 text-brand-blue"
+                          : "text-dark-text-muted hover:text-dark-text-secondary"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleScoopCopy}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-dark-border px-3 py-1.5 text-[11px] font-medium text-dark-text-secondary hover:bg-dark-surface3 transition-colors"
+                >
+                  {scoopCopied ? (
+                    <>
+                      <Check className="w-3 h-3 text-success" />
+                      {t("dl.dockerCopied")}
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3 h-3" />
+                      {t("dl.dockerCopy")}
+                    </>
+                  )}
+                </button>
+              </div>
+              <pre className="rounded-lg bg-dark-bg border border-dark-border/60 p-4 text-xs leading-relaxed text-dark-text-secondary overflow-x-auto font-mono">
+                <code>
+                  {scoopSource === "official"
+                    ? SCOOP_OFFICIAL_CMD
+                    : SCOOP_SELFHOSTED_CMD}
+                </code>
+              </pre>
+              <p className="mt-3 text-[11px] text-dark-text-muted">
+                {scoopSource === "official"
+                  ? t("dl.scoopOfficialHint")
+                  : t("dl.scoopSelfHostedHint")}
+              </p>
+            </div>
+          </motion.div>
 
           {/* Browser Extension */}
           <motion.div

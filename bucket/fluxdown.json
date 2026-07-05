@@ -1,0 +1,47 @@
+{
+    "version": "0.1.54",
+    "description": "Free, blazing-fast multi-protocol download manager (IDM alternative) powered by a Rust engine. Supports HTTP/HTTPS/FTP/BitTorrent/HLS with intelligent segmentation.",
+    "homepage": "https://fluxdown.zerx.dev",
+    "license": "Custom",
+    "notes": [
+        "FluxDown is a portable install. Settings and data are written next to flux_down.exe under the Scoop apps directory.",
+        "The browser extension talks to the app via a Native Messaging Host; run FluxDown once so it can register the NMH manifest.",
+        "The build is not code-signed, so Windows SmartScreen may warn on first launch."
+    ],
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/zerx-lab/FluxDown/releases/download/v0.1.54/FluxDown-0.1.54-windows-x64-portable.zip",
+            "hash": "466FC333ABA6CC22D743856D7B53148AA7ADFD11492D0D41864F6010A5134ADA"
+        },
+        "arm64": {
+            "url": "https://github.com/zerx-lab/FluxDown/releases/download/v0.1.54/FluxDown-0.1.54-windows-arm64-portable.zip",
+            "hash": "7CA89EA4FFD819D26AB336B0C20D6AAAAB6AFE5DBCBAFBA951A48ED2D2633555"
+        }
+    },
+    "bin": "flux_down.exe",
+    "shortcuts": [
+        [
+            "flux_down.exe",
+            "FluxDown"
+        ]
+    ],
+    "persist": [
+        "settings.json"
+    ],
+    "checkver": {
+        "github": "https://github.com/zerx-lab/FluxDown"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/zerx-lab/FluxDown/releases/download/v$version/FluxDown-$version-windows-x64-portable.zip"
+            },
+            "arm64": {
+                "url": "https://github.com/zerx-lab/FluxDown/releases/download/v$version/FluxDown-$version-windows-arm64-portable.zip"
+            }
+        },
+        "hash": {
+            "url": "https://github.com/zerx-lab/FluxDown/releases/download/v$version/SHA256SUMS.txt"
+        }
+    }
+}
