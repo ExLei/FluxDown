@@ -156,6 +156,10 @@ class QuickDownloadFormResult {
   /// 用户是否手动改过线程数（决定是否记忆本次选择）
   final bool threadsUserModified;
 
+  /// 音视频轨对的音频轨 URL（外部请求透传，表单不可编辑；空 = 普通下载）。
+  /// 仅单条时有意义，非空时 url 是视频轨、本字段是音频轨。
+  final String audioUrl;
+
   const QuickDownloadFormResult({
     required this.urlText,
     required this.saveDir,
@@ -167,6 +171,7 @@ class QuickDownloadFormResult {
     required this.cookies,
     required this.checksum,
     required this.threadsUserModified,
+    this.audioUrl = '',
   });
 }
 
@@ -206,6 +211,9 @@ class QuickDownloadForm extends StatefulWidget {
   /// 初始 Cookie（浏览器扩展捕获，预填高级选项供编辑覆盖）
   final String initialCookies;
 
+  /// 音视频轨对的音频轨 URL（外部请求透传，表单不可编辑；空 = 普通下载）
+  final String initialAudioUrl;
+
   final QuickDownloadFormHost host;
   final ValueChanged<QuickDownloadFormResult> onSubmit;
   final VoidCallback onCancel;
@@ -217,6 +225,7 @@ class QuickDownloadForm extends StatefulWidget {
     required this.initialSaveDir,
     required this.defaultQueueId,
     required this.initialCookies,
+    this.initialAudioUrl = '',
     required this.host,
     required this.onSubmit,
     required this.onCancel,
@@ -380,6 +389,7 @@ class _QuickDownloadFormState extends State<QuickDownloadForm> {
         cookies: _cookieController.text.trim(),
         checksum: checksum,
         threadsUserModified: _threadsUserModified,
+        audioUrl: widget.initialAudioUrl,
       ),
     );
   }

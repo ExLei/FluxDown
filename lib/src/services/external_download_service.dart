@@ -81,10 +81,14 @@ class ExternalDownloadService {
     );
 
     // 音视频轨对（浏览器扩展嗅探到离散 video/audio 轨，通用语义，非站点
-    // 特判）：browser 侧已完成清晰度确认，宿主直接建任务，不再弹二次确认框，
-    // 且保守起见不按换行拆分为多任务 —— 始终走单任务 ConfirmExternalDownload
-    // 路径，把 audioUrl 原样传给 Rust（引擎据此走离散轨道下载 + mux 旁路）。
-    if (req.audioUrl.isNotEmpty) {
+    // 特判）：browser 侧已完成清晰度确认。免打扰开启时宿主直接建任务
+    // （不拆分为多任务，audioUrl 原样传 Rust 走离散轨道下载 + mux 旁路）；
+    // 免打扰关闭时落入下方弹窗路径，让用户在 FluxDown 内二次确认（audioUrl
+    // 经弹窗/小窗独立通道透传，不进 URL 文本、不被换行拆分）。
+    final trackPairSilent =
+        (SettingsProvider.globalInstance ?? settingsProvider)
+            .silentDownloadEnabled;
+    if (req.audioUrl.isNotEmpty && trackPairSilent) {
       final trackSettings = SettingsProvider.globalInstance ?? settingsProvider;
       final requestedDir = req.saveDir.trim();
       final matchedDir = trackSettings.resolveCategorySaveDir(req.filename);
@@ -265,6 +269,7 @@ class ExternalDownloadService {
             : effectiveSettings.effectiveDefaultSaveDir,
         defaultQueueId: effectiveSettings.defaultQueueId,
         saveDirFromRequest: requestedDir.isNotEmpty,
+        audioUrl: req.audioUrl,
       );
       logInfo(_tag, 'dialog shown');
     } catch (e, stack) {

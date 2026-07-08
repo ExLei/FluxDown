@@ -20,6 +20,7 @@ void submitQuickDownload({
   required QuickDownloadFormResult result,
   required String referrer,
   required int hintFileSize,
+  String audioUrlOverride = '',
 }) {
   final saveDir = result.saveDir.trim();
   if (saveDir.isEmpty) {
@@ -45,6 +46,11 @@ void submitQuickDownload({
   if (entries.length == 1) {
     final entry = entries.first;
     final fileName = result.rename.isNotEmpty ? result.rename : entry.fileName;
+    // audioUrl 走独立通道透传（外部 track-pair 请求，不在 URL 文本里），
+    // 优先 result（表单透传的原始值），回退文本解析出的 checksum= 轨对。
+    final audioUrl = audioUrlOverride.isNotEmpty
+        ? audioUrlOverride
+        : (result.audioUrl.isNotEmpty ? result.audioUrl : entry.audioUrl);
     // 校验值：高级选项手填的优先，否则回退 URL 文本里的 checksum= 选项行
     final checksum = result.checksum.isNotEmpty
         ? result.checksum
@@ -63,7 +69,7 @@ void submitQuickDownload({
         proxyUrl: result.proxyUrl,
         userAgent: result.userAgent,
         queueId: result.queueId,
-        audioUrl: entry.audioUrl,
+        audioUrl: audioUrl,
       ).sendSignalToRust();
     } else {
       // 单条带校验 — ConfirmExternalDownload 信号无 checksum 字段，
@@ -75,7 +81,7 @@ void submitQuickDownload({
           url: entry.url,
           fileName: fileName,
           checksum: checksum,
-          audioUrl: entry.audioUrl,
+          audioUrl: audioUrl,
         ),
         ],
         saveDir: saveDir,
