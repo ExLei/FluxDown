@@ -1041,6 +1041,13 @@ class S {
   String get upToDate => _t('已是最新版本', 'Up to Date');
   String newVersionFound(String v) =>
       _t('发现新版本 v$v', 'New version v$v available');
+  String get updateNow => _t('立即更新', 'Update Now');
+  String get updateLater => _t('稍后再说', 'Later');
+  String get skipThisVersion => _t('跳过此版本', 'Skip This Version');
+  String updatePromptBody(String v, String size) => _t(
+    '新版本 v$v 已发布（$size）。现在更新？',
+    'Version v$v is available ($size). Update now?',
+  );
   String get downloadComplete =>
       _t('下载完成，可以安装', 'Download complete, ready to install');
   String get downloadingUpdate => _t('正在下载更新...', 'Downloading update...');
