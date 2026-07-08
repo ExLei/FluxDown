@@ -20,6 +20,7 @@ import {
 import { useLocale } from "@/lib/i18n";
 import type { Messages } from "@/lib/locales";
 import {
+  DEFAULT_METRICS,
   type FluxThemeJson,
   type TokenDescriptor,
   TOKEN_GROUPS,
@@ -241,6 +242,28 @@ function hexFromTheme(theme: FluxThemeJson, path: string): string {
   const value = getPathValue(theme, path);
   if (typeof value !== "string") return "ff000000";
   return normalizeHex8(value);
+}
+
+/** 基色 hex8 + 0-1 浮点 alpha → CSS rgba()，供 metric alpha 派生预览用（不经 0-255 int 量化）。 */
+function rgbaWithAlpha(hex8: string, alpha: number): string {
+  const normalized = normalizeHex8(hex8);
+  const r = Number.parseInt(normalized.slice(2, 4), 16);
+  const g = Number.parseInt(normalized.slice(4, 6), 16);
+  const b = Number.parseInt(normalized.slice(6, 8), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(3)})`;
+}
+
+/** 读取 metric 数值路径，兼容缺失 `metrics` 段（旧 JSON）的兜底默认值。 */
+function numberFromTheme(theme: FluxThemeJson, path: string): number {
+  const value = getPathValue(theme, path);
+  if (typeof value === "number" && !Number.isNaN(value)) return value;
+  const fallback = getPathValue({ metrics: DEFAULT_METRICS }, path);
+  return typeof fallback === "number" ? fallback : 0;
+}
+
+/** 主题当前生效的 metrics（旧 JSON 缺该段时回退全局默认，镜像 Dart 行为）。 */
+function metricsOf(theme: FluxThemeJson) {
+  return theme.metrics ?? DEFAULT_METRICS;
 }
 
 function colorForSegment(theme: FluxThemeJson, segmentIndex: number): string {
@@ -466,6 +489,10 @@ export default function ThemeBuilderPage() {
       const current = hexFromTheme(prev, path);
       return setPathValue(prev, path, withAlpha(current, alpha));
     });
+  }, []);
+
+  const updateNumber = useCallback((path: string, value: number) => {
+    setTheme((prev) => setPathValue(prev, path, value));
   }, []);
 
   const applyAppearance = useCallback((appearance: "dark" | "light") => {
@@ -736,20 +763,33 @@ export default function ThemeBuilderPage() {
                     </div>
                   </summary>
                   <div className="space-y-1 px-1.5 pb-1.5">
-                    {tokens.map((token) => (
-                      <TokenRow
-                        key={token.path}
-                        token={token}
-                        value={hexFromTheme(theme, token.path)}
-                        onHexChange={updateHex}
-                        onRgbChange={updateRgb}
-                        onAlphaChange={updateAlpha}
-                        isFocused={focusedPath === token.path}
-                        rowRef={(node) => {
-                          tokenRowRefs.current[token.path] = node;
-                        }}
-                      />
-                    ))}
+                    {tokens.map((token) =>
+                      token.kind === "number" ? (
+                        <NumberTokenRow
+                          key={token.path}
+                          token={token}
+                          value={numberFromTheme(theme, token.path)}
+                          onChange={updateNumber}
+                          isFocused={focusedPath === token.path}
+                          rowRef={(node) => {
+                            tokenRowRefs.current[token.path] = node;
+                          }}
+                        />
+                      ) : (
+                        <TokenRow
+                          key={token.path}
+                          token={token}
+                          value={hexFromTheme(theme, token.path)}
+                          onHexChange={updateHex}
+                          onRgbChange={updateRgb}
+                          onAlphaChange={updateAlpha}
+                          isFocused={focusedPath === token.path}
+                          rowRef={(node) => {
+                            tokenRowRefs.current[token.path] = node;
+                          }}
+                        />
+                      ),
+                    )}
                   </div>
                 </details>
               ))}
@@ -872,6 +912,74 @@ function TokenRow({
   );
 }
 
+/** metric（圆角/间距/描边/按钮/透明度/移动几何）数值编辑行：滑块 + 数字输入。
+ * alpha 单位步进 0.01（区间 [0,1]），其余 px 单位按描述符 step（默认 1）。 */
+function NumberTokenRow({
+  token,
+  value,
+  onChange,
+  isFocused,
+  rowRef,
+}: {
+  token: TokenDescriptor;
+  value: number;
+  onChange: (path: string, value: number) => void;
+  isFocused?: boolean;
+  rowRef?: (node: HTMLDivElement | null) => void;
+}) {
+  const min = token.min ?? 0;
+  const max = token.max ?? (token.unit === "alpha" ? 1 : 2000);
+  const step = token.step ?? (token.unit === "alpha" ? 0.01 : 1);
+  const displayValue = token.unit === "alpha" ? value.toFixed(2) : String(value);
+
+  const commit = (raw: string) => {
+    const parsed = Number.parseFloat(raw);
+    if (Number.isNaN(parsed)) return;
+    onChange(token.path, Math.min(max, Math.max(min, parsed)));
+  };
+
+  return (
+    <div
+      ref={rowRef}
+      data-token-row-path={token.path}
+      className={`grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_56px] items-center gap-1.5 rounded-lg border px-2 py-1.5 transition-all ${
+        isFocused
+          ? "border-brand-blue/50 bg-brand-blue/10 ring-1 ring-brand-blue/40"
+          : "border-dark-border/60 bg-dark-surface1 hover:border-dark-border"
+      }`}
+      {...tokenAttrs(token.path)}
+    >
+      <div className="min-w-0">
+        <div className="truncate text-[11px] font-medium text-dark-text">{token.label}</div>
+        <code className="block truncate text-[9px] leading-tight text-dark-text-muted">{token.path}</code>
+      </div>
+
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(token.path, Number.parseFloat(event.target.value))}
+        className="h-1 w-full accent-brand-blue"
+      />
+
+      <div className="flex items-center gap-0.5">
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={displayValue}
+          onChange={(event) => commit(event.target.value)}
+          className="w-full rounded-md border border-dark-border/60 bg-dark-surface2 px-1 py-1 font-mono text-[10px] text-dark-text outline-none transition-colors focus:border-brand-blue/60"
+        />
+        <span className="text-[9px] text-dark-text-muted">{token.unit === "alpha" ? "α" : "px"}</span>
+      </div>
+    </div>
+  );
+}
+
 function PreviewPanel({
   theme,
   t,
@@ -929,19 +1037,24 @@ function PreviewPanel({
   return (
     <div className="flex flex-col rounded-2xl border border-dark-border/80 bg-dark-surface1/50 p-3 shadow-2xl shadow-black/20 backdrop-blur-sm lg:max-h-[calc(100vh-7rem)]" {...tokenAttrs("colors.surface.background", "colors.border.default")}>
       <div className="mb-2 flex items-center justify-end">
-        <code className="rounded-md border border-dark-border/60 bg-dark-surface2/70 px-2 py-0.5 text-[10px] text-dark-text-muted">
+        <code
+          className="border border-dark-border/60 bg-dark-surface2/70 px-2 py-0.5 text-[10px] text-dark-text-muted"
+          style={{ borderRadius: numberFromTheme(theme, "metrics.radius.badge") }}
+          {...tokenAttrs("metrics.radius.badge")}
+        >
           {theme.appearance}
         </code>
       </div>
 
       <div
-        className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border shadow-2xl"
+        className="flex min-h-0 flex-1 flex-col overflow-hidden border shadow-2xl"
         style={{
           borderColor: rgbaFromTheme(theme, "colors.border.default"),
           backgroundColor: rgbaFromTheme(theme, "colors.surface.surface1"),
-          boxShadow: `0 24px 64px ${argbToCssRgba(theme.colors.shadow)}`,
+          boxShadow: `0 24px 64px ${rgbaWithAlpha(theme.colors.shadow, numberFromTheme(theme, "metrics.alpha.shadowStrong"))}`,
+          borderRadius: numberFromTheme(theme, "metrics.radius.dialog"),
         }}
-        {...tokenAttrs("colors.surface.surface1", "colors.border.default", "colors.shadow")}
+        {...tokenAttrs("colors.surface.surface1", "colors.border.default", "colors.shadow", "metrics.radius.dialog", "metrics.alpha.shadowStrong")}
       >
         <div
           className="flex h-9 items-center justify-between border-b px-3"
@@ -1033,11 +1146,12 @@ function PreviewPanel({
                       setActiveFile(item.key);
                       setActiveTab("all");
                     }}
-                    className="flex h-8 w-full items-center justify-between rounded-md px-2 text-left text-xs"
+                    className="flex h-8 w-full items-center justify-between px-2 text-left text-xs"
                     style={{
                       backgroundColor: active ? rgbaFromTheme(theme, "colors.element.selected") : "transparent",
+                      borderRadius: numberFromTheme(theme, "metrics.radius.md"),
                     }}
-                    {...tokenAttrs("colors.element.selected", "colors.accent.color", "colors.text.secondary")}
+                    {...tokenAttrs("colors.element.selected", "colors.accent.color", "colors.text.secondary", "metrics.radius.md")}
                   >
                     <span className="inline-flex items-center gap-2" style={{ color: active ? rgbaFromTheme(theme, "colors.accent.color") : rgbaFromTheme(theme, "colors.text.secondary") }}>
                       <SidebarIcon category={item.key} color={active ? rgbaFromTheme(theme, "colors.accent.color") : rgbaFromTheme(theme, "colors.text.secondary")} />
@@ -1054,14 +1168,15 @@ function PreviewPanel({
             <div
               className="flex h-[38px] items-center justify-between border-b px-2"
               style={{ borderColor: rgbaFromTheme(theme, "colors.border.default") }}
-              {...tokenAttrs("colors.border.default", "colors.input.background", "colors.input.border", "colors.text.secondary", "colors.accent.color", "colors.accent.foreground")}
+              {...tokenAttrs("colors.border.default", "colors.input.background", "colors.input.border", "colors.text.secondary", "colors.accent.color", "colors.accent.foreground", "metrics.radius.input")}
             >
               <div
-                className="flex h-7 min-w-0 items-center gap-2 rounded-md border px-2 text-[11px]"
+                className="flex h-7 min-w-0 items-center gap-2 border px-2 text-[11px]"
                 style={{
                   borderColor: rgbaFromTheme(theme, "colors.input.border"),
                   backgroundColor: rgbaFromTheme(theme, "colors.input.background"),
                   color: rgbaFromTheme(theme, "colors.text.secondary"),
+                  borderRadius: numberFromTheme(theme, "metrics.radius.input"),
                 }}
               >
                 <Search className="h-3.5 w-3.5" />
@@ -1106,7 +1221,7 @@ function PreviewPanel({
             </div>
 
             <div
-              className="flex h-[34px] items-center gap-1 overflow-x-auto border-b px-2"
+              className="flex h-[34px] items-center gap-1 overflow-x-auto overflow-y-hidden border-b px-2"
               style={{ borderColor: rgbaFromTheme(theme, "colors.border.default") }}
               {...tokenAttrs("colors.border.default", "colors.text.primary", "colors.text.muted", "colors.accent.color")}
             >
@@ -1121,7 +1236,7 @@ function PreviewPanel({
                     style={{ color: active ? rgbaFromTheme(theme, "colors.text.primary") : rgbaFromTheme(theme, "colors.text.muted") }}
                   >
                     {t(tab.labelKey)} ({countByTab(tab.key)})
-                    {active && <span className="absolute inset-x-0 -bottom-[7px] h-[2px]" style={{ backgroundColor: rgbaFromTheme(theme, "colors.accent.color") }} />}
+                    {active && <span className="absolute inset-x-0 -bottom-[3px] h-[2px]" style={{ backgroundColor: rgbaFromTheme(theme, "colors.accent.color") }} />}
                   </button>
                 );
               })}
@@ -1160,12 +1275,13 @@ function PreviewPanel({
                   >
                     <div className="flex min-w-0 flex-1 items-center gap-2">
                       <div
-                        className="flex h-7 w-7 items-center justify-center rounded text-[9px] font-semibold uppercase"
+                        className="flex h-7 w-7 items-center justify-center text-[9px] font-semibold uppercase"
                         style={{
                           backgroundColor: rgbaFromTheme(theme, "colors.surface.surface2"),
                           color: selected ? rgbaFromTheme(theme, "colors.accent.color") : rgbaFromTheme(theme, "colors.text.secondary"),
+                          borderRadius: numberFromTheme(theme, "metrics.radius.iconTile"),
                         }}
-                        {...tokenAttrs("colors.surface.surface2", "colors.accent.color", "colors.text.secondary")}
+                        {...tokenAttrs("colors.surface.surface2", "colors.accent.color", "colors.text.secondary", "metrics.radius.iconTile")}
                       >
                         {task.ext}
                       </div>
@@ -1246,21 +1362,25 @@ function PreviewPanel({
               <div className="space-y-1.5">
                 <div className="text-[11px] font-medium" style={{ color: rgbaFromTheme(theme, "colors.text.muted") }}>{t("mockup.distLabel")}</div>
                 <div
-                  className="rounded-md border p-1.5"
+                  className="border p-1.5"
                   style={{
                     borderColor: rgbaFromTheme(theme, "colors.border.default"),
                     backgroundColor: rgbaFromTheme(theme, "colors.surface.surface2"),
+                    borderRadius: numberFromTheme(theme, "metrics.radius.card"),
                   }}
+                  {...tokenAttrs("colors.border.default", "colors.surface.surface2", "metrics.radius.card")}
                 >
                   <div className="grid gap-1" style={{ gridTemplateColumns: "repeat(44, minmax(0, 1fr))" }}>
                     {gridCells.map((filled, index) => (
                       <div
                         // eslint-disable-next-line react/no-array-index-key
                         key={`grid-cell-${index}`}
-                        className="h-1 w-1 rounded-[1px]"
+                        className="h-1 w-1"
                         style={{
                           backgroundColor: filled ? colorForSegment(theme, index % selectedTask.segments.length) : rgbaFromTheme(theme, "colors.surface.surface3"),
+                          borderRadius: numberFromTheme(theme, "metrics.radius.segmentCell"),
                         }}
+                        {...tokenAttrs("metrics.radius.segmentCell")}
                       />
                     ))}
                   </div>
@@ -1289,21 +1409,23 @@ function PreviewPanel({
             <div className="flex items-center gap-2 border-t px-3 py-2" style={{ borderColor: rgbaFromTheme(theme, "colors.border.default") }}>
               <button
                 type="button"
-                className="inline-flex items-center justify-center rounded-md px-2.5 py-1 text-[11px] font-semibold"
+                className="inline-flex items-center justify-center px-2.5 py-1 text-[11px] font-semibold"
                 style={{
                   backgroundColor: rgbaFromTheme(theme, "colors.accent.color"),
                   color: rgbaFromTheme(theme, "colors.accent.foreground"),
+                  borderRadius: numberFromTheme(theme, "metrics.radius.card"),
                 }}
               >
                 {selectedTask.status === "downloading" ? t("mockup.btnPause") : t("mockup.btnResume")}
               </button>
               <button
                 type="button"
-                className="inline-flex items-center justify-center rounded-md border px-2.5 py-1 text-[11px] font-semibold"
+                className="inline-flex items-center justify-center border px-2.5 py-1 text-[11px] font-semibold"
                 style={{
                   borderColor: rgbaFromTheme(theme, "colors.status.error"),
                   color: rgbaFromTheme(theme, "colors.status.error"),
                   backgroundColor: rgbaFromTheme(theme, "colors.element.active"),
+                  borderRadius: numberFromTheme(theme, "metrics.radius.card"),
                 }}
               >
                 {t("mockup.btnDelete")}
