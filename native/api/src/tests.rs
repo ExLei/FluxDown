@@ -17,9 +17,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
+use crate::aria2;
 use crate::routes;
 use crate::server::{self, ApiServerConfig};
-use crate::service::{ApiError, ApiHost, UNKNOWN_ENDPOINT_MESSAGE};
+use crate::service::{ApiError, ApiHost, LiveSpeed, UNKNOWN_ENDPOINT_MESSAGE};
 use crate::types::{CreateTaskRequest, DownloadRequest, QueueDto, TaskDto};
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,9 @@ struct MockHostInner {
     continued_ids: Vec<String>,
     pause_all_calls: u32,
     continue_all_calls: u32,
+    config: HashMap<String, String>,
+    applied_config: Vec<HashMap<String, String>>,
+    speeds: HashMap<String, LiveSpeed>,
 }
 
 #[derive(Default)]
@@ -58,12 +62,26 @@ impl MockHost {
         self
     }
 
+    fn with_config(mut self, config: HashMap<String, String>) -> Self {
+        self.0.get_mut().unwrap().config = config;
+        self
+    }
+
+    fn with_speeds(mut self, speeds: HashMap<String, LiveSpeed>) -> Self {
+        self.0.get_mut().unwrap().speeds = speeds;
+        self
+    }
+
     fn submitted(&self) -> Vec<DownloadRequest> {
         self.0.lock().unwrap().submitted.clone()
     }
 
     fn created(&self) -> Vec<CreateTaskRequest> {
         self.0.lock().unwrap().created.clone()
+    }
+
+    fn applied_config(&self) -> Vec<HashMap<String, String>> {
+        self.0.lock().unwrap().applied_config.clone()
     }
 
     fn deleted(&self) -> Vec<(String, bool)> {
@@ -151,6 +169,19 @@ impl ApiHost for MockHost {
     async fn submit_external(&self, req: DownloadRequest) -> Result<(), ApiError> {
         self.0.lock().unwrap().submitted.push(req);
         Ok(())
+    }
+
+    async fn get_config(&self) -> Result<HashMap<String, String>, ApiError> {
+        Ok(self.0.lock().unwrap().config.clone())
+    }
+
+    async fn apply_config(&self, changes: HashMap<String, String>) -> Result<(), ApiError> {
+        self.0.lock().unwrap().applied_config.push(changes);
+        Ok(())
+    }
+
+    async fn live_speeds(&self) -> Result<HashMap<String, LiveSpeed>, ApiError> {
+        Ok(self.0.lock().unwrap().speeds.clone())
     }
 }
 
@@ -403,7 +434,7 @@ async fn download_batch_joins_urls_and_submits() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn jsonrpc_add_uri_returns_gid_and_submits() {
+async fn jsonrpc_add_uri_creates_task_and_returns_gid() {
     let server = TestServer::start(MockHost::new(), |_| {}).await;
     let body = json!({
         "jsonrpc": "2.0", "id": "1", "method": "aria2.addUri",
@@ -422,13 +453,13 @@ async fn jsonrpc_add_uri_returns_gid_and_submits() {
         ))
         .await;
     assert_eq!(resp.status, 200);
-    assert!(resp.json()["result"].is_string());
-    let submitted = server.host.submitted();
-    assert_eq!(submitted.len(), 1);
-    assert_eq!(submitted[0].url, "https://a.com/v.mp4");
-    assert_eq!(submitted[0].filename, "v.mp4");
-    assert_eq!(submitted[0].cookies, "s=1");
-    assert_eq!(submitted[0].referrer, "https://a.com/");
+    assert_eq!(resp.json()["result"], aria2::task_id_to_gid("mock-task-1"));
+    let created = server.host.created();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].url, "https://a.com/v.mp4");
+    assert_eq!(created[0].file_name, "v.mp4");
+    assert_eq!(created[0].cookies, "s=1");
+    assert_eq!(created[0].referrer, "https://a.com/");
 }
 
 #[tokio::test]
@@ -443,11 +474,11 @@ async fn jsonrpc_token_param_prefix_authenticates() {
         .send(&request("POST", routes::JSONRPC, &[], &body))
         .await;
     assert!(resp.json()["result"].is_string());
-    assert_eq!(server.host.submitted().len(), 1);
+    assert_eq!(server.host.created().len(), 1);
 }
 
 #[tokio::test]
-async fn jsonrpc_wrong_token_param_returns_error_code_1() {
+async fn jsonrpc_wrong_token_param_returns_unauthorized() {
     let server = TestServer::start(MockHost::new(), |c| c.token = "S".to_string()).await;
     let body = json!({
         "jsonrpc": "2.0", "id": "1", "method": "aria2.addUri",
@@ -458,7 +489,8 @@ async fn jsonrpc_wrong_token_param_returns_error_code_1() {
         .send(&request("POST", routes::JSONRPC, &[], &body))
         .await;
     assert_eq!(resp.json()["error"]["code"], 1);
-    assert!(server.host.submitted().is_empty());
+    assert_eq!(resp.json()["error"]["message"], "Unauthorized");
+    assert!(server.host.created().is_empty());
 }
 
 #[tokio::test]
@@ -476,10 +508,9 @@ async fn jsonrpc_batch_array_returns_equal_length_results() {
     assert_eq!(resp.status, 200);
     let arr = resp.json();
     assert_eq!(arr.as_array().unwrap().len(), 2);
-    let mut submitted_urls: Vec<String> =
-        server.host.submitted().into_iter().map(|d| d.url).collect();
-    submitted_urls.sort();
-    assert_eq!(submitted_urls, ["https://a/1.zip", "https://b/2.zip"]);
+    let mut created_urls: Vec<String> = server.host.created().into_iter().map(|d| d.url).collect();
+    created_urls.sort();
+    assert_eq!(created_urls, ["https://a/1.zip", "https://b/2.zip"]);
 }
 
 #[tokio::test]
@@ -504,18 +535,22 @@ async fn jsonrpc_system_multicall_wraps_success_in_single_element_array() {
     assert!(results[0][0].is_string());
     // getVersion 成功 -> 单元素数组包 version 对象。
     assert!(results[1][0]["version"].is_string());
-    assert_eq!(server.host.submitted()[0].url, "https://a/1.zip");
+    assert_eq!(server.host.created()[0].url, "https://a/1.zip");
 }
 
 #[tokio::test]
-async fn jsonrpc_unknown_method_returns_dash32601() {
+async fn jsonrpc_unknown_method_returns_code_1_no_such_method() {
     let server = TestServer::start(MockHost::new(), |_| {}).await;
     let body =
         json!({"jsonrpc": "2.0", "id": 1, "method": "aria2.removeXyz", "params": []}).to_string();
     let resp = server
         .send(&request("POST", routes::JSONRPC, &[], &body))
         .await;
-    assert_eq!(resp.json()["error"]["code"], -32601);
+    assert_eq!(resp.json()["error"]["code"], 1);
+    assert_eq!(
+        resp.json()["error"]["message"],
+        "No such method: aria2.removeXyz"
+    );
 }
 
 #[tokio::test]
@@ -542,6 +577,130 @@ async fn jsonrpc_processes_request_without_content_type_header() {
         .await;
     assert_eq!(resp.status, 200);
     assert!(resp.json()["result"].is_string());
+}
+
+#[tokio::test]
+async fn jsonrpc_add_torrent_forwards_torrent_b64_and_returns_gid() {
+    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "aria2.addTorrent",
+        "params": ["dGVzdHRvcnJlbnQ=", [], {"out": "movie.mkv"}]
+    })
+    .to_string();
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    assert_eq!(resp.json()["result"], aria2::task_id_to_gid("mock-task-1"));
+    let created = server.host.created();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].url, "");
+    assert_eq!(created[0].torrent_b64.as_deref(), Some("dGVzdHRvcnJlbnQ="));
+    assert_eq!(created[0].file_name, "movie.mkv");
+}
+
+#[tokio::test]
+async fn jsonrpc_tell_status_returns_seeded_task_fields_and_live_speed() {
+    let seeded = sample_task("11112222-3333-4444-5555-666677778888", 1);
+    let gid = aria2::task_id_to_gid(&seeded.task_id);
+    let task_id = seeded.task_id.clone();
+    let mut speeds = HashMap::new();
+    speeds.insert(
+        task_id,
+        LiveSpeed {
+            download_bps: 4096,
+            upload_bps: 0,
+        },
+    );
+    let server = TestServer::start(
+        MockHost::new().with_tasks(vec![seeded]).with_speeds(speeds),
+        |_| {},
+    )
+    .await;
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "aria2.tellStatus", "params": [gid]
+    })
+    .to_string();
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    let json = resp.json();
+    let result = &json["result"];
+    assert_eq!(result["gid"], gid);
+    assert_eq!(result["status"], "active");
+    assert_eq!(result["totalLength"], "100");
+    assert_eq!(result["completedLength"], "10");
+    assert_eq!(result["dir"], "/tmp");
+    assert_eq!(result["downloadSpeed"], "4096");
+}
+
+#[tokio::test]
+async fn jsonrpc_change_global_option_calls_apply_config_with_mapped_keys() {
+    let server = TestServer::start(MockHost::new(), |_| {}).await;
+    let body = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "aria2.changeGlobalOption",
+        "params": [{"dir": "/data", "max-overall-download-limit": "5M"}]
+    })
+    .to_string();
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    assert_eq!(resp.json()["result"], "OK");
+    let applied = server.host.applied_config();
+    assert_eq!(applied.len(), 1);
+    assert_eq!(applied[0].get("default_save_dir").unwrap(), "/data");
+    assert_eq!(
+        applied[0].get("speed_limit_bytes").unwrap(),
+        &(5 * 1024 * 1024).to_string()
+    );
+}
+
+#[tokio::test]
+async fn jsonrpc_get_global_option_returns_mapped_and_static_defaults() {
+    let mut config = HashMap::new();
+    config.insert("default_save_dir".to_string(), "/dl".to_string());
+    let server = TestServer::start(MockHost::new().with_config(config), |_| {}).await;
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "aria2.getGlobalOption", "params": []})
+        .to_string();
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    let result = &resp.json()["result"];
+    assert_eq!(result["dir"], "/dl");
+    assert_eq!(result["max-connection-per-server"], "1");
+}
+
+#[tokio::test]
+async fn jsonrpc_pause_and_remove_use_resolved_task_id_not_gid_prefix() {
+    let seeded = sample_task("aaaabbbb-cccc-dddd-eeee-ffffffffffff", 1);
+    let full_task_id = seeded.task_id.clone();
+    let server = TestServer::start(MockHost::new().with_tasks(vec![seeded]), |_| {}).await;
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "aria2.pause", "params": ["aaaabbbb"]})
+        .to_string();
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    assert!(resp.json()["result"].is_string());
+    assert_eq!(server.host.paused_ids(), vec![full_task_id.clone()]);
+
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "aria2.remove", "params": ["aaaabbbb"]})
+        .to_string();
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    assert!(resp.json()["result"].is_string());
+    assert_eq!(server.host.deleted(), vec![(full_task_id, false)]);
+}
+
+#[tokio::test]
+async fn jsonrpc_list_methods_returns_all_36_without_token() {
+    let server = TestServer::start(MockHost::new(), |c| c.token = "S".to_string()).await;
+    let body = json!({"jsonrpc": "2.0", "id": 1, "method": "system.listMethods", "params": []})
+        .to_string();
+    // 不带任何 token —— 换成需要鉴权的方法本应 401/code:1，但 listMethods 例外。
+    let resp = server
+        .send(&request("POST", routes::JSONRPC, &[], &body))
+        .await;
+    assert_eq!(resp.json()["result"].as_array().unwrap().len(), 36);
 }
 
 // ---------------------------------------------------------------------------

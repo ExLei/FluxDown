@@ -611,6 +611,7 @@ class S {
   String get themeImportSuccess => _t('主题导入成功', 'Theme imported successfully');
   String get themeExportSuccess => _t('主题导出成功', 'Theme exported successfully');
   String get themeImportError => _t('主题导入失败', 'Failed to import theme');
+  String get themeMore => _t('更多主题', 'More Themes');
 
   // ─────────────────────────────────────────────
   // 主题色名称

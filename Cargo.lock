@@ -1190,6 +1190,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "utoipa",
+ "uuid",
 ]
 
 [[package]]
@@ -1266,6 +1267,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "fluxdown_api",
  "fluxdown_engine",
  "fs2",

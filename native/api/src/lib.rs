@@ -49,6 +49,7 @@
 //! # }
 //! ```
 
+mod aria2;
 pub mod auth;
 mod jsonrpc;
 mod mcp;

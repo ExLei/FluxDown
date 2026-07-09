@@ -6,10 +6,11 @@
 //!   oneshot 等待表接收任一客户端的应答（镜像
 //!   `hub/src/rinf_selection.rs` 的桌面实现）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use fluxdown_api::service::LiveSpeed;
 use fluxdown_engine::events::{EngineEvent, EventSink};
 use fluxdown_engine::log_info;
 use fluxdown_engine::model::{BtFileEntry, HlsQualityOption};
@@ -21,12 +22,16 @@ use crate::wire::WsServerMsg;
 /// 无客户端应答时 BT 文件选择的兜底超时（与桌面端常量一致）。
 const BT_SELECTION_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// WS 广播中枢：事件出站通道 + HLS/BT 选择等待表。
+/// WS 广播中枢：事件出站通道 + HLS/BT 选择等待表 + 实时速率缓存。
 pub struct WsHub {
     /// 序列化后的 [`WsServerMsg`] JSON 广播通道；每个 WS 连接 subscribe 一份。
     pub events: broadcast::Sender<String>,
     pending_hls: Mutex<HashMap<String, oneshot::Sender<i32>>>,
     pending_bt: Mutex<HashMap<String, oneshot::Sender<Vec<i32>>>>,
+    /// 任务实时速率缓存（task_id → 速率）。[`EngineEventSink`] 消费
+    /// `TaskProgress`/`TasksSnapshot` 写入与清理，供 `ServerApiHost::live_speeds`
+    /// （aria2 兼容层）经 `live_speeds_snapshot` 读取。
+    live_speeds: Mutex<HashMap<String, LiveSpeed>>,
 }
 
 impl WsHub {
@@ -36,6 +41,7 @@ impl WsHub {
             events,
             pending_hls: Mutex::new(HashMap::new()),
             pending_bt: Mutex::new(HashMap::new()),
+            live_speeds: Mutex::new(HashMap::new()),
         }
     }
 
@@ -47,6 +53,12 @@ impl WsHub {
             }
             Err(e) => log_info!("[ws-hub] serialize failed: {}", e),
         }
+    }
+
+    /// 全部任务的实时速率快照（单次 clone；供 `ServerApiHost::live_speeds`
+    /// 读取，aria2 `tellStatus`/`tellActive` 的 downloadSpeed 字段来源）。
+    pub fn live_speeds_snapshot(&self) -> HashMap<String, LiveSpeed> {
+        lock_or_recover(&self.live_speeds).clone()
     }
 }
 
@@ -74,20 +86,44 @@ impl EventSink for EngineEventSink {
                 save_dir,
                 url,
                 error_message,
-            } => WsServerMsg::TaskProgress {
-                task_id,
-                status,
-                downloaded_bytes,
-                total_bytes,
-                speed,
-                file_name,
-                save_dir,
-                url,
-                error_message,
-            },
-            EngineEvent::TasksSnapshot(tasks) => WsServerMsg::TasksSnapshot {
-                tasks: tasks.into_iter().map(Into::into).collect(),
-            },
+            } => {
+                // 实时速率缓存：仅 downloading(1)/preparing(5) 保留非零值，
+                // 到达终态（paused/completed/error）立即清除，避免 aria2
+                // tellStatus 的 downloadSpeed 字段返回陈旧速率。
+                let mut speeds = lock_or_recover(&self.0.live_speeds);
+                if matches!(status, 1 | 5) {
+                    speeds.insert(
+                        task_id.clone(),
+                        LiveSpeed {
+                            download_bps: speed,
+                            upload_bps: 0,
+                        },
+                    );
+                } else {
+                    speeds.remove(&task_id);
+                }
+                drop(speeds);
+                WsServerMsg::TaskProgress {
+                    task_id,
+                    status,
+                    downloaded_bytes,
+                    total_bytes,
+                    speed,
+                    file_name,
+                    save_dir,
+                    url,
+                    error_message,
+                }
+            }
+            EngineEvent::TasksSnapshot(tasks) => {
+                // 快照是权威任务列表：删除任务没有专属事件（只广播快照），
+                // 借此机会清理其中已不存在的 task_id，防止速率缓存无界增长。
+                let live_ids: HashSet<&str> = tasks.iter().map(|t| t.task_id.as_str()).collect();
+                lock_or_recover(&self.0.live_speeds).retain(|k, _| live_ids.contains(k.as_str()));
+                WsServerMsg::TasksSnapshot {
+                    tasks: tasks.into_iter().map(Into::into).collect(),
+                }
+            }
             EngineEvent::SegmentProgress {
                 task_id,
                 total_bytes,
@@ -403,5 +439,85 @@ mod tests {
             .await;
 
         assert_eq!(outcome, SelectionOutcome::TimedOutDefaulted(1));
+    }
+
+    #[tokio::test]
+    async fn engine_event_sink_tracks_live_speed_while_active_and_clears_on_terminal_status() {
+        let hub = Arc::new(WsHub::new(16));
+        let sink = EngineEventSink(Arc::clone(&hub));
+
+        sink.emit(EngineEvent::TaskProgress {
+            task_id: "t1".into(),
+            status: 1, // downloading
+            downloaded_bytes: 50,
+            total_bytes: 200,
+            speed: 4096,
+            file_name: "a.bin".into(),
+            save_dir: "/tmp".into(),
+            url: "http://x".into(),
+            error_message: String::new(),
+        });
+        let snap = hub.live_speeds_snapshot();
+        assert_eq!(snap.get("t1").map(|s| s.download_bps), Some(4096));
+
+        sink.emit(EngineEvent::TaskProgress {
+            task_id: "t1".into(),
+            status: 3, // completed
+            downloaded_bytes: 200,
+            total_bytes: 200,
+            speed: 0,
+            file_name: "a.bin".into(),
+            save_dir: "/tmp".into(),
+            url: "http://x".into(),
+            error_message: String::new(),
+        });
+        assert!(
+            !hub.live_speeds_snapshot().contains_key("t1"),
+            "terminal status must clear the live-speed entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_event_sink_prunes_live_speed_for_tasks_missing_from_snapshot() {
+        let hub = Arc::new(WsHub::new(16));
+        let sink = EngineEventSink(Arc::clone(&hub));
+
+        for id in ["keep-me", "drop-me"] {
+            sink.emit(EngineEvent::TaskProgress {
+                task_id: id.to_string(),
+                status: 1,
+                downloaded_bytes: 0,
+                total_bytes: 100,
+                speed: 1000,
+                file_name: "f".into(),
+                save_dir: "/tmp".into(),
+                url: "http://x".into(),
+                error_message: String::new(),
+            });
+        }
+        assert_eq!(hub.live_speeds_snapshot().len(), 2);
+
+        // "drop-me" 已被删除：快照里只剩 "keep-me"，借此机会清理速率缓存
+        // （删除任务没有专属事件，只广播 TasksSnapshot）。
+        use fluxdown_engine::model::TaskInfo;
+        sink.emit(EngineEvent::TasksSnapshot(vec![TaskInfo {
+            task_id: "keep-me".to_string(),
+            url: "http://x".to_string(),
+            file_name: "f".to_string(),
+            save_dir: "/tmp".to_string(),
+            status: 1,
+            downloaded_bytes: 0,
+            total_bytes: 100,
+            error_message: String::new(),
+            created_at: "0".to_string(),
+            proxy_url: String::new(),
+            queue_id: String::new(),
+            checksum: String::new(),
+            file_missing: false,
+        }]));
+
+        let snap = hub.live_speeds_snapshot();
+        assert!(snap.contains_key("keep-me"));
+        assert!(!snap.contains_key("drop-me"));
     }
 }

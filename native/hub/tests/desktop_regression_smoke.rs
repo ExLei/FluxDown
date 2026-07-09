@@ -455,6 +455,7 @@ async fn desktop_regression_smoke() {
             Vec::new(),     // selected_file_indices
             None,           // method
             None,           // body
+            None,           // audio_url
         )
         .await;
 

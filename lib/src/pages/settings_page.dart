@@ -741,7 +741,7 @@ class _SearchResultItemState extends State<_SearchResultItem> {
           margin: const EdgeInsets.only(bottom: 2),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            color: _isHovered ? c.hoverBg : Colors.transparent,
+            color: _isHovered ? c.hoverBg : c.hoverBg.withValues(alpha: 0),
             borderRadius: m.brMd,
           ),
           child: Row(
@@ -5838,6 +5838,14 @@ class _ThemeActions extends StatelessWidget {
           colors: c,
           onTap: () => _exportTheme(context),
         ),
+        const SizedBox(width: 8),
+        _SmallActionButton(
+          icon: LucideIcons.globe,
+          label: s.themeMore,
+          colors: c,
+          onTap: () =>
+              launchUrl(Uri.parse('https://fluxdown.zerx.dev/themes')),
+        ),
       ],
     );
   }
@@ -5877,7 +5885,7 @@ class _SmallActionButtonState extends State<_SmallActionButton> {
           duration: const Duration(milliseconds: 150),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
           decoration: BoxDecoration(
-            color: _isHovered ? c.hoverBg : Colors.transparent,
+            color: _isHovered ? c.hoverBg : c.hoverBg.withValues(alpha: 0),
             borderRadius: m.brMd,
             border: Border.all(color: c.border, width: 1),
           ),
@@ -7402,6 +7410,56 @@ class _AboutContent extends StatelessWidget {
     final dt = DateTime.tryParse(isoDate);
     if (dt == null) return isoDate;
     return '${dt.year}-${dt.month.toString().padLeft(2, '0')}-${dt.day.toString().padLeft(2, '0')}';
+  }
+}
+
+// ─────────────────────────────────────────────
+// 捐赠卡片
+// ─────────────────────────────────────────────
+
+class _DonateCard extends StatelessWidget {
+  final AppColors colors;
+  const _DonateCard({required this.colors});
+
+  /// 构建期注入的首次 commit 日期，按当前语言格式化。
+  String _firstDateText(S s) {
+    final dt = DateTime.tryParse(statsFirstCommitDate);
+    if (dt == null) return statsFirstCommitDate;
+    return s.donateDate(dt.year, dt.month, dt.day);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final c = colors;
+    final s = LocaleScope.of(context);
+    return _SettingCard(
+      label: s.donateTitle,
+      description: s.donateThanks,
+      vertical: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            s.donateBody(_firstDateText(s), statsReleaseCount, statsCommitCount),
+            style: TextStyle(fontSize: 12, height: 1.6, color: c.textSecondary),
+          ),
+          const SizedBox(height: 12),
+          ShadButton(
+            size: ShadButtonSize.sm,
+            onPressed: () =>
+                launchUrl(Uri.parse('https://fluxdown.zerx.dev/sponsor')),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(LucideIcons.heart, size: 13, color: Colors.white),
+                const SizedBox(width: 6),
+                Text(s.donateButton),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

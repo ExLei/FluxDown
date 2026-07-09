@@ -154,6 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host: Arc<dyn fluxdown_api::service::ApiHost> = Arc::new(ServerApiHost::new(
         db_handle.clone(),
         cmd_tx.clone(),
+        hub.clone(),
         server_cfg.demo_url.clone(),
     ));
     if let Some(url) = &server_cfg.demo_url {

@@ -1,12 +1,12 @@
 // 新建下载对话框（对齐 design/web #dlg-new）—— 多行 URL 逐条创建任务；保存目录默认取自
 // 服务器配置（['config'] 的 default_save_dir），支持 FsPicker 浏览服务器目录；高级选项
-// （Cookies/Referrer/单任务代理/Checksum）为可折叠面板，行为对齐原型 #advToggle。
+// （Cookies/自定义请求头/单任务代理/Checksum）为可折叠面板，行为对齐原型 #advToggle。
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as Dialog from '@radix-ui/react-dialog'
 import * as Select from '@radix-ui/react-select'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, ChevronDown, ChevronRight, X } from 'lucide-react'
+import { Check, ChevronDown, ChevronRight, Plus, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { newDownloadOpenStore } from '../../lib/dialogs'
@@ -40,19 +40,19 @@ function SelectField({
         <Select.Content
           position="popper"
           sideOffset={6}
-          className="z-50 overflow-hidden rounded-lg border border-line bg-surface"
-          style={{ minWidth: 'var(--radix-select-trigger-width)', boxShadow: 'var(--shadow)' }}
+          className="select-pop"
+          style={{ width: 'var(--radix-select-trigger-width)' }}
         >
-          <Select.Viewport className="max-h-64 p-1">
+          <Select.Viewport className="max-h-64">
             {options.map((o) => (
               <Select.Item
                 key={o.value || EMPTY_VALUE}
                 value={o.value === '' ? EMPTY_VALUE : o.value}
-                className="flex cursor-pointer select-none items-center justify-between gap-3 rounded-md px-2.5 py-1.5 text-[13px] text-text outline-none data-[highlighted]:bg-surface2 data-[state=checked]:text-accent"
+                className="select-item"
               >
                 <Select.ItemText>{o.label}</Select.ItemText>
-                <Select.ItemIndicator>
-                  <Check size={13} />
+                <Select.ItemIndicator className="select-item-check">
+                  <Check size={14} />
                 </Select.ItemIndicator>
               </Select.Item>
             ))}
@@ -61,6 +61,12 @@ function SelectField({
       </Select.Portal>
     </Select.Root>
   )
+}
+
+interface HeaderRow {
+  id: number
+  name: string
+  value: string
 }
 
 interface FormState {
@@ -72,7 +78,7 @@ interface FormState {
   queueId: string
   userAgent: string
   cookies: string
-  referrer: string
+  headers: HeaderRow[]
   proxyUrl: string
   checksum: string
   advOpen: boolean
@@ -88,7 +94,7 @@ function emptyForm(saveDir = ''): FormState {
     queueId: '',
     userAgent: '',
     cookies: '',
-    referrer: '',
+    headers: [],
     proxyUrl: '',
     checksum: '',
     advOpen: false,
@@ -101,6 +107,7 @@ export function NewDownloadDialog() {
   const [form, setForm] = useState<FormState>(() => emptyForm())
   const [lineErrors, setLineErrors] = useState<Record<number, string>>({})
   const [submitting, setSubmitting] = useState(false)
+  const headerRowSeq = useRef(0)
   const { t } = useI18n()
   const segmentOptions = [
     { value: '0', label: t('newDl.segmentsAuto') },
@@ -179,6 +186,20 @@ export function NewDownloadDialog() {
     setForm((f) => ({ ...f, [key]: value }))
   }
 
+  function addHeaderRow() {
+    headerRowSeq.current += 1
+    const row: HeaderRow = { id: headerRowSeq.current, name: '', value: '' }
+    setForm((f) => ({ ...f, headers: [...f.headers, row] }))
+  }
+
+  function removeHeaderRow(id: number) {
+    setForm((f) => ({ ...f, headers: f.headers.filter((h) => h.id !== id) }))
+  }
+
+  function updateHeaderRow(id: number, key: 'name' | 'value', value: string) {
+    setForm((f) => ({ ...f, headers: f.headers.map((h) => (h.id === id ? { ...h, [key]: value } : h)) }))
+  }
+
   function close() {
     newDownloadOpenStore.set(false)
   }
@@ -186,6 +207,12 @@ export function NewDownloadDialog() {
   async function handleSubmit() {
     if (urlLines.length === 0 || submitting) return
     setSubmitting(true)
+    const headerEntries: Record<string, string> = {}
+    for (const h of form.headers) {
+      const name = h.name.trim()
+      if (name) headerEntries[name] = h.value
+    }
+    const headers = Object.keys(headerEntries).length > 0 ? headerEntries : undefined
     const nextErrors: Record<number, string> = {}
     let anyOk = false
     for (let i = 0; i < urlLines.length; i++) {
@@ -196,7 +223,7 @@ export function NewDownloadDialog() {
           saveDir: form.saveDir.trim() || undefined,
           segments: Number(form.segments),
           cookies: form.cookies.trim() || undefined,
-          referrer: form.referrer.trim() || undefined,
+          headers,
           proxyUrl: form.proxyUrl.trim() || undefined,
           userAgent: form.userAgent || undefined,
           queueId: form.queueId || undefined,
@@ -222,7 +249,16 @@ export function NewDownloadDialog() {
     >
       <Dialog.Portal>
         <Dialog.Overlay className="wbackdrop show" />
-        <Dialog.Content asChild>
+        <Dialog.Content
+          asChild
+          onPointerDownOutside={(e) => {
+            // 表单对话框：点击外部不关闭（防误触丢失已填内容）。同时根治 Radix Select-in-Dialog
+            // 的已知问题——Select 展开时 body 为 pointer-events:none，点击对话框内元素会命中
+            // 遮罩层，被误判为 outside 而连带关掉整个弹窗（且其派发延迟于 Select 卸载，无法
+            // 靠 DOM 探测区分）。关闭路径：✕ / 取消 / Esc。
+            e.preventDefault()
+          }}
+        >
           <form
             className="dialog show"
             onSubmit={(e) => {
@@ -329,34 +365,52 @@ export function NewDownloadDialog() {
                   value={form.cookies}
                   onChange={(e) => set('cookies', e.target.value)}
                 />
-                <div className="grid2">
-                  <div>
-                    <label className="field-label" htmlFor="nd-referrer">
-                      {t('newDl.referrer')}
-                    </label>
-                    <input
-                      id="nd-referrer"
-                      className="text-input"
-                      type="text"
-                      placeholder="https://…"
-                      value={form.referrer}
-                      onChange={(e) => set('referrer', e.target.value)}
-                    />
-                  </div>
-                  <div>
-                    <label className="field-label" htmlFor="nd-proxy">
-                      {t('newDl.proxy')}
-                    </label>
-                    <input
-                      id="nd-proxy"
-                      className="text-input"
-                      type="text"
-                      placeholder="socks5://127.0.0.1:1080"
-                      value={form.proxyUrl}
-                      onChange={(e) => set('proxyUrl', e.target.value)}
-                    />
-                  </div>
+                <label className="field-label">{t('newDl.headers')}</label>
+                <div className="flex flex-col gap-2">
+                  {form.headers.map((h) => (
+                    <div key={h.id} className="flex items-center gap-2">
+                      <input
+                        className="text-input flex-1"
+                        type="text"
+                        spellCheck={false}
+                        placeholder={t('newDl.headerName')}
+                        value={h.name}
+                        onChange={(e) => updateHeaderRow(h.id, 'name', e.target.value)}
+                      />
+                      <input
+                        className="text-input flex-1"
+                        type="text"
+                        spellCheck={false}
+                        placeholder={t('newDl.headerValue')}
+                        value={h.value}
+                        onChange={(e) => updateHeaderRow(h.id, 'value', e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="icon-btn sm shrink-0"
+                        aria-label={t('common.delete')}
+                        onClick={() => removeHeaderRow(h.id)}
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" className="btn ghost sm self-start" onClick={addHeaderRow}>
+                    <Plus size={13} />
+                    {t('newDl.headersAdd')}
+                  </button>
                 </div>
+                <label className="field-label" htmlFor="nd-proxy">
+                  {t('newDl.proxy')}
+                </label>
+                <input
+                  id="nd-proxy"
+                  className="text-input"
+                  type="text"
+                  placeholder="socks5://127.0.0.1:1080"
+                  value={form.proxyUrl}
+                  onChange={(e) => set('proxyUrl', e.target.value)}
+                />
                 <label className="field-label" htmlFor="nd-checksum">
                   {t('newDl.checksum')}
                 </label>
