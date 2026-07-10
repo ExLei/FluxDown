@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ComponentType } from "react";
+import { useState, useEffect, useRef, useCallback, type ComponentType } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Download,
@@ -144,6 +144,21 @@ export default function DownloadSection() {
   const [loading, setLoading] = useState(true);
   const [selectedArch, setSelectedArch] = useState<Record<string, string>>({});
   const [activePlatform, setActivePlatform] = useState("windows");
+  const platformNavRef = useRef<HTMLElement>(null);
+  const navDidMount = useRef(false);
+
+  // 移动端平台栏为横向滚动条：切换平台（点击或 Hero 下拉跳转）后把选中 pill 滚入视野。
+  // 首次挂载跳过——默认 Windows 已在最左，避免无谓的居中滚动。
+  useEffect(() => {
+    if (!navDidMount.current) {
+      navDidMount.current = true;
+      return;
+    }
+    const btn = platformNavRef.current?.querySelector<HTMLButtonElement>(
+      `button[data-platform="${activePlatform}"]`,
+    );
+    btn?.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+  }, [activePlatform]);
   const [dockerTab, setDockerTab] = useState<"run" | "compose">("run");
   const [dockerCopied, setDockerCopied] = useState(false);
 
@@ -558,13 +573,14 @@ export default function DownloadSection() {
                 <p className="hidden md:block px-3 pt-1 pb-2 text-[10px] font-semibold uppercase tracking-widest text-dark-text-muted">
                   {t("dl.platformLabel")}
                 </p>
-                <nav className="flex md:flex-col gap-1 overflow-x-auto md:overflow-visible">
+                <nav ref={platformNavRef} className="flex md:flex-col gap-1 overflow-x-auto md:overflow-visible">
                   {platforms.map((p) => {
                     const Icon = p.icon;
                     const isActive = activePlatform === p.key;
                     return (
                       <button
                         key={p.key}
+                        data-platform={p.key}
                         type="button"
                         onClick={() => setActivePlatform(p.key)}
                         className={`relative flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-xs font-semibold whitespace-nowrap transition-colors duration-200 ${

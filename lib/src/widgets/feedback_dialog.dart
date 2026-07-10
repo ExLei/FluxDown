@@ -287,14 +287,10 @@ class _FeedbackDialogContentState extends State<_FeedbackDialogContent> {
               m: m,
             ),
             const SizedBox(height: 14),
-            // ── 应用版本（自动获取，只读） ──
+            // ── 附带信息（自动获取，只读，向用户明示） ──
             Row(
               children: [
-                _SectionLabel(
-                  text: s.feedbackVersionLabel,
-                  c: c,
-                  required: true,
-                ),
+                _SectionLabel(text: s.feedbackSysInfoLabel, c: c),
                 const SizedBox(width: 6),
                 Text(
                   '(${s.feedbackVersionAuto})',
@@ -314,10 +310,25 @@ class _FeedbackDialogContentState extends State<_FeedbackDialogContent> {
                 borderRadius: m.brMd,
                 border: Border.all(color: c.border),
               ),
-              child: Text(
-                FeedbackService.appVersion,
-                style: TextStyle(fontSize: 13, color: c.textSecondary),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${s.feedbackVersionLabel}: ${FeedbackService.appVersion}',
+                    style: TextStyle(fontSize: 12, color: c.textSecondary),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${s.feedbackSysInfoSystem}: ${FeedbackService.systemInfo}',
+                    style: TextStyle(fontSize: 12, color: c.textSecondary),
+                  ),
+                ],
               ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              s.feedbackSysInfoHint,
+              style: TextStyle(fontSize: 11, color: c.textMuted),
             ),
             const SizedBox(height: 14),
 

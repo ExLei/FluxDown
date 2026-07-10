@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' show Abi;
 import 'dart:io';
 
 import 'log_service.dart';
@@ -38,6 +39,24 @@ class FeedbackService {
   /// 构建时注入的应用版本号（供反馈表单展示，提交时自动上报）。
   static const String appVersion = _appVersion;
 
+  /// 随反馈自动附带的环境摘要（系统类型/版本/CPU 架构/系统语言）。
+  /// 仅含设备通用信息，不含任何用户身份或路径等敏感数据；
+  /// 反馈表单中原样展示，提交时作为 environment 字段上报。
+  static final String systemInfo = _buildSystemInfo();
+
+  static String _buildSystemInfo() {
+    // 形如 '"Windows 10 Pro" 10.0 (Build 19045) (x64), locale zh-CN'。
+    // 部分平台的 operatingSystemVersion 已含系统名，避免重复前缀。
+    final os = Platform.operatingSystem;
+    final osVersion = Platform.operatingSystemVersion.trim();
+    final arch = Abi.current().toString().split('_').last;
+    final locale = Platform.localeName;
+    final osPart = osVersion.toLowerCase().contains(os)
+        ? osVersion
+        : '$os $osVersion';
+    return '$osPart ($arch), locale $locale';
+  }
+
   static const _apiBase = 'https://fluxdown.zerx.dev';
   static const _feedbackPath = '/api/feedback';
   static const _timeout = Duration(seconds: 15);
@@ -73,6 +92,8 @@ class FeedbackService {
       // 标记来源为桌面应用，服务端据此打 App 标签并套用应用反馈 body 模板。
       'source': 'app',
       'appVersion': _appVersion,
+      // 自动收集的环境摘要（表单中已向用户明示，不含敏感信息）。
+      'environment': systemInfo,
     };
     if (contact != null && contact.trim().isNotEmpty) {
       body['contact'] = contact.trim();

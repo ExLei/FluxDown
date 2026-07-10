@@ -99,7 +99,7 @@ export function SecuritySettings({
   )
 }
 
-/** 端点地址行：等宽字体地址 + 复制按钮，对标桌面端 API 服务卡片的"地址"栏。 */
+/** 端点地址行：等宽字体地址 + 复制按钮。 */
 function AddrRow({ value, copyTitle }: { value: string; copyTitle: string }) {
   return (
     <div className="set-row">

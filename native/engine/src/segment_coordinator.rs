@@ -61,20 +61,42 @@ use crate::speed_limiter::SpeedLimiter;
 const MAX_SIZE_EXPANSIONS: u32 = 3;
 
 // ---------------------------------------------------------------------------
-// 域名单连接策略缓存
+// 域名连接上限策略缓存
 // ---------------------------------------------------------------------------
-// 当 coordinator 检测到某域名的服务器拒绝多连接（403/429），将该域名记录
-// 到进程级缓存。后续对同域名的下载任务会自动降级为单线程，避免重蹈覆辙。
-// 缓存带 24h TTL——服务器策略可能变化，过期后重新尝试多线程。
+// 当 coordinator 检测到某域名的服务器拒绝多连接（403/429），把【削减后的
+// 连接上限】记入进程级缓存（1 = 单连接）。后续对同域名的下载任务以该值
+// 裁剪 worker 上限，避免重蹈覆辙；重复记录取更低值（更保守的观察优先）。
+// 缓存带 24h TTL——服务器策略可能变化，过期后重新尝试多连接。
+//
+// 持久化：缓存经 config 表（key = `domain_conn_caps`）跨重启保留——
+// Engine 启动时 [`load_domain_conn_caps`] 读回，记录点经
+// [`record_domain_conn_cap_persist`] 异步落盘。时间戳用 Unix 秒（墙钟），
+// 使 TTL 判定跨进程生命周期依然成立。
 
-/// TTL: 24 小时后允许重新尝试多线程。
-const SINGLE_CONN_TTL: Duration = Duration::from_secs(24 * 3600);
+/// TTL: 24 小时后允许重新尝试多连接。
+const CONN_CAP_TTL: Duration = Duration::from_secs(24 * 3600);
 
-/// 进程级的域名 → 上次检测时间缓存。
-static SINGLE_CONN_DOMAINS: OnceLock<StdMutex<HashMap<String, Instant>>> = OnceLock::new();
+/// 持久化缓存的 config 表 key。
+const CONN_CAP_CONFIG_KEY: &str = "domain_conn_caps";
 
-fn single_conn_cache() -> &'static StdMutex<HashMap<String, Instant>> {
-    SINGLE_CONN_DOMAINS.get_or_init(|| StdMutex::new(HashMap::new()))
+/// 进程级的域名 → (连接上限, 记录时间的 Unix 秒) 缓存。
+static DOMAIN_CONN_CAPS: OnceLock<StdMutex<HashMap<String, (i32, u64)>>> = OnceLock::new();
+
+fn conn_cap_cache() -> &'static StdMutex<HashMap<String, (i32, u64)>> {
+    DOMAIN_CONN_CAPS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+/// 当前 Unix 秒（墙钟早于 epoch 的病态时钟回退为 0，仅影响 TTL 判定的保守性）。
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// 时间戳是否仍在 TTL 内。
+fn conn_cap_fresh(recorded_secs: u64, now_secs: u64) -> bool {
+    now_secs.saturating_sub(recorded_secs) < CONN_CAP_TTL.as_secs()
 }
 
 /// 提取 URL 的 host 部分（含端口），用于域名级缓存的 key。
@@ -90,32 +112,177 @@ fn extract_host(url: &str) -> Option<String> {
     })
 }
 
-/// 记录某域名的服务器拒绝多连接。
-pub(crate) fn record_single_conn_domain(url: &str) {
+/// 记录某域名学习到的连接上限（1 = 单连接）。与【未过期】的既有记录取更低值
+/// 并刷新 TTL；已过期的旧值不参与合并（读取侧视其为不存在，写入侧同样以本次
+/// 新鲜观察直接覆盖，两侧语义一致）。仅更新内存；持久化用
+/// [`record_domain_conn_cap_persist`]。
+pub(crate) fn record_domain_conn_cap(url: &str, cap: i32) {
+    let cap = cap.max(1);
     if let Some(host) = extract_host(url)
-        && let Ok(mut cache) = single_conn_cache().lock()
+        && let Ok(mut cache) = conn_cap_cache().lock()
     {
+        let now = now_unix_secs();
+        let effective = cache
+            .get(&host)
+            .filter(|(_, recorded)| conn_cap_fresh(*recorded, now))
+            .map_or(cap, |(prev, _)| (*prev).min(cap));
         log_info!(
-            "[conn-policy] 记录域名 {} 为单连接限制，24h 内自动使用单线程",
-            host
+            "[conn-policy] 记录域名 {} 连接上限 {}，24h 内新任务按此上限调度",
+            host,
+            effective
         );
-        cache.insert(host, Instant::now());
+        cache.insert(host, (effective, now));
     }
 }
 
-/// 检查某域名是否在单连接缓存中（且未过期）。
-pub(crate) fn is_single_conn_domain(url: &str) -> bool {
+/// 记录连接上限并异步落盘（记录点常规入口——拒绝事件本就低频，逐次落盘）。
+pub(crate) fn record_domain_conn_cap_persist(url: &str, cap: i32, db: &Db) {
+    record_domain_conn_cap(url, cap);
+    persist_domain_conn_caps(db);
+}
+
+/// 记录单连接限制并异步落盘。
+pub(crate) fn record_single_conn_domain_persist(url: &str, db: &Db) {
+    record_domain_conn_cap_persist(url, 1, db);
+}
+
+/// 查询某域名学习到的连接上限（未记录或已过期 → None）。
+pub(crate) fn domain_conn_cap(url: &str) -> Option<i32> {
     if let Some(host) = extract_host(url)
-        && let Ok(mut cache) = single_conn_cache().lock()
-        && let Some(recorded) = cache.get(&host)
+        && let Ok(mut cache) = conn_cap_cache().lock()
+        && let Some((cap, recorded)) = cache.get(&host)
     {
-        if recorded.elapsed() < SINGLE_CONN_TTL {
-            return true;
+        if conn_cap_fresh(*recorded, now_unix_secs()) {
+            return Some(*cap);
         }
         // 过期，移除
         cache.remove(&host);
     }
-    false
+    None
+}
+
+/// 检查某域名是否被限制为单连接（且未过期）。
+pub(crate) fn is_single_conn_domain(url: &str) -> bool {
+    domain_conn_cap(url) == Some(1)
+}
+
+/// 持久化格式版本。语义规则变化（字段含义、TTL 判定、合并策略）时递增——
+/// 旧版本数据在加载时整体丢弃并重新学习，绝不跨版本猜测字段含义。
+/// 与 aria2 `server-stat-timeout` 的思路一致：学习数据是可再生的性能缓存，
+/// 失效的正确处置是丢弃重学，而非迁移。
+const CONN_CAP_FORMAT_VERSION: &str = "v1";
+
+/// 序列化缓存为 config 存储格式：首行版本标记，之后每行
+/// `host<TAB>cap<TAB>unix_secs`。host 不可能含 TAB/换行（URL host 语法
+/// 排除空白），无需转义。
+fn serialize_conn_caps(map: &HashMap<String, (i32, u64)>) -> String {
+    let mut lines: Vec<String> = map
+        .iter()
+        .map(|(host, (cap, ts))| format!("{host}\t{cap}\t{ts}"))
+        .collect();
+    lines.sort(); // 确定性输出，便于测试与 diff
+    let mut out = String::from(CONN_CAP_FORMAT_VERSION);
+    for line in lines {
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
+/// 解析 config 存储格式。版本标记不匹配 → 返回空表（整体重学）；
+/// 版本内的畸形行静默跳过（防御手改/半写入）。
+fn parse_conn_caps(raw: &str) -> HashMap<String, (i32, u64)> {
+    let mut map = HashMap::new();
+    let mut lines = raw.lines();
+    if lines.next().map(str::trim) != Some(CONN_CAP_FORMAT_VERSION) {
+        return map;
+    }
+    for line in lines {
+        let mut parts = line.split('\t');
+        let (Some(host), Some(cap), Some(ts)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let (Ok(cap), Ok(ts)) = (cap.parse::<i32>(), ts.parse::<u64>()) else {
+            continue;
+        };
+        if !host.is_empty() && cap >= 1 {
+            map.insert(host.to_string(), (cap, ts));
+        }
+    }
+    map
+}
+
+/// Engine 启动时从 config 表读回持久化的域名连接上限（过期条目丢弃；与
+/// 内存中已有条目取更低值合并，语义与 [`record_domain_conn_cap`] 一致）。
+pub(crate) async fn load_domain_conn_caps(db: &Db) {
+    let raw = match db.get_config(CONN_CAP_CONFIG_KEY).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return,
+        Err(e) => {
+            log_info!("[conn-policy] 读取持久化域名连接上限失败（忽略）: {}", e);
+            return;
+        }
+    };
+    let now = now_unix_secs();
+    let loaded = parse_conn_caps(&raw);
+    if let Ok(mut cache) = conn_cap_cache().lock() {
+        let mut restored = 0usize;
+        for (host, (cap, ts)) in loaded {
+            if !conn_cap_fresh(ts, now) {
+                continue;
+            }
+            let entry = cache.entry(host).or_insert((cap, ts));
+            if cap < entry.0 {
+                *entry = (cap, ts);
+            }
+            restored += 1;
+        }
+        if restored > 0 {
+            log_info!("[conn-policy] 已恢复 {} 条持久化域名连接上限", restored);
+        }
+    }
+}
+
+/// 把当前缓存快照异步写回 config 表（fire-and-forget；过期条目顺带清理）。
+fn persist_domain_conn_caps(db: &Db) {
+    let snapshot = {
+        let Ok(mut cache) = conn_cap_cache().lock() else {
+            return;
+        };
+        let now = now_unix_secs();
+        cache.retain(|_, (_, ts)| conn_cap_fresh(*ts, now));
+        serialize_conn_caps(&cache)
+    };
+    // 同步调用方（如 set_proxy_config）可能不在 runtime 内（纯单元测试），
+    // 此时静默跳过——持久化是尽力而为的缓存，丢一次写不影响正确性。
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let db = db.clone();
+    handle.spawn(async move {
+        if let Err(e) = db.set_config(CONN_CAP_CONFIG_KEY, &snapshot).await {
+            log_info!("[conn-policy] 持久化域名连接上限失败（忽略）: {}", e);
+        }
+    });
+}
+
+/// 清空域名连接上限缓存（内存 + 持久化）。
+///
+/// 网络环境变化时调用（代理配置切换）：连接上限是服务器**对某个客户端出口**
+/// 的策略观察——换代理/出口 IP 后旧观察不再可信，既可能过严（新出口本可
+/// 多连接）也可能过宽（新出口更受限），丢弃重学是唯一无偏的处置。
+pub(crate) fn clear_domain_conn_caps(db: &Db) {
+    if let Ok(mut cache) = conn_cap_cache().lock() {
+        if cache.is_empty() {
+            return;
+        }
+        log_info!(
+            "[conn-policy] 网络环境变化，清空 {} 条域名连接上限观察",
+            cache.len()
+        );
+        cache.clear();
+    }
+    persist_domain_conn_caps(db);
 }
 
 // ---------------------------------------------------------------------------
@@ -145,6 +312,25 @@ fn dynamic_min_split_bytes(throughput_bps: f64) -> i64 {
 
 /// Maximum total number of segments (including dynamically created ones).
 const MAX_SEGMENTS: i32 = 64;
+
+// ---------------------------------------------------------------------------
+// 渐进启动 / 自适应连接调度
+// ---------------------------------------------------------------------------
+// `initial_segment_count` 的语义是【最大连接数上限】而非启动并发：coordinator
+// 从 RAMP_INITIAL_WORKERS 条连接起步，每个评估窗口测一次总吞吐，健康（稳定
+// 206、无 403/429、吞吐仍有增益）则倍增额度直至上限；扩容后吞吐无增益则冻结
+// 在当前规模（找到服务器/链路的实际并发甜点）。分段规划不变——连接数 =
+// 存活 worker 数，与预切分段数解耦（段只是 worker 的工作队列）。
+
+/// 启动时的初始并发连接数（conservative ramp-up 起点）。
+const RAMP_INITIAL_WORKERS: usize = 2;
+
+/// ramp 评估窗口间隔（秒）：每窗口测一次总吞吐，决定扩容/冻结。
+const RAMP_TICK_SECS: u64 = 2;
+
+/// 扩容有效判据：扩容后窗口吞吐 >= 扩容前吞吐 × 此系数才继续扩容，
+/// 否则冻结（新增连接没有带来净收益，继续加只会触发服务器风控）。
+const RAMP_IMPROVE_FACTOR: f64 = 1.05;
 
 /// 尾部微拆分阈值：当正常拆分（`dynamic_min_split_bytes` 计算的阈值）失败时，
 /// 用此极低阈值重试，避免下载尾部空闲 worker 干等最后一个慢段。
@@ -391,6 +577,69 @@ struct NextWork {
     /// If this work came from an in-half split, this is the index of the
     /// segment that was shrunk.  `None` when reusing an existing Pending segment.
     split_parent: Option<i32>,
+}
+
+/// spawn_worker 所需共享句柄的集合，支持事件循环中途（ramp-up 扩容）动态增开
+/// worker——启动时与扩容时走完全相同的 spawn 路径，避免两处参数漂移。
+///
+/// 注意：持有一个 `event_tx` clone 意味着 worker 事件 channel 在整个事件循环
+/// 期间不会因"所有 worker 退出"而关闭（`event_rx.recv()` 的 `None` 分支变为
+/// 防御性代码）。所有退出路径均由显式条件覆盖：all_done / cancel / 致命错误
+/// break / 串行模式的 any_alive 检查。
+struct WorkerSpawnCtx {
+    event_tx: mpsc::Sender<WorkerEvent>,
+    task_id: String,
+    url: String,
+    dest: PathBuf,
+    planned_total: Arc<AtomicI64>,
+    size_is_estimate: bool,
+    first_validators: Arc<StdMutex<Option<(String, String)>>>,
+    client: Client,
+    worker_cancel: CancellationToken,
+    conn_sensitive: Arc<AtomicBool>,
+    total_downloaded: Arc<AtomicI64>,
+    seg_states: Arc<StdMutex<Vec<SegmentProgressInfo>>>,
+    db: Db,
+    progress_tx: mpsc::Sender<ProgressUpdate>,
+    speed_limiter: SpeedLimiter,
+    spec: crate::downloader::RequestSpec,
+    etag: String,
+    last_modified: String,
+    sync_gate: FileSyncGate,
+}
+
+impl WorkerSpawnCtx {
+    /// 新建一个 worker（分配 channel + spawn task），返回其分配通道与句柄。
+    fn spawn(
+        &self,
+        worker_id: usize,
+    ) -> (mpsc::Sender<WorkerAssignment>, tokio::task::JoinHandle<()>) {
+        let (assign_tx, assign_rx) = mpsc::channel::<WorkerAssignment>(4);
+        let handle = spawn_worker(
+            worker_id,
+            assign_rx,
+            self.event_tx.clone(),
+            self.task_id.clone(),
+            self.url.clone(),
+            self.dest.clone(),
+            self.planned_total.clone(),
+            self.size_is_estimate,
+            self.first_validators.clone(),
+            self.client.clone(),
+            self.worker_cancel.clone(),
+            self.conn_sensitive.clone(),
+            self.total_downloaded.clone(),
+            self.seg_states.clone(),
+            self.db.clone(),
+            self.progress_tx.clone(),
+            self.speed_limiter.clone(),
+            self.spec.clone(),
+            self.etag.clone(),
+            self.last_modified.clone(),
+            self.sync_gate.clone(),
+        );
+        (assign_tx, handle)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -699,16 +948,35 @@ pub async fn run_coordinated_download(
     let (event_tx, mut event_rx) = mpsc::channel::<WorkerEvent>(64);
 
     // ----- 5. Worker pool ---------------------------------------------------
-    // Only create as many initial workers as there are pending segments.
-    // On resume, most segments may be Completed already — spawning workers
-    // for them wastes resources and creates idle tasks.
+    // 渐进启动：`initial_segment_count` 是【最大连接数上限】，
+    // 不是启动并发。启动只开 RAMP_INITIAL_WORKERS 条连接，后续由事件循环的
+    // ramp 定时分支按吞吐反馈逐步扩容到 worker_cap。
     let pending_count = segments
         .values()
         .filter(|s| s.state == SegState::Pending)
         .count();
-    let initial_workers = pending_count
-        .min(initial_segment_count as usize)
-        .min(MAX_SEGMENTS as usize);
+
+    // 本任务的连接数硬上限：规划段数 ∧ MAX_SEGMENTS ∧ 域名学习缓存。
+    let worker_cap = {
+        let mut cap = initial_segment_count.clamp(1, MAX_SEGMENTS) as usize;
+        if let Some(domain_cap) = domain_conn_cap(url) {
+            let dc = domain_cap.max(1) as usize;
+            if dc < cap {
+                log_info!(
+                    "[adaptive] task {} 域名连接上限缓存命中：cap {} -> {}",
+                    task_id,
+                    cap,
+                    dc
+                );
+                cap = dc;
+            }
+        }
+        cap
+    };
+    // 当前允许的活跃连接额度（ramp 控制变量，1..=worker_cap 内调整）。
+    let mut allowed_workers = worker_cap.min(RAMP_INITIAL_WORKERS);
+    // 只为 Pending 段开 worker；resume 时多数段可能已完成。
+    let initial_workers = pending_count.min(allowed_workers);
 
     // fdatasync 合并闸：多段共享，把各 worker 每 3s 的整盘 fsync 合并为全局约每
     // MIN_SYNC_GAP 一次（fdatasync 本就刷整个 inode，per-fd 重复毫无意义）。
@@ -748,9 +1016,31 @@ pub async fn run_coordinated_download(
     // 服务器永不置位，行为与优化前完全一致（零回归）。
     let conn_sensitive = Arc::new(AtomicBool::new(false));
 
+    // worker 生成上下文：启动与 ramp 扩容共用同一 spawn 路径。
+    let ctx = WorkerSpawnCtx {
+        event_tx,
+        task_id: task_id.to_string(),
+        url: url.to_string(),
+        dest: dest.to_path_buf(),
+        planned_total: planned_total.clone(),
+        size_is_estimate,
+        first_validators: first_validators.clone(),
+        client: client.clone(),
+        worker_cancel: worker_cancel.clone(),
+        conn_sensitive: conn_sensitive.clone(),
+        total_downloaded: total_downloaded.clone(),
+        seg_states: seg_states.clone(),
+        db: db.clone(),
+        progress_tx: progress_tx.clone(),
+        speed_limiter: speed_limiter.clone(),
+        spec: spec.clone(),
+        etag: etag.to_string(),
+        last_modified: last_modified.to_string(),
+        sync_gate: sync_gate.clone(),
+    };
+
     for worker_id in 0..initial_workers {
-        let (assign_tx, assign_rx) = mpsc::channel::<WorkerAssignment>(4);
-        let evt_tx = event_tx.clone();
+        let (assign_tx, handle) = ctx.spawn(worker_id);
 
         // Send initial assignment (if available).
         if let Some(assignment) = assign_iter.next() {
@@ -762,38 +1052,11 @@ pub async fn run_coordinated_download(
             let _ = assign_tx.try_send(assignment);
         }
 
-        let handle = spawn_worker(
-            worker_id,
-            assign_rx,
-            evt_tx,
-            task_id.to_string(),
-            url.to_string(),
-            dest.to_path_buf(),
-            planned_total.clone(),
-            size_is_estimate,
-            first_validators.clone(),
-            client.clone(),
-            worker_cancel.clone(),
-            conn_sensitive.clone(),
-            total_downloaded.clone(),
-            seg_states.clone(),
-            db.clone(),
-            progress_tx.clone(),
-            speed_limiter.clone(),
-            spec.clone(),
-            etag.to_string(),
-            last_modified.to_string(),
-            sync_gate.clone(),
-        );
-
         worker_assign_txs.push(Some(assign_tx));
         worker_handles.push(Some(handle));
     }
     drop(assign_iter);
     drop(pending_assignments);
-
-    // Drop the original event_tx so the channel closes when all workers finish.
-    drop(event_tx);
 
     // If all segments are already completed (rare but possible), exit early.
     if all_done(&segments) {
@@ -827,6 +1090,20 @@ pub async fn run_coordinated_download(
     let mut proactive_interval =
         tokio::time::interval(Duration::from_secs(PROACTIVE_SPLIT_INTERVAL_SECS));
     proactive_interval.tick().await; // consume the immediate first tick
+
+    // ---- 渐进/自适应连接调度状态 ----
+    // ramp_frozen：停止继续扩容（扩容无吞吐增益，或出现过拒绝信号）。
+    let mut ramp_frozen = false;
+    // 分级降级计数：第 1 次拒绝 → 乘性减半（保留存活连接）；第 2 次 → 串行模式。
+    let mut reject_strikes: u32 = 0;
+    // 上个 ramp tick 刚扩容，本 tick 用窗口吞吐评估扩容效果。
+    let mut awaiting_ramp_eval = false;
+    let mut pre_grow_throughput = 0.0_f64;
+    // ramp 独立采样窗口（与上方 min_split 采样解耦，互不污染窗口边界）。
+    let mut ramp_last_bytes = total_downloaded.load(Ordering::Relaxed);
+    let mut ramp_last_time = Instant::now();
+    let mut ramp_interval = tokio::time::interval(Duration::from_secs(RAMP_TICK_SECS));
+    ramp_interval.tick().await; // consume the immediate first tick
 
     loop {
         tokio::select! {
@@ -887,6 +1164,13 @@ pub async fn run_coordinated_download(
                                 // 无其他活跃连接 → 取一个 Pending 分段（不拆分）
                                 find_next_pending_only(&mut segments)
                             }
+                        } else if worker_assign_txs.iter().filter(|t| t.is_some()).count()
+                            > allowed_workers
+                        {
+                            // 乘性降级后的【自然退休】：存活 worker 数超出当前额度，
+                            // 本 worker 完成当前段后不再领新活——绝不 cancel 进行中
+                            // 的连接，已下载进度零丢弃。
+                            None
                         } else {
                             find_next_work(
                                 &mut segments,
@@ -1112,17 +1396,48 @@ pub async fn run_coordinated_download(
                         let server_rejection = is_server_rejection(&error);
 
                         if (server_rejection && other_working) || transient_range {
-                            // ---- 自动降级为串行模式 ----
-                            if !serial_mode {
+                            // ---- 分级自适应降级 ----
+                            // 第 1 次拒绝且存活连接充足：乘性减半连接额度，冻结扩容，
+                            // 保留所有存活连接（超额部分完成当前段后自然退休）；
+                            // 再次拒绝（或本就只有 <=2 条连接）才降到串行模式。
+                            reject_strikes += 1;
+                            ramp_frozen = true;
+                            awaiting_ramp_eval = false;
+                            let reason = if transient_range {
+                                "transient-200"
+                            } else {
+                                "server-rejection"
+                            };
+                            let alive = worker_assign_txs
+                                .iter()
+                                .filter(|tx| tx.is_some())
+                                .count();
+                            if !serial_mode && reject_strikes == 1 && alive > 2 {
+                                allowed_workers = (alive / 2).max(1);
+                                log_info!(
+                                    "[adaptive] task {} ramp down: {} -> {}, reason={}, \
+                                     preserve_active=true",
+                                    task_id,
+                                    alive,
+                                    allowed_workers,
+                                    reason
+                                );
+                                // 仅 403/429（真·连接数限制）记录域名连接上限缓存。
+                                // 瞬时 200 不记录（服务器明确支持 Range，见下方注释）。
+                                if server_rejection {
+                                    record_domain_conn_cap_persist(
+                                        url,
+                                        allowed_workers as i32,
+                                        db,
+                                    );
+                                }
+                            } else if !serial_mode {
+                                // ---- 降级为串行模式 ----
                                 log_info!(
                                     "[coordinator] task {} seg {} 降级为串行模式 (reason={})",
                                     task_id,
                                     seg_index,
-                                    if transient_range {
-                                        "transient-200"
-                                    } else {
-                                        "server-rejection"
-                                    }
+                                    reason
                                 );
                                 serial_mode = true;
                                 // 仅 403/429（真·连接数限制）记录域名单连接缓存。瞬时 200
@@ -1130,7 +1445,7 @@ pub async fn run_coordinated_download(
                                 // 一次偶发 200 不应把整个主机打成单连接 24h、阻断续传与
                                 // 多段吞吐（BUG-COORD-TRANSIENT-200-POISONS-HOST）。
                                 if server_rejection {
-                                    record_single_conn_domain(url);
+                                    record_single_conn_domain_persist(url, db);
                                 }
                             }
 
@@ -1247,6 +1562,127 @@ pub async fn run_coordinated_download(
                         }
                         rebuild_seg_states(&segments, &seg_states);
                     }
+                }
+            }
+
+            // --- Adaptive ramp timer -------------------------------------
+            // 渐进启动 + 自适应扩容：每个窗口测一次总吞吐；上次扩容有净收益且
+            // 无拒绝/连接敏感信号时倍增连接额度，否则冻结在当前规模；随后按
+            // 额度补充 worker（优先领 Pending 段，否则拆分最大 Active 段）。
+            _ = ramp_interval.tick() => {
+                // 1. 测量本窗口总吞吐（独立采样窗口，与 min_split 采样解耦）。
+                let now = Instant::now();
+                let bytes = total_downloaded.load(Ordering::Relaxed);
+                let elapsed = now.duration_since(ramp_last_time).as_secs_f64();
+                let throughput = if elapsed > 0.0 {
+                    (bytes - ramp_last_bytes).max(0) as f64 / elapsed
+                } else {
+                    0.0
+                };
+                ramp_last_bytes = bytes;
+                ramp_last_time = now;
+
+                // 槽位对账：worker task 可能未经事件通道即消亡（panic 展开、
+                // Done 派工时 send 失败但槽位仍为 Some 的历史缝隙）。以
+                // JoinHandle::is_finished 为准清掉死槽位，否则 alive 永远
+                // 高估，下方存活性兜底永不触发，任务会无错误地永久停滞。
+                for (tx, h) in worker_assign_txs.iter_mut().zip(worker_handles.iter()) {
+                    if tx.is_some() && h.as_ref().is_none_or(|h| h.is_finished()) {
+                        *tx = None;
+                    }
+                }
+                let mut alive = worker_assign_txs.iter().filter(|t| t.is_some()).count();
+
+                if !serial_mode && !all_done(&segments) {
+                    // 2. 评估上一次扩容的效果：吞吐无足够增益 → 冻结在当前规模
+                    //   （已找到服务器/链路的实际并发甜点，继续加只有风控风险）。
+                    if awaiting_ramp_eval {
+                        awaiting_ramp_eval = false;
+                        // `<=` 而非 `<`：扩容前后吞吐同为 0（服务器停滞）也判
+                        // 定为无增益并冻结，避免对停滞服务器反而打满并发。
+                        if throughput <= pre_grow_throughput * RAMP_IMPROVE_FACTOR {
+                            ramp_frozen = true;
+                            log_info!(
+                                "[adaptive] task {} ramp freeze at {} conns: throughput \
+                                 {:.0} -> {:.0} B/s (no gain)",
+                                task_id,
+                                allowed_workers,
+                                pre_grow_throughput,
+                                throughput
+                            );
+                        }
+                    }
+
+                    // 3. 扩容决策：未冻结、无连接敏感信号、当前额度已用满、未达上限。
+                    if !ramp_frozen
+                        && !conn_sensitive.load(Ordering::Relaxed)
+                        && alive >= allowed_workers
+                        && allowed_workers < worker_cap
+                    {
+                        pre_grow_throughput = throughput;
+                        awaiting_ramp_eval = true;
+                        let old = allowed_workers;
+                        allowed_workers = (allowed_workers * 2).min(worker_cap);
+                        log_info!(
+                            "[adaptive] task {} ramp up: {} -> {} (cap={}), \
+                             throughput={:.0} B/s, range_ok=true",
+                            task_id,
+                            old,
+                            allowed_workers,
+                            worker_cap,
+                            throughput
+                        );
+                    }
+
+                    // 4. 按额度补充 worker：与 Done 派工同一逻辑（Pending 优先，
+                    //    否则拆分最大 Active 段），启动与扩容共用 ctx.spawn 路径。
+                    while alive < allowed_workers {
+                        sync_downloaded_from_shared(&mut segments, &seg_states);
+                        let Some(next) = find_next_work(
+                            &mut segments,
+                            &mut next_index,
+                            effective_total_bytes,
+                            current_min_split,
+                        ) else {
+                            break;
+                        };
+                        let new_seg_idx = next.assignment.seg_index;
+                        persist_segment_change(
+                            db, task_id, &segments,
+                            new_seg_idx, next.split_parent,
+                        ).await;
+                        if let Some(parent_idx) = next.split_parent {
+                            send_split_event(
+                                sink, task_id, parent_idx, new_seg_idx,
+                                &segments, false,
+                            );
+                        }
+                        rebuild_seg_states(&segments, &seg_states);
+                        let worker_id = worker_assign_txs.len();
+                        let (assign_tx, handle) = ctx.spawn(worker_id);
+                        // channel 刚创建（容量 4），try_send 不可能失败；防御回退。
+                        if assign_tx.try_send(next.assignment).is_err() {
+                            if let Some(seg) = segments.get_mut(&new_seg_idx) {
+                                seg.state = SegState::Pending;
+                            }
+                            break;
+                        }
+                        worker_assign_txs.push(Some(assign_tx));
+                        worker_handles.push(Some(handle));
+                        alive += 1;
+                    }
+                }
+
+                // 5. 存活性兜底：ctx 持有 event_tx，worker 全部退出（如 panic）
+                //    不再触发 channel 关闭。若无存活 worker、任务未完成且上面的
+                //    补充循环也无法开工，退出事件循环——交由第 8 步完整性检查
+                //    报错，与旧实现 channel-close 路径语义等价。
+                if alive == 0 && !all_done(&segments) {
+                    log_info!(
+                        "[coordinator] task {} 所有 worker 已退出但任务未完成，退出事件循环",
+                        task_id
+                    );
+                    break;
                 }
             }
 
@@ -2226,7 +2662,7 @@ async fn do_segment_with_retry(
             //     （如 FnOS NAS）。立即返回让 coordinator 快速回退单流，不空烧退避。
             //   • total_downloaded>0：Range 明确工作过，本次 200 是瞬时的（alist 代理
             //     云盘在连接压力下偶发全量响应）。落入下方通用 Err(e) 分支像普通瞬时
-            //     错误一样带退避重试——换连接重发多数即恢复 206，对标 aria2 --max-tries。
+            //     错误一样带退避重试——换连接重发多数即恢复 206。
             Err(e @ DownloadError::RangeNotSupported(_))
                 if total_downloaded.load(Ordering::Relaxed) == 0 =>
             {
@@ -2405,7 +2841,7 @@ async fn do_segment(
         //     判定与 coordinator transient_range 一致，均以 total_downloaded>0 为
         //     "Range 工作过"的证据。
         if total_downloaded.load(Ordering::Relaxed) == 0 {
-            record_single_conn_domain(url);
+            record_single_conn_domain_persist(url, db);
         }
         return Err(DownloadError::RangeNotSupported(resp.status().to_string()));
     }
@@ -2570,7 +3006,7 @@ async fn do_segment(
     if let Some(enc) = crate::downloader::detect_content_encoding(resp.headers()) {
         // Record the domain so that the retry (or any future task for this
         // host) automatically uses single-stream mode.
-        record_single_conn_domain(url);
+        record_single_conn_domain_persist(url, db);
         return Err(DownloadError::Other(format!(
             "segment {}: server returned Content-Encoding ({:?}) on a Range response. \
              Compressed byte ranges cannot be assembled into a valid file. \
@@ -2581,7 +3017,7 @@ async fn do_segment(
     // 未知但存在的 Content-Encoding（如 compress）：detect 返回 None 会被当 identity
     // 原样拼接 → 损坏。同样回退单流（BUG-HTTP-UNKNOWN-ENCODING-RAW 的多段对应面）。
     if let Some(unknown) = crate::downloader::unsupported_content_encoding(resp.headers()) {
-        record_single_conn_domain(url);
+        record_single_conn_domain_persist(url, db);
         return Err(DownloadError::Other(format!(
             "segment {seg_idx}: server returned unsupported Content-Encoding '{unknown}' on a \
              Range response; cannot assemble byte ranges. Please retry in single-stream mode."
@@ -2896,8 +3332,8 @@ mod tests {
     use super::{
         FileSyncGate, LiveSegment, MAX_SEGMENTS, MIN_SPLIT_BYTES, MIN_SYNC_GAP, SegState,
         TAIL_MIN_SPLIT_BYTES, all_done, build_seg_state_vec, check_cross_segment_validators,
-        dynamic_min_split_bytes, extract_host, find_next_pending_only, find_next_work,
-        is_single_conn_domain, rebuild_seg_states, record_single_conn_domain, single_conn_cache,
+        conn_cap_cache, dynamic_min_split_bytes, extract_host, find_next_pending_only,
+        find_next_work, is_single_conn_domain, rebuild_seg_states, record_domain_conn_cap,
         try_proactive_split, try_split_largest, validate_coverage,
     };
     use crate::downloader::{DownloadError, SegmentProgressInfo, is_server_rejection};
@@ -3684,13 +4120,13 @@ mod tests {
         let domain = "single-conn-test-record.example.com";
 
         // 预清理：确保本测试域名在全局缓存中不存在（防止并行/重试干扰）
-        if let Ok(mut cache) = single_conn_cache().lock() {
+        if let Ok(mut cache) = conn_cap_cache().lock() {
             cache.remove(domain);
         }
 
         assert!(!is_single_conn_domain(url), "记录前不应命中缓存");
 
-        record_single_conn_domain(url);
+        record_domain_conn_cap(url, 1);
         assert!(is_single_conn_domain(url), "记录后应命中缓存");
 
         // 同域名不同路径也应命中
@@ -3706,7 +4142,7 @@ mod tests {
         );
 
         // 清理：从缓存中移除测试数据
-        if let Ok(mut cache) = single_conn_cache().lock() {
+        if let Ok(mut cache) = conn_cap_cache().lock() {
             cache.remove(domain);
         }
     }
@@ -3719,12 +4155,12 @@ mod tests {
         let domain_b = "single-conn-test-ports-b.example.com:9090";
 
         // 预清理：确保两个测试域名在全局缓存中不存在
-        if let Ok(mut cache) = single_conn_cache().lock() {
+        if let Ok(mut cache) = conn_cap_cache().lock() {
             cache.remove(domain_a);
             cache.remove(domain_b);
         }
 
-        record_single_conn_domain(url_a);
+        record_domain_conn_cap(url_a, 1);
         assert!(is_single_conn_domain(url_a), "记录后 url_a 应命中缓存");
         // 不同域名（含不同端口）不应命中
         assert!(
@@ -3733,10 +4169,129 @@ mod tests {
         );
 
         // 清理
-        if let Ok(mut cache) = single_conn_cache().lock() {
+        if let Ok(mut cache) = conn_cap_cache().lock() {
             cache.remove(domain_a);
             cache.remove(domain_b);
         }
+    }
+
+    #[test]
+    fn domain_conn_cap_records_and_keeps_minimum() {
+        use super::{domain_conn_cap, record_domain_conn_cap};
+        let url = "http://conn-cap-test-min.example.com/file";
+        let domain = "conn-cap-test-min.example.com";
+
+        // 预清理：确保本测试域名在全局缓存中不存在
+        if let Ok(mut cache) = conn_cap_cache().lock() {
+            cache.remove(domain);
+        }
+
+        assert_eq!(domain_conn_cap(url), None, "记录前不应命中缓存");
+
+        // 记录上限 8：命中 cap 缓存但不是单连接
+        record_domain_conn_cap(url, 8);
+        assert_eq!(domain_conn_cap(url), Some(8));
+        assert!(!is_single_conn_domain(url), "cap>1 不应视为单连接");
+
+        // 更低的观察优先：先 8 后 4 → 4；再记 16 不得回涨
+        record_domain_conn_cap(url, 4);
+        assert_eq!(domain_conn_cap(url), Some(4));
+        record_domain_conn_cap(url, 16);
+        assert_eq!(
+            domain_conn_cap(url),
+            Some(4),
+            "更高的 cap 不应覆盖更低的观察"
+        );
+
+        // cap 下限钳制到 1；cap==1 即单连接语义
+        record_domain_conn_cap(url, 0);
+        assert_eq!(domain_conn_cap(url), Some(1));
+        assert!(is_single_conn_domain(url), "cap==1 即单连接");
+
+        // 清理
+        if let Ok(mut cache) = conn_cap_cache().lock() {
+            cache.remove(domain);
+        }
+    }
+
+    #[test]
+    fn conn_caps_serialize_parse_roundtrip() {
+        use super::{parse_conn_caps, serialize_conn_caps};
+        let mut map = std::collections::HashMap::new();
+        map.insert("a.example.com".to_string(), (4, 1000u64));
+        map.insert("b.example.com:8443".to_string(), (1, 2000u64));
+
+        let raw = serialize_conn_caps(&map);
+        assert!(raw.starts_with("v1\n"), "首行必须是版本标记");
+        assert_eq!(parse_conn_caps(&raw), map, "roundtrip 必须无损");
+    }
+
+    #[test]
+    fn conn_caps_unknown_version_discarded_entirely() {
+        use super::parse_conn_caps;
+        // 未来版本/无版本头的数据整体丢弃（重新学习），绝不猜测字段含义
+        assert!(parse_conn_caps("v2\na.example.com\t4\t1000").is_empty());
+        assert!(parse_conn_caps("a.example.com\t4\t1000").is_empty());
+        assert!(parse_conn_caps("").is_empty());
+    }
+
+    #[test]
+    fn conn_caps_malformed_lines_skipped_within_version() {
+        use super::parse_conn_caps;
+        let raw = "v1\nok.example.com\t4\t1000\n\
+                   缺字段\t4\nbad-cap.example.com\tx\t1\nzero-cap.example.com\t0\t1";
+        let map = parse_conn_caps(raw);
+        assert_eq!(map.len(), 1, "畸形/非法行应被跳过");
+        assert_eq!(map.get("ok.example.com"), Some(&(4, 1000u64)));
+    }
+
+    #[tokio::test]
+    async fn conn_caps_persist_and_reload_roundtrip() {
+        use super::{
+            CONN_CAP_CONFIG_KEY, domain_conn_cap, load_domain_conn_caps, now_unix_secs,
+            serialize_conn_caps,
+        };
+        let dir = std::env::temp_dir().join(format!("fluxdown_connp_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db = crate::db::Db::open(&dir).await.expect("open db");
+
+        let fresh_host = "persist-fresh.example.com";
+        let stale_host = "persist-stale.example.com";
+        // 预清理全局缓存
+        if let Ok(mut cache) = conn_cap_cache().lock() {
+            cache.remove(fresh_host);
+            cache.remove(stale_host);
+        }
+
+        // 写入一条新鲜 + 一条过期（25h 前）的持久化数据
+        let now = now_unix_secs();
+        let mut map = std::collections::HashMap::new();
+        map.insert(fresh_host.to_string(), (4, now));
+        map.insert(stale_host.to_string(), (1, now - 25 * 3600));
+        db.set_config(CONN_CAP_CONFIG_KEY, &serialize_conn_caps(&map))
+            .await
+            .expect("set_config");
+
+        load_domain_conn_caps(&db).await;
+
+        assert_eq!(
+            domain_conn_cap(&format!("http://{fresh_host}/f")),
+            Some(4),
+            "新鲜条目应跨重启恢复"
+        );
+        assert_eq!(
+            domain_conn_cap(&format!("http://{stale_host}/f")),
+            None,
+            "过期条目在加载时应被丢弃"
+        );
+
+        // 清理
+        if let Ok(mut cache) = conn_cap_cache().lock() {
+            cache.remove(fresh_host);
+            cache.remove(stale_host);
+        }
+        drop(db);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // -----------------------------------------------------------------------

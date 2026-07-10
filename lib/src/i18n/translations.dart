@@ -273,6 +273,8 @@ class S {
   String get threads => _t('线程数', 'Threads');
   String get customThreads => _t('自定义', 'Custom');
   String get customThreadsHint => _t('输入 1-256', 'Enter 1-256');
+  String customRangeHint(int min, int max) =>
+      _t('输入 $min-$max', 'Enter $min-$max');
   String get threadsInvalidRange =>
       _t('线程数须在 1-256 之间', 'Threads must be between 1 and 256');
   String get renameOptional =>
@@ -637,9 +639,16 @@ class S {
     '开启后新建下载默认使用上次下载的保存位置，而非固定的默认目录',
     'Use the last download location as the default for new downloads instead of the fixed directory',
   );
-  String get defaultThreads => _t('默认线程数', 'Default Threads');
-  String get defaultThreadsDesc =>
-      _t('每个下载任务的默认分片数量', 'Default segment count per download task');
+  String get defaultThreads => _t('最大连接数', 'Max Connections');
+  String get defaultThreadsDesc => _t(
+    '每个任务允许的最大并发连接数上限，下载器从低并发起步按服务器表现逐步提升',
+    'Per-task connection cap; the downloader ramps up gradually based on server behaviour',
+  );
+  String get autoMaxConnections => _t('Auto 模式连接上限', 'Auto Mode Connection Cap');
+  String get autoMaxConnectionsDesc => _t(
+    '连接数设为 Auto 时智能调度允许的最大连接数',
+    'Maximum connections the auto scheduler may use when threads are set to Auto',
+  );
   String get maxConcurrent => _t('最大同时下载数', 'Max Concurrent Downloads');
   String get maxConcurrentDesc =>
       _t('同时进行的最大下载任务数量', 'Maximum number of simultaneous downloads');
@@ -1256,6 +1265,12 @@ class S {
   );
   String get feedbackVersionLabel => _t('应用版本', 'App Version');
   String get feedbackVersionAuto => _t('自动获取', 'Auto-detected');
+  String get feedbackSysInfoLabel => _t('附带信息', 'Attached Info');
+  String get feedbackSysInfoSystem => _t('系统', 'System');
+  String get feedbackSysInfoHint => _t(
+    '提交时将附带以上应用版本与系统信息，便于定位问题；不含任何个人敏感数据',
+    'The app version and system info above are sent with your feedback to help diagnose issues. No personal or sensitive data is included.',
+  );
   String get feedbackAttachLogs => _t('附带今日日志', 'Attach today\'s logs');
   String get feedbackAttachLogsHint => _t(
     '发送时附带当天日志（已脱敏），有助于我们更快定位问题',

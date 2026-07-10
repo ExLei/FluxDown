@@ -153,6 +153,8 @@ impl Engine {
             Some(url) => Db::connect(url).await?,
             None => Db::open(&data_dir).await?,
         };
+        // 读回持久化的域名连接上限观察（过期/旧版本数据在加载时丢弃）。
+        segment_coordinator::load_domain_conn_caps(&db).await;
         let manager = DownloadManager::new(
             db.clone(),
             DownloadManagerConfig {

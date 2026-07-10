@@ -83,6 +83,14 @@ const CANCELLED_ERROR_MESSAGE: &str = "cancelled";
 /// `-1` = 无限重试，`0` = 关闭自动重试，`1..=10` = 重试次数上限。
 const DEFAULT_MAX_TASK_AUTO_RETRIES: i32 = 3;
 
+/// Auto 模式最大连接数上限的默认值（config `auto_max_connections`，经
+/// [`DownloadManager::set_auto_max_connections`] 注入）。
+///
+/// 语义：advisor 推荐值经此裁剪——`effective = min(advisor, cap)`。
+/// 默认 16 而非 advisor 的绝对上限 64：避免对连接敏感的服务器/CDN 上来就
+/// 32/64 并发触发风控；需要更高并发的用户可在设置中显式调大。
+const DEFAULT_AUTO_MAX_CONNECTIONS: i32 = 16;
+
 /// 自动重试基础延迟（秒）的默认值。实际延迟 = base × attempt，即 5s / 10s / 15s 递增。
 ///
 /// 运行时值由用户在设置中配置（config 表 `auto_retry_delay_secs`，经
@@ -577,6 +585,9 @@ pub struct DownloadManager {
     global_user_agent: String,
     /// Global default segment count from settings. 0 = defer to segment_advisor.
     global_default_segments: i32,
+    /// Auto 模式最大连接数上限（config `auto_max_connections`）。
+    /// <=0 = 不限（罕见，仅显式配置），默认 [`DEFAULT_AUTO_MAX_CONNECTIONS`]。
+    auto_max_connections: i32,
     /// In-memory cache of named queue settings (queue_id → QueueInfo).
     /// Kept in sync with the DB on every queue CRUD operation.
     queues: HashMap<String, QueueInfo>,
@@ -683,6 +694,7 @@ impl DownloadManager {
             bt_config,
             global_user_agent: user_agent,
             global_default_segments: 0,
+            auto_max_connections: DEFAULT_AUTO_MAX_CONNECTIONS,
             queues: HashMap::new(),
             queue_limiters: HashMap::new(),
             startup_reset_done: false,
@@ -770,6 +782,12 @@ impl DownloadManager {
         self.global_default_segments = v;
     }
 
+    /// Update the Auto-mode max connection cap (config `auto_max_connections`).
+    /// <=0 = unlimited (advisor value used as-is).
+    pub fn set_auto_max_connections(&mut self, v: i32) {
+        self.auto_max_connections = v;
+    }
+
     /// Update global speed limit (bytes/sec).  Takes effect immediately on
     /// all active and future HTTP/FTP/BT downloads.  0 = unlimited.
     pub fn set_speed_limit(&mut self, bps: u64) {
@@ -799,7 +817,16 @@ impl DownloadManager {
         let new_client = downloader::build_client(&config, &self.global_user_agent)?;
         self.client = new_client;
         self.proxy_config = config;
+        // 网络出口变化：域名连接上限是对【旧出口】的服务器策略观察，
+        // 换代理后不再可信，清空重学（内存 + 持久化）。
+        crate::segment_coordinator::clear_domain_conn_caps(&self.db);
         Ok(())
+    }
+
+    /// 清空已学习的域名连接上限观察（内存 + 持久化）。
+    /// 供用户在设置中手动重置——学习结果与服务器当前策略不符时的逃生门。
+    pub fn clear_domain_conn_caps(&self) {
+        crate::segment_coordinator::clear_domain_conn_caps(&self.db);
     }
 
     /// Get a reference to the current proxy configuration.
@@ -2177,6 +2204,7 @@ impl DownloadManager {
                 extra_headers,
                 spec,
                 audio_url,
+                auto_max_connections: self.auto_max_connections,
             };
 
             tokio::spawn(async move {
@@ -2727,6 +2755,7 @@ impl DownloadManager {
                 // 这是已知折衷：成本远低于把 POST 体写进 SQLite。
                 spec: downloader::RequestSpec::empty_get(),
                 audio_url,
+                auto_max_connections: self.auto_max_connections,
             };
 
             tokio::spawn(async move {

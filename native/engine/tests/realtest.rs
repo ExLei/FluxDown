@@ -92,6 +92,9 @@ struct ServerState {
     /// 长度。模拟【渐进上传中文件不断增长】/病态分母膨胀（BUG-HTTP-HINT-UNDERSIZED
     /// 的扩容配额路径）。注意：注入值必须 >= 请求区间末尾+1 才自洽。
     range_total_sequence: std::sync::Mutex<Vec<i64>>,
+    /// 每个 range GET 响应体写出前 sleep 的毫秒数（0 = 不限速）。用于让下载
+    /// 持续多个 ramp 评估窗口，以断言渐进启动的初始并发行为。
+    throttle_range_ms: u64,
 
     // --- 计数器（断言用）---
     head_count: AtomicUsize,
@@ -122,6 +125,7 @@ impl ServerState {
             force_full_on_segment_range: false,
             force_full_range_get_once: std::sync::atomic::AtomicBool::new(false),
             range_total_sequence: std::sync::Mutex::new(Vec::new()),
+            throttle_range_ms: 0,
             head_count: AtomicUsize::new(0),
             full_get_count: AtomicUsize::new(0),
             range_get_count: AtomicUsize::new(0),
@@ -433,6 +437,11 @@ async fn handle_conn(mut stream: TcpStream, st: Arc<ServerState>) -> std::io::Re
     h.push_str("Connection: close\r\n\r\n");
     write_all(&mut stream, h.as_bytes()).await?;
 
+    // 节流注入：拉长每个分段响应的时长（渐进启动行为测试用）。
+    if st.throttle_range_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(st.throttle_range_ms)).await;
+    }
+
     // 断流注入：第 N 个 range GET 只写前 K 字节然后关闭
     if let Some((drop_n, k)) = st.drop_range_get_nth
         && n == drop_n
@@ -699,6 +708,72 @@ async fn multi_segment_correctness_matrix() {
         "多段下载出现 {} 处损坏/错误",
         failures.len()
     );
+}
+
+// ===========================================================================
+// 测试：渐进启动——固定段数不再瞬间打满并发
+// ===========================================================================
+
+/// 服务器对每个分段响应节流 1.2s，请求 8 段下载。旧实现启动瞬间背靠背发起
+/// 8 个并发 Range 请求；渐进启动实现首窗口内只允许 RAMP_INITIAL_WORKERS(=2)
+/// 条连接，后续按吞吐反馈扩容。断言：
+///   1. 启动后 1s 内观察到的 range GET 数 <= 3（初始并发 2 + 时序容差 1）；
+///   2. 下载最终逐字节正确；
+///   3. 全部 8 个分段都被下载（range GET 总数 >= 8）。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a local port; run with --ignored"]
+async fn ramp_up_starts_conservatively() {
+    let work_dir = unique_dir("rampup");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+
+    let size = 4_194_304usize; // 4 MiB
+    let body = Arc::new(gen_body(size, 42));
+    let expected = sha256_bytes(&body);
+    let mut st = ServerState::new(body.clone(), "etag-ramp");
+    st.throttle_range_ms = 1200;
+    let st = Arc::new(st);
+    let server = start_server(st.clone()).await;
+    let url = server.url("/file");
+
+    let cancel = CancellationToken::new();
+    let handle = {
+        let work_dir = work_dir.clone();
+        let url = url.clone();
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            run_coord(
+                &work_dir,
+                "task-rampup",
+                &url,
+                size as i64,
+                8,
+                "\"etag-ramp\"",
+                &cancel,
+            )
+            .await
+        })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    let early = st.range_get_count.load(Ordering::SeqCst);
+
+    let (res, dest) = handle.await.expect("join download task");
+    res.expect("ramp-up download should succeed");
+
+    assert!(
+        early <= 3,
+        "渐进启动首秒并发过高：观察到 {early} 个 range GET（期望 <= 3）"
+    );
+    let got = std::fs::read(&dest).expect("read dest");
+    assert_eq!(sha256_bytes(&got), expected, "内容必须逐字节一致");
+    let total_gets = st.range_get_count.load(Ordering::SeqCst);
+    assert!(
+        total_gets >= 8,
+        "8 个分段应至少产生 8 个 range GET（实际 {total_gets}）"
+    );
+    drop(server);
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
 }
 
 /// 隔离复现：2 字节单段下载是否稳定 hang。
@@ -1139,6 +1214,7 @@ async fn run_full(
     });
 
     let params = DownloadParams {
+        auto_max_connections: 0, // 测试不裁剪 advisor
         task_id: task_id.to_string(),
         url: url.to_string(),
         save_dir: work_dir.to_string_lossy().to_string(),

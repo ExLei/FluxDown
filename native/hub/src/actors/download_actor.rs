@@ -214,7 +214,9 @@ fn spawn_ed2k_nodes_dat_refresh(db: Db) {
 }
 
 /// Read initial config values from DB to pass to DownloadManager.
-async fn load_initial_config(db: &Db) -> (usize, u64, String, BtConfig, ProxyConfig, String, i32) {
+async fn load_initial_config(
+    db: &Db,
+) -> (usize, u64, String, BtConfig, ProxyConfig, String, i32, i32) {
     let config = db.get_all_config().await.unwrap_or_default();
     let max_concurrent = config
         .get("max_concurrent_tasks")
@@ -236,6 +238,11 @@ async fn load_initial_config(db: &Db) -> (usize, u64, String, BtConfig, ProxyCon
         .get("default_segments")
         .and_then(|v| v.parse::<i32>().ok())
         .unwrap_or(0);
+    // Auto 模式最大连接数上限。老库无此 key → 默认 16。
+    let auto_max_connections = config
+        .get("auto_max_connections")
+        .and_then(|v| v.parse::<i32>().ok())
+        .unwrap_or(16);
 
     (
         max_concurrent,
@@ -245,6 +252,7 @@ async fn load_initial_config(db: &Db) -> (usize, u64, String, BtConfig, ProxyCon
         proxy_config,
         user_agent,
         default_segments,
+        auto_max_connections,
     )
 }
 
@@ -271,6 +279,7 @@ pub async fn run(db_dir: PathBuf) {
         proxy_config,
         user_agent,
         default_segments,
+        auto_max_connections,
     ) = load_initial_config(&db).await;
     log_info!(
         "[actor] proxy config: mode={}, type={}, host={}, port={}",
@@ -357,6 +366,7 @@ pub async fn run(db_dir: PathBuf) {
     };
 
     engine.manager.set_default_segments(default_segments);
+    engine.manager.set_auto_max_connections(auto_max_connections);
 
     // Apply persisted log size cap (MB) to the global logger.
     if let Ok(Some(v)) = engine.db.get_config("log_max_size_mb").await
@@ -1373,6 +1383,12 @@ async fn apply_config_key(
             if let Ok(v) = value.parse::<i32>() {
                 log_info!("[actor] updating default_segments to {}", v);
                 engine.manager.set_default_segments(v);
+            }
+        }
+        "auto_max_connections" => {
+            if let Ok(v) = value.parse::<i32>() {
+                log_info!("[actor] updating auto_max_connections to {}", v);
+                engine.manager.set_auto_max_connections(v);
             }
         }
         "max_auto_retries" => {

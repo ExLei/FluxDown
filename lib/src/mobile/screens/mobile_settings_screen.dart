@@ -119,6 +119,12 @@ class MobileSettingsScreen extends StatelessWidget {
                               : '${settings.defaultSegments}',
                           onTap: () => _selectThreads(context),
                         ),
+                        if (settings.defaultSegments == 0)
+                          _Row(
+                            label: s.autoMaxConnections,
+                            value: '${settings.autoMaxConnections}',
+                            onTap: () => _selectAutoMaxConnections(context),
+                          ),
                         _Row(
                           label: s.maxConcurrent,
                           value: '${settings.maxConcurrentTasks}',
@@ -359,6 +365,19 @@ class MobileSettingsScreen extends StatelessWidget {
         for (final n in const [4, 8, 16, 32, 64]) (n, '$n'),
       ],
       onSelect: settings.setDefaultSegments,
+    );
+  }
+
+  void _selectAutoMaxConnections(BuildContext context) {
+    final s = LocaleScope.of(context);
+    _showSelectSheet<int>(
+      context,
+      title: s.autoMaxConnections,
+      current: settings.autoMaxConnections,
+      options: [
+        for (final n in const [4, 8, 16, 32, 64]) (n, '$n'),
+      ],
+      onSelect: settings.setAutoMaxConnections,
     );
   }
 

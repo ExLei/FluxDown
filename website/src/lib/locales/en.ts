@@ -485,6 +485,10 @@ const en = {
   "fb.versionPlaceholder": "e.g. v0.5.2",
   "fb.versionHint":
     "Find it in Settings → About inside FluxDown. Helps us pinpoint the issue.",
+  "fb.envLabel": "Environment",
+  "fb.envAuto": "auto-detected",
+  "fb.envHint":
+    "The system / browser / language info above is sent with your feedback to help diagnose issues. No personal or sensitive data is included.",
   "fb.contactLabel": "Contact",
   "fb.contactPlaceholder": "Email or other way to reach you",
   "fb.contactHint":
@@ -754,6 +758,7 @@ const en = {
   "footer.legal": "Legal",
   "footer.privacy": "Privacy",
   "footer.terms": "Terms",
+  "footer.codeSigning": "Code Signing Policy",
   "footer.sponsor": "Sponsor",
   "footer.community": "Community",
   "footer.announcements": "Announcements",

@@ -471,6 +471,10 @@ const zhCN: Messages = {
   "fb.versionLabel": "应用版本",
   "fb.versionPlaceholder": "例如 v0.5.2",
   "fb.versionHint": "可在 FluxDown 设置 → 关于 中查看版本号，有助于我们定位问题",
+  "fb.envLabel": "运行环境",
+  "fb.envAuto": "自动检测",
+  "fb.envHint":
+    "提交时将附带以上系统 / 浏览器 / 语言信息，便于定位问题；不含任何个人敏感数据",
   "fb.contactLabel": "联系方式",
   "fb.contactPlaceholder": "邮箱或其他联系方式",
   "fb.contactHint": "填写邮箱可收到反馈进度通知，其他联系方式可能无法收到通知",
@@ -754,6 +758,7 @@ const zhCN: Messages = {
   "footer.legal": "法律",
   "footer.privacy": "隐私政策",
   "footer.terms": "服务条款",
+  "footer.codeSigning": "代码签名政策",
   "footer.community": "社区",
   "footer.announcements": "公告动态",
   "footer.logoVote": "Logo 投票",

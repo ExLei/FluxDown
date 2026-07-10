@@ -109,6 +109,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     engine.manager.set_default_segments(default_segments);
+    // Auto 模式最大连接数上限。老库无此 key → 默认 16。
+    engine.manager.set_auto_max_connections(
+        all_cfg
+            .get("auto_max_connections")
+            .and_then(|s| s.parse::<i32>().ok())
+            .unwrap_or(16),
+    );
     if let Some(v) = all_cfg
         .get("max_auto_retries")
         .and_then(|s| s.parse::<i32>().ok())

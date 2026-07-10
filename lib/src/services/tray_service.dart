@@ -210,7 +210,7 @@ class TrayService with TrayListener {
       return;
     }
     try {
-      // 诊断日志：窗口前置状态（macOS 最小化恢复问题排查用，issue #420）
+      // 诊断日志：窗口前置状态（macOS 最小化恢复问题排查用）
       final isMinimized = await windowManager.isMinimized();
       final isVisible = await windowManager.isVisible();
       logInfo(

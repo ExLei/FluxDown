@@ -13,6 +13,7 @@
  *   pagePath?: string    // 可选，docs 反馈关联的页面路径（需以 /docs/ 开头且 ≤200 字符，校验失败则静默忽略）
  *   logs?: string        // 可选，客户端日志（脱敏后），独立折叠展示，上限 30000 字符（超限截断保留末尾）
  *   appVersion: string   // 应用版本号（≤50 字符）；除 docs 反馈外必填（App 端自动注入，网站表单手动填写）
+ *   environment?: string // 可选，客户端环境摘要（OS/浏览器/语言等，客户端自动检测并在表单中明示；单行 ≤300 字符）
  * }
  *
  * 防滥用:
@@ -100,6 +101,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     logs?: string;
     source?: string; // "website"（默认）| "app"，决定来源标签与 body 模板措辞
     appVersion?: string; // 应用版本号，除 docs 类型外必填
+    environment?: string; // 可选，客户端环境摘要（自动检测的 OS/浏览器/语言，非敏感信息）
   };
 
   try {
@@ -111,7 +113,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     });
   }
 
-  const { type, title, description, contact, pagePath, logs, source, appVersion } = body;
+  const { type, title, description, contact, pagePath, logs, source, appVersion, environment } = body;
 
   // 验证必填字段
   if (!type || !title || !description) {
@@ -178,6 +180,13 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
       ? logs.trim().slice(-30000)
       : undefined;
 
+  // 可选字段：environment（客户端自动检测的系统/浏览器/语言摘要）。
+  // 压成单行并限长，防止注入 metadata 区破坏 parseFeedbackBody；校验失败静默忽略。
+  const safeEnvironment =
+    typeof environment === "string" && environment.trim().length > 0
+      ? environment.trim().replace(/\s+/g, " ").slice(0, 300)
+      : undefined;
+
   // 构造 Issue 内容。按 type 生成区分 bug / feature 的结构化标题，按 source
   // 区分来源（Website 表单 vs 桌面应用内反馈），metadata 尾部保留
   // **Type:** / **Source:** / **Submitted:** 字面量以兼容 issues API 的 parseFeedbackBody。
@@ -220,6 +229,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     `**Type:** ${type}`,
     safePagePath ? `**页面**: ${safePagePath}` : null,
     contact ? `**Contact:** ${contact}` : null,
+    safeEnvironment ? `**Environment:** ${safeEnvironment}` : null,
     `**Source:** ${sourceMeta}`,
     `**Submitted:** ${new Date().toISOString()}`,
     `**IP:** \`${ip}\``,

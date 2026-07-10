@@ -641,6 +641,13 @@ async fn compute_ftp_segments(p: &DownloadParams, info: &FileInfo) -> i32 {
         static_advice.segments
     };
 
+    // Auto 模式最大连接数上限（与 HTTP 一致的全局语义，<=0 = 不限）。
+    let result = if p.auto_max_connections > 0 {
+        result.min(p.auto_max_connections)
+    } else {
+        result
+    };
+
     if let Err(e) = p.db.update_task_segments(&p.task_id, result).await {
         log_info!(
             "[ftp-download] task {} failed to persist segment count: {}",

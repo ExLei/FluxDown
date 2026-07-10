@@ -154,6 +154,7 @@ export default function Footer() {
               {[
                 { href: "/privacy/", label: t("footer.privacy") },
                 { href: "/terms/", label: t("footer.terms") },
+                { href: "/code-signing/", label: t("footer.codeSigning") },
               ].map(({ href, label }) => (
                 <li key={href}>
                   <a

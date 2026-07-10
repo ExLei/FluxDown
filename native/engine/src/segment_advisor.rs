@@ -1,19 +1,18 @@
 //! Dynamic segment (thread) allocation for downloads.
 //!
-//! Instead of a hard-coded "8 segments", this module calculates an optimal
-//! segment count based on:
+//! Instead of a hard-coded "8 segments", this module calculates a
+//! **recommended connection cap** based on:
 //!
 //! 1. **File size** — tiny files need fewer segments; each segment should get
 //!    at least [`MIN_BYTES_PER_SEGMENT`] bytes to amortize HTTP overhead.
 //! 2. **CPU logical cores** — more segments than cores is wasteful for I/O
 //!    scheduling.
-//! 3. **Observed bandwidth** — measured during the probe phase.  High-latency
-//!    / low-bandwidth links benefit from fewer connections.
-
-use std::time::Duration;
-
-use reqwest::Client;
-use tokio_util::sync::CancellationToken;
+//!
+//! For HTTP the result is a *cap*, not a startup concurrency target: the
+//! segment coordinator ramps the live worker count from a small initial value
+//! up to this cap based on observed throughput (see `segment_coordinator`).
+//! FTP still refines the static advice with its own bandwidth probe
+//! ([`advise_with_bandwidth`]).
 
 // ---------------------------------------------------------------------------
 // Tuning constants
@@ -36,14 +35,6 @@ const MIN_BYTES_PER_SEGMENT: i64 = 1024 * 1024; // 1 MB
 /// Lowered from 4 MB to 2 MB: on broadband connections even 2–4 MB files
 /// benefit from 2 parallel segments (halves the wall-clock time).
 const SINGLE_SEGMENT_THRESHOLD: i64 = 2 * 1024 * 1024; // 2 MB
-
-/// How many bytes to download during the bandwidth probe.
-/// 128 KB 已足以退出 TCP 慢启动（典型 RTT 30-100ms，慢启动 ~5 RTTs 约 50KB），
-/// 同时将探测耗时从 ~1.7s（512KB/300KB/s）降低至 ~400ms，显著改善批量任务启动体验。
-const PROBE_BYTES: u64 = 128 * 1024; // 128 KB
-
-/// Maximum wall-clock time for the bandwidth probe.
-const PROBE_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Bandwidth thresholds (bytes/sec) for segment scaling.
 /// - Below LOW  → few segments (connection is the bottleneck, not parallelism)
@@ -173,83 +164,6 @@ pub fn advise_with_bandwidth(input: &AdvisorInput, bandwidth_bps: f64) -> Segmen
     }
 }
 
-/// Run a short bandwidth probe by downloading a small chunk and measuring
-/// throughput.  Returns bytes/sec, or `None` if the probe fails or is
-/// cancelled.
-///
-/// This reuses the download URL so we measure the *actual* server's speed
-/// (not some generic speed-test endpoint).
-pub async fn probe_bandwidth(
-    client: &Client,
-    url: &str,
-    supports_range: bool,
-    cancel_token: &CancellationToken,
-    cookies: &str,
-    referrer: &str,
-    extra_headers: &std::collections::HashMap<String, String>,
-) -> Option<f64> {
-    use futures_util::StreamExt;
-
-    // If server doesn't support Range, we can still probe — just download
-    // from the beginning and abort after PROBE_BYTES.
-    let mut req = client.get(url);
-    if supports_range {
-        req = req.header("Range", format!("bytes=0-{}", PROBE_BYTES - 1));
-    }
-    if !cookies.is_empty() {
-        req = req.header("Cookie", cookies);
-    }
-    // 设置 Referer 头，部分 CDN/防盗链服务器需要此字段
-    if !referrer.is_empty() {
-        req = req.header(reqwest::header::REFERER, referrer);
-    }
-    // 应用用户自定义请求头
-    req = crate::downloader::apply_extra_headers(req, extra_headers);
-
-    let start = std::time::Instant::now();
-
-    let resp = tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => return None,
-        r = req.timeout(PROBE_TIMEOUT).send() => {
-            match r {
-                Ok(r) if r.status().is_success() || r.status().as_u16() == 206 => r,
-                _ => return None,
-            }
-        }
-    };
-
-    let mut stream = resp.bytes_stream();
-    let mut total: u64 = 0;
-
-    loop {
-        let chunk = tokio::select! {
-            biased;
-            _ = cancel_token.cancelled() => return None,
-            c = stream.next() => c,
-        };
-
-        match chunk {
-            Some(Ok(bytes)) => {
-                total += bytes.len() as u64;
-                if total >= PROBE_BYTES {
-                    break;
-                }
-            }
-            Some(Err(_)) => break, // partial data is fine
-            None => break,         // stream ended
-        }
-    }
-
-    let elapsed = start.elapsed();
-    if elapsed.as_millis() < 50 || total < 1024 {
-        // Too fast or too little data to be meaningful.
-        return None;
-    }
-
-    Some(total as f64 / elapsed.as_secs_f64())
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -267,7 +181,7 @@ fn available_parallelism() -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AdvisorInput, advise_static, advise_with_bandwidth, probe_bandwidth};
+    use super::{AdvisorInput, advise_static, advise_with_bandwidth};
 
     #[test]
     fn small_file_gets_one_segment() {
@@ -315,20 +229,5 @@ mod tests {
             supports_range: true,
         });
         assert_eq!(advice.segments, 1);
-    }
-
-    #[tokio::test]
-    async fn probe_bandwidth_signature_accepts_referrer_and_extra_headers() {
-        // 编译时验证：probe_bandwidth 接受 referrer 和 extra_headers 参数。
-        // 使用一个不可达的调用点让编译器检查参数类型，无需真实 HTTP 服务器。
-        if false {
-            let client = reqwest::Client::new();
-            let cancel = tokio_util::sync::CancellationToken::new();
-            let headers = std::collections::HashMap::<String, String>::new();
-            let _ = probe_bandwidth(
-                &client, "http://x", true, &cancel, "cookie", "referer", &headers,
-            )
-            .await;
-        }
     }
 }

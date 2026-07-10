@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
+import 'package:super_drag_and_drop/super_drag_and_drop.dart';
 import '../i18n/locale_provider.dart';
 import '../models/download_task.dart';
 import '../theme/app_colors.dart';
@@ -158,6 +159,41 @@ class _TaskListItemState extends State<TaskListItem> {
 
   Widget _buildFileInfo(AppColors c, AppMetrics m) {
     final task = widget.task;
+    // 已完成且文件仍在磁盘上的任务，文件图标支持拖出到资源管理器/其他应用。
+    final canDragOut =
+        task.status == TaskStatus.completed && !task.fileMissing;
+    Widget icon = Container(
+      width: 34,
+      height: 34,
+      decoration: BoxDecoration(
+        color: c.surface2,
+        borderRadius: m.brMd,
+      ),
+      child: Center(
+        child: Text(
+          task.fileExtension,
+          style: TextStyle(
+            fontSize: 10,
+            fontWeight: FontWeight.w600,
+            color: c.textSecondary,
+            fontFeatures: const [FontFeature.tabularFigures()],
+          ),
+        ),
+      ),
+    );
+    if (canDragOut) {
+      final filePath = task.filePath;
+      final fileName = task.fileName;
+      icon = DragItemWidget(
+        allowedOperations: () => [DropOperation.copy, DropOperation.move],
+        dragItemProvider: (request) async {
+          final item = DragItem(suggestedName: fileName);
+          item.add(Formats.fileUri(Uri.file(filePath)));
+          return item;
+        },
+        child: DraggableWidget(child: icon),
+      );
+    }
     return Row(
       children: [
         // 优先下载时显示闪电图标徽章
@@ -175,25 +211,7 @@ class _TaskListItemState extends State<TaskListItem> {
           ),
           const SizedBox(width: 6),
         ],
-        Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: c.surface2,
-            borderRadius: m.brMd,
-          ),
-          child: Center(
-            child: Text(
-              task.fileExtension,
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: FontWeight.w600,
-                color: c.textSecondary,
-                fontFeatures: const [FontFeature.tabularFigures()],
-              ),
-            ),
-          ),
-        ),
+        icon,
         const SizedBox(width: 12),
         Expanded(
           child: Column(

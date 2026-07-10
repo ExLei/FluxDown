@@ -13,6 +13,7 @@ export function GeneralSettings({
   const { t } = useI18n()
   const maxConcurrent = Number(config.max_concurrent_tasks ?? '5')
   const defaultSegments = Number(config.default_segments ?? '0')
+  const autoMaxConnections = Number(config.auto_max_connections ?? '16')
   const maxRetries = Number(config.max_auto_retries ?? '3')
   const retryDelay = Number(config.auto_retry_delay_secs ?? '5')
 
@@ -35,6 +36,15 @@ export function GeneralSettings({
           min={0}
           onCommit={(n) => mutate({ default_segments: String(n) })}
         />
+        {defaultSegments === 0 && (
+          <NumberFieldRow
+            title={t('set.general.autoMaxConn')}
+            desc={t('set.general.autoMaxConnDesc')}
+            value={autoMaxConnections}
+            min={1}
+            onCommit={(n) => mutate({ auto_max_connections: String(n) })}
+          />
+        )}
         <NumberFieldRow
           title={t('set.general.retries')}
           desc={t('set.general.retriesDesc')}

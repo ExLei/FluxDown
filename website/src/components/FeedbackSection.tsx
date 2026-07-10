@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { MessageSquarePlus, Lightbulb, Bug, MessageCircle, Send, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { MessageSquarePlus, Lightbulb, Bug, MessageCircle, Send, Loader2, CheckCircle2, AlertCircle, MonitorSmartphone } from "lucide-react";
 import { useLocale } from "@/lib/i18n";
 
 type FeedbackType = "feature" | "bug" | "other";
@@ -27,6 +27,31 @@ const TYPE_CONFIG: { type: FeedbackType; icon: typeof Lightbulb; colorClass: str
   { type: "other", icon: MessageCircle, colorClass: "text-brand-cyan border-brand-cyan/30 bg-brand-cyan/10" },
 ];
 
+/**
+ * 从 UA / navigator 推断的环境摘要（系统 + 浏览器 + 页面语言）。
+ * 仅含通用设备信息，不含任何个人身份数据；表单中原样展示后随反馈上报。
+ */
+function detectEnvironment(): string {
+  if (typeof navigator === "undefined") return "";
+  const ua = navigator.userAgent;
+
+  let os = "Unknown OS";
+  if (/Windows NT ([\d.]+)/.test(ua)) os = `Windows NT ${RegExp.$1}`;
+  else if (/iPhone|iPad/.test(ua)) os = "iOS";
+  else if (/Mac OS X ([\d_.]+)/.test(ua)) os = `macOS ${RegExp.$1.replace(/_/g, ".")}`;
+  else if (/Android ([\d.]+)/.test(ua)) os = `Android ${RegExp.$1}`;
+  else if (/Linux/.test(ua)) os = "Linux";
+
+  let browser = "Unknown browser";
+  if (/Edg\/([\d.]+)/.test(ua)) browser = `Edge ${RegExp.$1}`;
+  else if (/OPR\/([\d.]+)/.test(ua)) browser = `Opera ${RegExp.$1}`;
+  else if (/Firefox\/([\d.]+)/.test(ua)) browser = `Firefox ${RegExp.$1}`;
+  else if (/Chrome\/([\d.]+)/.test(ua)) browser = `Chrome ${RegExp.$1}`;
+  else if (/Version\/([\d.]+).*Safari/.test(ua)) browser = `Safari ${RegExp.$1}`;
+
+  return `${os}, ${browser}, locale ${navigator.language}`;
+}
+
 interface FeedbackSectionProps {
   onSuccess?: () => void;
 }
@@ -36,6 +61,7 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [status, setStatus] = useState<"idle" | "submitting" | "success" | "error">("idle");
   const [errorMsg, setErrorMsg] = useState("");
+  const [environment] = useState(detectEnvironment);
 
   const handleSubmit = useCallback(async () => {
     if (!form.title.trim() || !form.description.trim() || !form.appVersion.trim()) return;
@@ -53,6 +79,7 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
           description: form.description.trim(),
           appVersion: form.appVersion.trim(),
           contact: form.contact.trim() || undefined,
+          environment: environment || undefined,
         }),
       });
 
@@ -79,7 +106,7 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
       setStatus("error");
       setErrorMsg(t("fb.submitError"));
     }
-  }, [form, t, onSuccess]);
+  }, [form, t, onSuccess, environment]);
 
   const canSubmit =
     form.title.trim().length > 0 &&
@@ -203,6 +230,21 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
               />
               <p className="mt-1.5 text-xs text-dark-text-muted">{t("fb.versionHint")}</p>
             </div>
+
+            {/* Environment (auto-detected, read-only, disclosed to the user) */}
+            {environment && (
+              <div className="mb-5">
+                <label className="block text-sm font-medium text-dark-text mb-2">
+                  {t("fb.envLabel")}
+                  <span className="text-dark-text-muted font-normal ml-1.5">({t("fb.envAuto")})</span>
+                </label>
+                <div className="flex items-center gap-2 rounded-lg border border-dark-border bg-dark-surface2 px-4 py-2.5 text-sm text-dark-text-secondary">
+                  <MonitorSmartphone className="w-4 h-4 shrink-0 text-dark-text-muted" />
+                  <span className="truncate">{environment}</span>
+                </div>
+                <p className="mt-1.5 text-xs text-dark-text-muted">{t("fb.envHint")}</p>
+              </div>
+            )}
 
             {/* Contact (optional) */}
             <div className="mb-6">

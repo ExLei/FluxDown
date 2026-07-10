@@ -47,6 +47,7 @@ dependencies:
   flutter_local_notifications: ^21.0.0
   url_launcher: ^6.3.1
   flutter_foreground_task: ^9.2.2
+  super_drag_and_drop: 0.8.24
 
 dev_dependencies:
   flutter_test:
@@ -64,6 +65,7 @@ dev_dependencies:
 # StatusNotifierItem + dbusmenu D-Bus implementation, which properly
 # supports left-click events on KDE Plasma (Wayland & X11).
 dependency_overrides:
+  device_info_plus: ^11.5.0
   tray_manager:
     path: packages/tray_manager_local
 

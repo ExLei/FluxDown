@@ -226,6 +226,10 @@ pub struct DownloadParams {
     /// 引擎分别下载后用 ffmpeg mux 合并为单文件。不依赖 `.mpd` manifest。
     /// `None` 时为普通单 URL 下载。
     pub audio_url: Option<String>,
+    /// Auto 模式（segment_count==0）下的最大连接数上限，用于裁剪 segment_advisor
+    /// 的推荐值：`effective = min(advisor, auto_max_connections)`。<=0 视为不限
+    /// （回退 advisor 原值）。用户显式指定 segment_count 时本字段不参与。
+    pub auto_max_connections: i32,
 }
 
 /// 将浏览器扩展捕获的额外 HTTP 头应用到请求构建器上。
@@ -2055,76 +2059,39 @@ async fn verify_checksum(path: &Path, spec: &str) -> Result<(), DownloadError> {
     Ok(())
 }
 
-/// Run the segment advisor to dynamically compute optimal segment count.
-/// Updates `tasks.segments` in DB so that subsequent resumes skip the probe.
+/// Run the segment advisor to compute the task's connection cap (Auto mode).
+///
+/// 语义：advisor 输出是【最大连接数上限】而非启动并发——启动并发
+/// 由 segment_coordinator 的渐进 ramp-up 控制。用户配置的 Auto 上限
+/// （`auto_max_connections`）在此裁剪 advisor 推荐值。带宽预探测已移除：
+/// ramp-up 本身就是实测探测（第 1→2→4 条连接的边际吞吐即带宽反馈），
+/// 省去 128KB 额外请求与最多 4s 的启动延迟。
+///
+/// Updates `tasks.segments` in DB so that subsequent resumes skip the advisor.
 async fn compute_segments_with_advisor(p: &DownloadParams, info: &FileInfo) -> i32 {
-    use crate::segment_advisor::{
-        AdvisorInput, advise_static, advise_with_bandwidth, probe_bandwidth,
-    };
+    use crate::segment_advisor::{AdvisorInput, advise_static};
     let advisor_input = AdvisorInput {
         total_bytes: info.total_bytes,
         supports_range: info.supports_range,
     };
 
-    // Phase 1: static recommendation (file size + CPU cores).
+    // Static recommendation (file size + CPU cores) = recommended cap.
     let static_advice = advise_static(&advisor_input);
-    log_info!(
-        "[download] task {} static advice: segments={}, reason={}",
-        p.task_id,
-        static_advice.segments,
-        static_advice.reason
-    );
 
-    let result = if static_advice.segments > 1 {
-        // Phase 2: bandwidth probe to refine the recommendation.
-        //
-        // Skip the probe when the task was started via a browser-extension
-        // hint (hint_file_size > 0).  Those URLs may be one-time signed CDN
-        // tokens; an extra Range request would consume the token and break the
-        // actual download.  Static advice (file size + CPU cores) is a good
-        // enough estimate in this case.
-        if p.hint_file_size > 0 {
-            log_info!(
-                "[download] task {} hint mode: skipping bandwidth probe, using static advice (segments={})",
-                p.task_id,
-                static_advice.segments
-            );
-            static_advice.segments
-        } else {
-            match probe_bandwidth(
-                &p.client,
-                &p.url,
-                info.supports_range,
-                &p.cancel_token,
-                &p.cookies,
-                &p.referrer,
-                &p.extra_headers,
-            )
-            .await
-            {
-                Some(bw) => {
-                    let bw_advice = advise_with_bandwidth(&advisor_input, bw);
-                    log_info!(
-                        "[download] task {} bandwidth probe: {:.1} KB/s → segments={}, reason={}",
-                        p.task_id,
-                        bw / 1024.0,
-                        bw_advice.segments,
-                        bw_advice.reason
-                    );
-                    bw_advice.segments
-                }
-                None => {
-                    log_info!(
-                        "[download] task {} bandwidth probe failed/cancelled, using static advice",
-                        p.task_id
-                    );
-                    static_advice.segments
-                }
-            }
-        }
+    // Clamp with the user-configured Auto connection cap (<=0 = unlimited).
+    let result = if p.auto_max_connections > 0 {
+        static_advice.segments.min(p.auto_max_connections)
     } else {
         static_advice.segments
     };
+    log_info!(
+        "[download] task {} auto cap: advisor={}, user_cap={}, effective={}, reason={}",
+        p.task_id,
+        static_advice.segments,
+        p.auto_max_connections,
+        result,
+        static_advice.reason
+    );
 
     // Persist to DB so resume_task can skip the advisor.
     // If this write fails, the advisor will re-run on resume — acceptable.

@@ -1050,6 +1050,8 @@ impl Db {
         let defaults: &[(&str, &str)] = &[
             ("default_save_dir", default_save_dir),
             ("default_segments", "0"),
+            // Auto 模式最大连接数上限：advisor 推荐值经此裁剪。
+            ("auto_max_connections", "16"),
             ("max_concurrent_tasks", "5"),
             ("speed_limit_bytes", "0"),
             // 自动重试：-1=无限，0=关闭，1..10=次数。延迟（秒）固定基值×已重试次数。

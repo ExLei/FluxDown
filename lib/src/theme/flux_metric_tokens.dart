@@ -8,8 +8,7 @@ import 'package:flutter/foundation.dart';
 /// 按钮尺寸 / 移动端几何。
 ///
 /// 与 [FluxThemeTokens]（Layer0 颜色）平行的第二层设计变量，使圆角/尺寸/
-/// 透明度也能像颜色一样被主题独立设计（对标 VS Code 的 SizeRegistry 思想，
-/// 落地为编译期强类型字段而非运行时 registry）。
+/// 透明度也能像颜色一样被主题独立设计（编译期强类型字段而非运行时 registry）。
 ///
 /// **值域夹取**：字段以私有原始值存储、公开 getter 懒夹取（`clamp` 不能写进
 /// `const` 构造/初始化列表，否则触发 `const_eval_method_invocation` 编译错）。

@@ -17,6 +17,7 @@ class SettingsProvider extends ChangeNotifier {
 
   String _defaultSaveDir = _platformDefaultSaveDir();
   int _defaultSegments = 0; // 0 = 自动（由 Rust segment_advisor 动态计算）
+  int _autoMaxConnections = 16; // 自动模式下智能调度的最大连接数上限
   int _maxConcurrentTasks = 5;
   int _speedLimitBytes = 0; // 0 = 无限制
   int _maxAutoRetries = 3; // -1 = 无限, 0 = 关闭, 1..10 = 次数
@@ -173,6 +174,7 @@ class SettingsProvider extends ChangeNotifier {
   bool get loaded => _loaded;
   String get defaultSaveDir => _defaultSaveDir;
   int get defaultSegments => _defaultSegments;
+  int get autoMaxConnections => _autoMaxConnections;
   int get maxConcurrentTasks => _maxConcurrentTasks;
   int get speedLimitBytes => _speedLimitBytes;
   int get maxAutoRetries => _maxAutoRetries;
@@ -353,6 +355,13 @@ class SettingsProvider extends ChangeNotifier {
     _defaultSegments = value;
     notifyListeners();
     _saveToRust('default_segments', value.toString());
+  }
+
+  void setAutoMaxConnections(int value) {
+    if (_autoMaxConnections == value) return;
+    _autoMaxConnections = value;
+    notifyListeners();
+    _saveToRust('auto_max_connections', value.toString());
   }
 
   /// 记住新建下载对话框中用户选择的线程数（'auto' 或数字字符串）
@@ -1086,6 +1095,8 @@ class SettingsProvider extends ChangeNotifier {
           _defaultSaveDir = entry.value;
         case 'default_segments':
           _defaultSegments = int.tryParse(entry.value) ?? 0;
+        case 'auto_max_connections':
+          _autoMaxConnections = int.tryParse(entry.value) ?? 16;
         case 'max_concurrent_tasks':
           _maxConcurrentTasks = int.tryParse(entry.value) ?? 5;
         case 'speed_limit_bytes':

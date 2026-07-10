@@ -28,6 +28,7 @@ import '../theme/flux_theme_tokens.dart';
 import '../theme/theme_provider.dart';
 import '../widgets/category_edit_dialog.dart';
 import '../widgets/dir_picker_field.dart';
+import '../widgets/number_selector.dart';
 import '../widgets/thread_selector.dart';
 import '../widgets/title_drag_area.dart';
 
@@ -239,6 +240,13 @@ List<SettingsSearchItem> get settingsSearchItems {
       category: SettingsCategory.download,
       label: s.defaultThreads,
       description: s.defaultThreadsDesc,
+      keywords: s.searchKeywordsThreads,
+      icon: LucideIcons.layers,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.download,
+      label: s.autoMaxConnections,
+      description: s.autoMaxConnectionsDesc,
       keywords: s.searchKeywordsThreads,
       icon: LucideIcons.layers,
     ),
@@ -2358,6 +2366,14 @@ class _DownloadContent extends StatelessWidget {
               description: s.defaultThreadsDesc,
               child: _SegmentSelector(settingsProvider: settingsProvider),
             ),
+            if (settingsProvider.defaultSegments == 0) ...[
+              const SizedBox(height: 10),
+              _SettingCard(
+                label: s.autoMaxConnections,
+                description: s.autoMaxConnectionsDesc,
+                child: _AutoMaxConnSelector(settingsProvider: settingsProvider),
+              ),
+            ],
             const SizedBox(height: 10),
             _SettingCard(
               label: s.maxConcurrent,
@@ -2698,26 +2714,39 @@ class _SegmentSelector extends StatelessWidget {
   }
 }
 
+class _AutoMaxConnSelector extends StatelessWidget {
+  final SettingsProvider settingsProvider;
+
+  const _AutoMaxConnSelector({required this.settingsProvider});
+
+  @override
+  Widget build(BuildContext context) {
+    return NumberSelector(
+      value: settingsProvider.autoMaxConnections,
+      presets: const [4, 8, 16, 32, 64],
+      min: 1,
+      max: 64,
+      fallback: 16,
+      onChanged: settingsProvider.setAutoMaxConnections,
+    );
+  }
+}
+
 class _ConcurrentSelector extends StatelessWidget {
   final SettingsProvider settingsProvider;
 
   const _ConcurrentSelector({required this.settingsProvider});
 
-  static const _options = [1, 2, 3, 5, 8, 10];
-
   @override
   Widget build(BuildContext context) {
-    final current = settingsProvider.maxConcurrentTasks;
-    return ShadSelect<int>(
-      placeholder: Text('$current'),
-      initialValue: current,
-      options: _options
-          .map((n) => ShadOption(value: n, child: Text('$n')))
-          .toList(),
-      selectedOptionBuilder: (context, value) => Text(currentS.nTasks(value)),
-      onChanged: (v) {
-        if (v != null) settingsProvider.setMaxConcurrentTasks(v);
-      },
+    return NumberSelector(
+      value: settingsProvider.maxConcurrentTasks,
+      presets: const [1, 2, 3, 5, 8, 10],
+      min: 1,
+      max: 50,
+      fallback: 5,
+      selectedLabel: (v) => currentS.nTasks(v),
+      onChanged: settingsProvider.setMaxConcurrentTasks,
     );
   }
 }

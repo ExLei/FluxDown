@@ -367,6 +367,11 @@ async fn apply_config(engine: &mut Engine, keys: &[String]) {
                     engine.manager.set_default_segments(v);
                 }
             }
+            "auto_max_connections" => {
+                if let Some(v) = all.get(key).and_then(|v| v.parse::<i32>().ok()) {
+                    engine.manager.set_auto_max_connections(v);
+                }
+            }
             "global_user_agent" => {
                 if let Some(v) = all.get(key)
                     && let Err(e) = engine.manager.set_user_agent(v.clone())
