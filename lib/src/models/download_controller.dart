@@ -1085,6 +1085,16 @@ class DownloadController extends ChangeNotifier {
       }
       return;
     }
+    // 外部途径（浏览器扩展 / aria2 RPC / 管理 API）发起的删除：Dart 侧没有
+    // 乐观删除记录，Rust 的删除确认信号（status=4, error="deleted"）会落到
+    // 这里。直接移除任务并登记守卫，而不是把它显示为「失败」。
+    if (p.status == 4 && p.errorMessage == 'deleted') {
+      _deletedTaskIds.add(p.taskId);
+      _tasks.removeWhere((t) => t.id == p.taskId);
+      if (_selectedTaskId == p.taskId) _selectedTaskId = null;
+      _safeNotifyListeners();
+      return;
+    }
     final newStatus = taskStatusFromInt(p.status);
     final idx = _tasks.indexWhere((t) => t.id == p.taskId);
     if (idx >= 0) {
