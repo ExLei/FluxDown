@@ -27,9 +27,9 @@ interface MarketIndex {
   themes: MarketTheme[];
 }
 
-/** 仓库相对路径 → raw.githubusercontent.com 绝对 URL */
+/** 仓库相对路径 → 同源代理 URL（服务端中转 raw.githubusercontent.com，大陆可达 + CDN 缓存） */
 function rawUrl(path: string): string {
-  return `${RAW_BASE}/${path}`;
+  return `/api/themes/${path}`;
 }
 
 /** 拉取 JSON 并触发浏览器下载（raw 无 Content-Disposition，走 blob） */
@@ -197,7 +197,8 @@ function ThemeCard({
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
+      // 首屏前 3 张卡不做淡入（入场动画会把 LCP 再推迟 ~400ms），后续卡片保留
+      initial={index < 3 ? false : { opacity: 0, y: 20 }}
       whileInView={{ opacity: 1, y: 0 }}
       viewport={{ once: true, margin: "-50px" }}
       transition={{ duration: 0.4, delay: (index % 6) * 0.05 }}
@@ -212,7 +213,9 @@ function ThemeCard({
         <img
           src={rawUrl(cover.screenshot)}
           alt={`${theme.name} screenshot`}
-          loading="lazy"
+          loading={index < 3 ? "eager" : "lazy"}
+          fetchPriority={index === 0 ? "high" : "auto"}
+          decoding="async"
           className="absolute inset-0 w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.02]"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/30 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity" />
@@ -313,7 +316,7 @@ export default function ThemeMarketPage() {
   const [lightbox, setLightbox] = useState<LightboxState | null>(null);
 
   useEffect(() => {
-    fetch(`${RAW_BASE}/index.json`)
+    fetch(rawUrl("index.json"))
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((data: MarketIndex) => setIndex(data))
       .catch(() => setError(true))

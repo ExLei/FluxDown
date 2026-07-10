@@ -17,7 +17,7 @@ import CommunityFloat from "../components/CommunityFloat";
   description="FluxDown is a free, open-source IDM alternative. A blazing-fast download manager powered by a Rust engine — HTTP/HTTPS/FTP/BitTorrent/HLS, IDM-style smart segmentation, and browser integration. Zero ads, zero tracking, no account."
 >
   <AnnouncementBar client:load />
-  <AnnouncementModal client:load />
+  <AnnouncementModal client:idle />
   <FloatingNavbar client:load />
   <main>
     <HeroSection client:load />
@@ -46,6 +46,6 @@ import CommunityFloat from "../components/CommunityFloat";
     </div>
     <SponsorSection client:visible />
   </main>
-  <Footer client:load />
-  <CommunityFloat client:load />
+  <Footer client:visible />
+  <CommunityFloat client:idle />
 </Layout>
