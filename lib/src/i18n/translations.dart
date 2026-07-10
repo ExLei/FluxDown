@@ -417,6 +417,12 @@ class S {
     '点击关闭按钮时隐藏到系统托盘，而非退出应用',
     'Hide to system tray instead of quitting when closing',
   );
+  String get startMinimizedToTray =>
+      _t('启动时最小化到托盘', 'Start minimized to tray');
+  String get startMinimizedToTrayDesc => _t(
+    '启动后不显示主窗口，仅托盘驻留',
+    'App starts hidden in the system tray',
+  );
   String get floatingBall => _t('桌面悬浮球', 'Desktop Floating Ball');
   String get floatingBallDesc => _t(
     '桌面常驻置顶小球，显示下载速度与进度，支持拖拽链接/种子快速建任务',
@@ -1162,6 +1168,9 @@ class S {
   List<String> get searchKeywordsCloseToTray =>
       _t('关闭,托盘,最小化', 'close,tray,minimize').split(',')
         ..addAll(['tray', 'close', 'minimize']);
+  List<String> get searchKeywordsStartMinimizedToTray =>
+      _t('启动,最小化,托盘', 'start,minimized,tray').split(',')
+        ..addAll(['startup', 'minimize', 'tray']);
   List<String> get searchKeywordsFloatingBall =>
       _t('悬浮球,悬浮窗,桌面,挂件,速度球', 'floating,ball,widget,overlay,desktop').split(',')
         ..addAll(['floating', 'ball', 'widget', 'overlay']);

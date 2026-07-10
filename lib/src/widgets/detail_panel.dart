@@ -10,7 +10,7 @@ import '../theme/app_colors.dart';
 import '../theme/app_metrics.dart';
 import '../theme/segment_palette.dart';
 
-class DetailPanel extends StatelessWidget {
+class DetailPanel extends StatefulWidget {
   final DownloadController controller;
   final VoidCallback onClose;
 
@@ -19,6 +19,13 @@ class DetailPanel extends StatelessWidget {
     required this.controller,
     required this.onClose,
   });
+
+  @override
+  State<DetailPanel> createState() => _DetailPanelState();
+}
+
+class _DetailPanelState extends State<DetailPanel> {
+  late bool _isBottomLayout;
 
   @override
   Widget build(BuildContext context) {
@@ -32,9 +39,9 @@ class DetailPanel extends StatelessWidget {
           _buildHeader(c),
           Expanded(
             child: ListenableBuilder(
-              listenable: controller,
+              listenable: widget.controller,
               builder: (context, _) {
-                final task = controller.selectedTask;
+                final task = widget.controller.selectedTask;
                 if (task == null) return _buildNoSelection(c);
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -84,7 +91,22 @@ class DetailPanel extends StatelessWidget {
           ),
           const Spacer(),
           ShadButton.ghost(
-            onPressed: onClose,
+            onPressed: () {
+              setState(() => _isBottomLayout = !_isBottomLayout);
+            },
+            size: ShadButtonSize.sm,
+            width: 28,
+            height: 28,
+            padding: EdgeInsets.zero,
+            child: Icon(
+              _isBottomLayout ? LucideIcons.columns : LucideIcons.rows,
+              size: 14,
+              color: c.textMuted,
+            ),
+          ),
+          const SizedBox(width: 4),
+          ShadButton.ghost(
+            onPressed: widget.onClose,
             size: ShadButtonSize.sm,
             width: 28,
             height: 28,
@@ -563,7 +585,7 @@ class DetailPanel extends StatelessWidget {
             SizedBox(
               width: double.infinity,
               child: ShadButton(
-                onPressed: () => controller.pauseTask(task.id),
+                onPressed: () => widget.controller.pauseTask(task.id),
                 backgroundColor: c.accent,
                 hoverBackgroundColor: c.accentHover,
                 child: Text(
@@ -580,7 +602,7 @@ class DetailPanel extends StatelessWidget {
             SizedBox(
               width: double.infinity,
               child: ShadButton(
-                onPressed: () => controller.pauseTask(task.id),
+                onPressed: () => widget.controller.pauseTask(task.id),
                 backgroundColor: c.accent,
                 hoverBackgroundColor: c.accentHover,
                 child: Row(
@@ -612,7 +634,7 @@ class DetailPanel extends StatelessWidget {
             SizedBox(
               width: double.infinity,
               child: ShadButton(
-                onPressed: () => controller.resumeTask(task.id),
+                onPressed: () => widget.controller.resumeTask(task.id),
                 backgroundColor: c.accent,
                 hoverBackgroundColor: c.accentHover,
                 child: Text(
@@ -630,7 +652,7 @@ class DetailPanel extends StatelessWidget {
             width: double.infinity,
             child: ShadButton.destructive(
               onPressed: () =>
-                  controller.deleteTask(task.id, deleteFiles: true),
+                  widget.controller.deleteTask(task.id, deleteFiles: true),
               child: Text(
                 currentS.deleteTaskAndFile,
                 style: const TextStyle(fontSize: 13, color: Colors.white),
