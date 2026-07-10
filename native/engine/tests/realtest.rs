@@ -95,12 +95,23 @@ struct ServerState {
     /// 每个 range GET 响应体写出前 sleep 的毫秒数（0 = 不限速）。用于让下载
     /// 持续多个 ramp 评估窗口，以断言渐进启动的初始并发行为。
     throttle_range_ms: u64,
+    /// fnOS multiple-download 式配额端点：任何带 Range 的请求（含 HEAD）一律
+    /// 400 拒绝，仅裸 GET（无 Range 头）可用。
+    reject_range_with_400: bool,
+    /// 只拒「分段」Range 请求（区间长度 > 1，含开放式 bytes=X-），probe 的
+    /// `bytes=0-0` 照常 206——用于复现"probe 判定支持 Range,分段连接却全被
+    /// 400 拒"的端点(守护 coordinator 全员被拒→RangeNotSupported 转换出口)。
+    reject_segment_range_with_400: bool,
+    /// 200 全量分支写 body 前 sleep 的毫秒数（0 = 不延迟）。用于让 hint 首枪
+    /// plain GET 的流"在跑"，给 2s ramp tick 留出放出带 Range 并发段的窗口。
+    throttle_full_ms: u64,
 
     // --- 计数器（断言用）---
     head_count: AtomicUsize,
     full_get_count: AtomicUsize,
     range_get_count: AtomicUsize,
     swapped: AtomicUsize,
+    rejected_range_count: AtomicUsize,
 }
 
 impl ServerState {
@@ -126,10 +137,14 @@ impl ServerState {
             force_full_range_get_once: std::sync::atomic::AtomicBool::new(false),
             range_total_sequence: std::sync::Mutex::new(Vec::new()),
             throttle_range_ms: 0,
+            reject_range_with_400: false,
+            reject_segment_range_with_400: false,
+            throttle_full_ms: 0,
             head_count: AtomicUsize::new(0),
             full_get_count: AtomicUsize::new(0),
             range_get_count: AtomicUsize::new(0),
             swapped: AtomicUsize::new(0),
+            rejected_range_count: AtomicUsize::new(0),
         }
     }
 }
@@ -285,6 +300,16 @@ async fn handle_conn(mut stream: TcpStream, st: Arc<ServerState>) -> std::io::Re
         );
     }
 
+    // fnOS multiple-download 式配额端点：任何带 Range 的请求（含 HEAD probe）
+    // 一律 400 拒绝——只有裸 GET 能拿到文件。
+    if st.reject_range_with_400 && (req.method.eq_ignore_ascii_case("HEAD") || req.range.is_some())
+    {
+        st.rejected_range_count.fetch_add(1, Ordering::SeqCst);
+        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        write_all(&mut stream, resp.as_bytes()).await?;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
     let is_head = req.method.eq_ignore_ascii_case("HEAD");
     if is_head {
         st.head_count.fetch_add(1, Ordering::SeqCst);
@@ -332,6 +357,14 @@ async fn handle_conn(mut stream: TcpStream, st: Arc<ServerState>) -> std::io::Re
             .range
             .map(|(s, e)| e.unwrap_or(total - 1).min(total - 1) - s + 1 > 1)
             .unwrap_or(false);
+    // 只拒「分段」Range(probe 0-0 放行):全员被拒→单流回退的转换出口守护。
+    if st.reject_segment_range_with_400 && is_segment_range_get {
+        st.rejected_range_count.fetch_add(1, Ordering::SeqCst);
+        let resp = "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        write_all(&mut stream, resp.as_bytes()).await?;
+        let _ = stream.shutdown().await;
+        return Ok(());
+    }
     // 钩子 A（永久型）：所有分段 range GET 强制走 200 全量分支（保留 probe 走 206），
     // 复现“服务器支持 Range，但对分段请求偶发/持续返回 200”（alist 代理云盘行为）。
     // 钩子 B（一次性）：消费一次「武装」标志，让下一次分段 range GET 强制返回一次
@@ -377,6 +410,9 @@ async fn handle_conn(mut stream: TcpStream, st: Arc<ServerState>) -> std::io::Re
             let _ = write_all(&mut stream, &send_body[..k]).await;
             let _ = stream.shutdown().await;
             return Ok(());
+        }
+        if st.throttle_full_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(st.throttle_full_ms)).await;
         }
         write_all(&mut stream, &send_body).await?;
         let _ = stream.shutdown().await;
@@ -1221,6 +1257,7 @@ async fn run_full(
         file_name: file_name.to_string(),
         segment_count,
         is_resume,
+        range_verified: true,
         db: db.clone(),
         client,
         progress_tx: tx,
@@ -1613,13 +1650,17 @@ async fn hint_undersized_within_old_drift_tolerance_must_not_truncate() {
 // BUG-HTTP-HINT-UNDERSIZED 扩容配额：分母持续膨胀（文件不停增长/病态服务器）
 // ---------------------------------------------------------------------------
 //
-// 每个 206 的 Content-Range 分母都比引擎当前规划更大（注入严格递增序列，模拟
-// 一段【始终在渐进上传】的文件或无限膨胀分母的病态服务器）。正确行为：
+// 保守启动（hint 首枪 plain GET）后的场景构造：200 的 Content-Length 与 hint
+// 一致地【撒谎偏小】（fake_full_content_length=hint，模拟"渐进上传中抓到的
+// 陈旧大小"），升级多段后每个 206 的 Content-Range 分母都比引擎当前规划更大
+// （注入严格递增序列）。正确行为：
 //   1. coordinator 就地扩容至多 MAX_SIZE_EXPANSIONS（3）次；
 //   2. 仍在膨胀 → 以 TrueSizeLarger 显式失败（status=4），绝不静默把某一时刻的
 //      前缀当完成（fail-loud）；
-//   3. 失败时【不清数据】——DB 段行保留，用户重试时 resume 重新 probe 续下
-//      （对照：清空版实现失败即全丢）。
+//   3. 失败时【不清数据】——DB 段行保留，用户重试时 resume 重新 probe 续下。
+// 注：若 200 的 CL 诚实报真实大小，引擎会直接学到真值、正确下完全文件
+// （见 hint_plain_first_upgrades_to_multi_segment_on_accept_ranges），
+// 本测试守护的是"200 也撒谎"的病态残余路径。
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "binds a local port; run with --ignored"]
 async fn hint_expansion_quota_exhausted_fails_loud_and_keeps_data() {
@@ -1632,7 +1673,12 @@ async fn hint_expansion_quota_exhausted_fails_loud_and_keeps_data() {
     let full = gen_body(4_000_000, 7177);
     let hint = 1_100_000i64; // > 1MB → 多段路径
 
-    let s = ServerState::new(Arc::new(full.clone()), "etq");
+    let mut s = ServerState::new(Arc::new(full.clone()), "etq");
+    // 200 首响应与 hint 一致地报假 CL（陈旧偏小），真实大小只能经 206 分母暴露。
+    s.fake_full_content_length = Some(hint);
+    // 延迟首枪 plain GET 的 body：让 2s ramp tick 有机会在首段完成前放出
+    // 带 Range 的分段（病态分母注入只作用于 206）。
+    s.throttle_full_ms = 2600;
     // 严格递增的分母序列：每个 206 都自报比引擎当前规划更大的总大小 →
     // 每次都触发扩容检查；3 次配额烧完后第 4 次触发必须 fail-loud。
     // 序列长度给足（40 个），耗尽后回落诚实 body 长度（4_000_000）仍大于
@@ -2009,6 +2055,458 @@ async fn range_advertised_but_all_segments_get_200_falls_back_single_stream() {
          download_single 只写出了空/截断文件）"
     );
     drop(server);
+}
+
+/// fnOS multiple-download 式「Range 敌对」配额端点：任何带 Range 的请求一律
+/// 400（且实测会【作废 token】——bounded Range 风暴之后连裸 GET 也 400），
+/// 仅裸 GET 可用，且不发 Accept-Ranges。浏览器扩展提供 hint（跳过 probe）。
+///
+/// 期望（保守启动）：hint 任务首连接是【不带 Range 的 plain GET】，响应 200
+/// 无 Accept-Ranges → RangeVerdict 判不支持 → coordinator 立即把全部 Pending
+/// 段吸收进首段流单流下完。全程【零】Range 请求（token 不会被风暴作废）、
+/// 恰好一次成功裸 GET、status=3 字节完整。
+///
+/// 修复前（乐观多段）：16 发 bounded Range 全 400 → token 已被作废 → 即使
+/// 回退单流 plain GET 也 400 → 任务必死（真实 fnOS 两次实测）。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a local port; run with --ignored"]
+async fn range_hostile_hint_first_shot_is_plain_get() {
+    let work_dir = unique_dir("range400");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+
+    let size = 4_000_037usize; // ~4MB 素数大小，>1MB 满足多段门槛
+    let body = Arc::new(gen_body(size, 400));
+    let expected = sha256_bytes(&body);
+
+    let mut s = ServerState::new(body.clone(), "etag-range400");
+    s.reject_range_with_400 = true;
+    // fnOS 不发 Accept-Ranges（发了反而会诱导 ramp 放出 Range 连接）。
+    s.advertise_accept_ranges = false;
+    let st = Arc::new(s);
+    let server = start_server(st.clone()).await;
+    let url = server.url("/file");
+
+    let db = Db::open(&work_dir).await.expect("db");
+    insert_simple_task(&db, &work_dir, "r400", &url, "out.bin", 8, size as i64).await;
+
+    // hint_file_size=size：浏览器扩展 hint 旁路（跳过 probe、乐观假设 Range），
+    // 正是 fnOS 场景的真实入口。
+    let cancel = CancellationToken::new();
+    let (status, dest) = run_full(
+        &work_dir,
+        &db,
+        "r400",
+        &url,
+        "out.bin",
+        8,
+        size as i64,
+        false,
+        "",
+        &cancel,
+    )
+    .await;
+
+    assert_eq!(
+        status, 3,
+        "❌ Range 敌对端点上 hint 任务应以首枪 plain GET 单流完成（status=3），实得 {status}"
+    );
+    assert!(dest.exists(), "❌ 下载“成功”却没有产物文件");
+    let got = sha256_file(&dest).await;
+    assert_eq!(got, expected, "❌ 单流产出的文件不是字节完整的原文件");
+    // 配额语义核心断言：全程零 Range 请求（bounded Range 会作废 token），
+    // 恰好一次成功裸 GET。
+    assert_eq!(
+        st.rejected_range_count.load(Ordering::SeqCst),
+        0,
+        "❌ hint 任务在 Range 裁决前发出了带 Range 的请求（会作废配额型 token）"
+    );
+    assert_eq!(
+        st.full_get_count.load(Ordering::SeqCst),
+        1,
+        "❌ 裸 GET 应恰好发生一次（token 配额只消耗一次）"
+    );
+    drop(server);
+}
+
+/// 取舍固化：服务器【真支持 Range】但 200 响应不主动宣告 `Accept-Ranges`
+/// （部分 CDN 只在收到 Range 请求时才回显该头）。hint 保守启动只凭首响应
+/// 被动裁决——此形态被判 UNSUPPORTED，整任务退化为单流。
+///
+/// 这是【有意的取舍】：主动补发一次小 Range 探测能救回多段吞吐,但对配额型
+/// 端点（fnOS）一发 bounded Range 即作废 token——风险不对称（探测=可能判死
+/// 任务,不探测=只损速度）,故不探测。本测试固化该行为：单流、字节完整、
+/// 全程零 Range 请求；若未来引入更聪明的二次裁决,本测试的
+/// range_get_count==0 断言应被有意识地更新。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a local port; run with --ignored"]
+async fn hint_on_non_advertising_range_server_degrades_to_single_stream() {
+    let work_dir = unique_dir("noadvertise");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+
+    let size = 3_000_017usize;
+    let body = Arc::new(gen_body(size, 403));
+    let expected = sha256_bytes(&body);
+
+    let mut s = ServerState::new(body.clone(), "etag-noadv");
+    // 真支持 Range（wants_range 走 206 分支），但 200 不带 Accept-Ranges。
+    s.advertise_accept_ranges = false;
+    let st = Arc::new(s);
+    let server = start_server(st.clone()).await;
+    let url = server.url("/file");
+
+    let db = Db::open(&work_dir).await.expect("db");
+    insert_simple_task(&db, &work_dir, "noadv", &url, "out.bin", 8, size as i64).await;
+
+    let cancel = CancellationToken::new();
+    let (status, dest) = run_full(
+        &work_dir,
+        &db,
+        "noadv",
+        &url,
+        "out.bin",
+        8,
+        size as i64,
+        false,
+        "",
+        &cancel,
+    )
+    .await;
+
+    assert_eq!(status, 3, "❌ 应单流完成（status=3），实得 {status}");
+    let got = sha256_file(&dest).await;
+    assert_eq!(got, expected, "❌ 单流产出的文件不是字节完整的原文件");
+    assert_eq!(
+        st.range_get_count.load(Ordering::SeqCst),
+        0,
+        "❌ 未宣告 Accept-Ranges 的 hint 任务不应发出任何 Range 请求（有意取舍）"
+    );
+    assert_eq!(
+        st.full_get_count.load(Ordering::SeqCst),
+        1,
+        "❌ 应恰好一次裸 GET"
+    );
+    drop(server);
+}
+
+/// F2 守护：resume 一个【Range 未验证】的 hint 任务（tasks.range_verified==0，
+/// download_manager 以 DB total 作 hint 传入）必须延续保守启动——跳过 probe
+/// （probe 的 HEAD/Range 会作废配额型 token）、首连接 plain GET、全程零
+/// Range 请求。修复前：resume 恒 hint=0 → 完整 probe（HEAD+ranged GET）→
+/// fnOS token 被作废。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a local port; run with --ignored"]
+async fn resume_of_unverified_hint_task_stays_plain_get() {
+    use fluxdown_engine::downloader::{DownloadParams, run_download};
+
+    let work_dir = unique_dir("resumeplain");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+
+    let size = 3_000_017usize;
+    let body = Arc::new(gen_body(size, 404));
+    let expected = sha256_bytes(&body);
+
+    let mut s = ServerState::new(body.clone(), "etag-resumeplain");
+    s.reject_range_with_400 = true; // 含 HEAD:probe 一旦发生必然可见地失败
+    s.advertise_accept_ranges = false;
+    let st = Arc::new(s);
+    let server = start_server(st.clone()).await;
+    let url = server.url("/file");
+
+    let db = Db::open(&work_dir).await.expect("db");
+    insert_simple_task(&db, &work_dir, "rp", &url, "out.bin", 16, size as i64).await;
+    // 模拟首次 hint 运行留下的状态:未验证标记 + 单段规划的 DB 段行(零进度)。
+    db.set_task_range_verified("rp", false).await.unwrap();
+    db.insert_segments("rp", &[(0, 0, size as i64 - 1)])
+        .await
+        .unwrap();
+
+    // 按 download_manager 的 resume 语义构造:hint = DB total,range_verified=false。
+    let client = build_client(&ProxyConfig::default(), "").expect("client");
+    let speed_limiter = SpeedLimiter::new(0);
+    let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
+    let last_status = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let ls = last_status.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(u) = rx.recv().await {
+            if u.status >= 3 {
+                ls.store(u.status, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    });
+    let cancel = CancellationToken::new();
+    let params = DownloadParams {
+        auto_max_connections: 16,
+        task_id: "rp".to_string(),
+        url,
+        save_dir: work_dir.to_string_lossy().to_string(),
+        file_name: "out.bin".to_string(),
+        segment_count: 0,
+        is_resume: true,
+        range_verified: false,
+        db: db.clone(),
+        client,
+        progress_tx: tx,
+        cancel_token: cancel.clone(),
+        speed_limiter,
+        cookies: String::new(),
+        referrer: String::new(),
+        hint_file_size: size as i64,
+        proxy_config: ProxyConfig::default(),
+        sink: std::sync::Arc::new(NoopTestSink),
+        selector: std::sync::Arc::new(fluxdown_engine::NoopSelection),
+        checksum: String::new(),
+        extra_headers: std::collections::HashMap::new(),
+        spec: RequestSpec::empty_get(),
+        audio_url: None,
+    };
+    run_download(params).await;
+    let _ = collector.await;
+    let status = last_status.load(std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        status, 3,
+        "❌ 未验证 hint 任务的 resume 应保守启动并成功，实得 {status}"
+    );
+    let got = sha256_file(&work_dir.join("out.bin")).await;
+    assert_eq!(got, expected, "❌ 产出文件字节不完整");
+    assert_eq!(
+        st.head_count.load(Ordering::SeqCst),
+        0,
+        "❌ resume 不应发出 probe HEAD（会作废配额型 token）"
+    );
+    assert_eq!(
+        st.rejected_range_count.load(Ordering::SeqCst),
+        0,
+        "❌ resume 全程不应发出任何带 Range 的请求"
+    );
+    assert_eq!(
+        st.full_get_count.load(Ordering::SeqCst),
+        1,
+        "❌ 应恰好一次裸 GET"
+    );
+    drop(server);
+}
+
+/// 守护「全员被拒 → RangeNotSupported 转换」出口（probed 路径）：probe 的
+/// `bytes=0-0` 正常 206（判定支持 Range），但所有「分段」Range 请求（含
+/// 开放式 bytes=0-）被 400 拒且从未服务一个字节。
+///
+/// 期望：coordinator 在「全员被拒 + any_data==0」时把致命错误归一为
+/// RangeNotSupported，run_download_inner 清盘回退单流 plain GET → status=3
+/// 字节完整。修复前：Request(400)/Other 冒泡，任务 status=4。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a local port; run with --ignored"]
+async fn probed_all_segments_rejected_falls_back_to_plain_get() {
+    let work_dir = unique_dir("segreject400");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+
+    let size = 4_000_037usize;
+    let body = Arc::new(gen_body(size, 401));
+    let expected = sha256_bytes(&body);
+
+    let mut s = ServerState::new(body.clone(), "etag-segreject");
+    s.reject_segment_range_with_400 = true; // probe 0-0 放行，分段全拒
+    let st = Arc::new(s);
+    let server = start_server(st.clone()).await;
+    let url = server.url("/file");
+
+    let db = Db::open(&work_dir).await.expect("db");
+    insert_simple_task(&db, &work_dir, "sr400", &url, "out.bin", 8, size as i64).await;
+
+    // hint=0：走真实 probe 路径（probe 判定 range=true 后多段启动）。
+    let cancel = CancellationToken::new();
+    let (status, dest) = run_full(
+        &work_dir, &db, "sr400", &url, "out.bin", 8, 0, false, "", &cancel,
+    )
+    .await;
+
+    assert_eq!(
+        status, 3,
+        "❌ 分段全被 400 拒时应归一 RangeNotSupported 回退单流并成功（status=3），实得 {status}"
+    );
+    let got = sha256_file(&dest).await;
+    assert_eq!(got, expected, "❌ 单流回退产出的文件不是字节完整的原文件");
+    assert!(
+        st.rejected_range_count.load(Ordering::SeqCst) >= 1,
+        "❌ 应先尝试过带 Range 的分段连接（本测试前提）"
+    );
+    assert_eq!(
+        st.full_get_count.load(Ordering::SeqCst),
+        1,
+        "❌ 单流回退的裸 GET 应恰好发生一次"
+    );
+    drop(server);
+}
+
+/// hint 任务在【正常支持 Range 的服务器】上的保守启动不牺牲多段吞吐：
+/// 首枪 plain GET 200 携带 `Accept-Ranges: bytes` → RangeVerdict 判支持 →
+/// ramp 照常放出带 Range 的并发段。
+///
+/// 期望：status=3 字节完整；发生过 ≥1 次 Range 分段请求（多段确实启用），
+/// 首段吞吐照常（不做时序断言，只验证机制接通）。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "binds a local port; run with --ignored"]
+async fn hint_plain_first_upgrades_to_multi_segment_on_accept_ranges() {
+    let work_dir = unique_dir("hintupgrade");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+
+    let size = 8_000_003usize; // ~8MB
+    let body = Arc::new(gen_body(size, 402));
+    let expected = sha256_bytes(&body);
+
+    let mut s = ServerState::new(body.clone(), "etag-hintup");
+    // 延迟首枪 plain GET 的 body（响应头立即到达 → RangeVerdict 立即判定），
+    // 确保 2s ramp tick 到来时任务仍在进行、有机会放出带 Range 的补充 worker。
+    s.throttle_full_ms = 2600;
+    s.throttle_range_ms = 100;
+    let st = Arc::new(s);
+    let server = start_server(st.clone()).await;
+    let url = server.url("/file");
+
+    let db = Db::open(&work_dir).await.expect("db");
+    insert_simple_task(&db, &work_dir, "hup", &url, "out.bin", 8, size as i64).await;
+
+    let cancel = CancellationToken::new();
+    let (status, dest) = run_full(
+        &work_dir,
+        &db,
+        "hup",
+        &url,
+        "out.bin",
+        8,
+        size as i64,
+        false,
+        "",
+        &cancel,
+    )
+    .await;
+
+    assert_eq!(
+        status, 3,
+        "❌ hint 任务在正常服务器上应成功（status=3），实得 {status}"
+    );
+    let got = sha256_file(&dest).await;
+    assert_eq!(got, expected, "❌ 产出文件字节不完整");
+    // 机制断言：首枪必为裸 GET（≥1 次 200 全量），且 Accept-Ranges 放行后
+    // 确实发出过带 Range 的分段请求（多段没有被保守启动一刀切禁掉）。
+    assert!(
+        st.full_get_count.load(Ordering::SeqCst) >= 1,
+        "❌ 首枪应是不带 Range 的 plain GET"
+    );
+    assert!(
+        st.range_get_count.load(Ordering::SeqCst) >= 1,
+        "❌ Accept-Ranges: bytes 后 ramp 应放出带 Range 的并发段（多段被误禁）"
+    );
+    drop(server);
+}
+
+/// 手动真实端点验证（默认跳过，须显式传 env）。对一个真实 URL 跑完整的
+/// 浏览器扩展 hint 流程：跳过 probe → 乐观多段 → （若服务器 Range 敌对）
+/// 全员被拒归一 RangeNotSupported → 单流 plain GET 回退 → 完成。
+///
+/// 用法（fnOS multiple-download 实测）：
+/// ```text
+/// FLUXDOWN_RT_URL="http://nas:1080/multiple-download?token=..." \
+/// FLUXDOWN_RT_SIZE=32583874 \
+/// FLUXDOWN_RT_COOKIES="fnos-token=..." \
+/// cargo test -p fluxdown_engine --test realtest manual_real_url -- --ignored --nocapture
+/// ```
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "manual: requires FLUXDOWN_RT_URL pointing at a live endpoint"]
+async fn manual_real_url_hint_download() {
+    use fluxdown_engine::downloader::{DownloadParams, run_download};
+
+    let Ok(url) = std::env::var("FLUXDOWN_RT_URL") else {
+        eprintln!("FLUXDOWN_RT_URL 未设置 — 跳过");
+        return;
+    };
+    let size: i64 = std::env::var("FLUXDOWN_RT_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(-1); // -1 = 大小未知但确认可下载（同扩展 webRequest 嗅探语义）
+    let cookies = std::env::var("FLUXDOWN_RT_COOKIES").unwrap_or_default();
+
+    let work_dir = unique_dir("manual-real");
+    let _ = tokio::fs::remove_dir_all(&work_dir).await;
+    tokio::fs::create_dir_all(&work_dir).await.unwrap();
+    let db = Db::open(&work_dir).await.expect("db");
+    insert_simple_task(
+        &db,
+        &work_dir,
+        "manual",
+        &url,
+        "manual.bin",
+        16,
+        size.max(0),
+    )
+    .await;
+
+    // UA 与桌面 App 一致：FLUXDOWN_RT_UA 显式覆盖，空 = build_client 内置
+    // Chrome UA（fnOS 等端点对非浏览器 UA 直接 400，test_client 的
+    // "FluxDownRealTest/1.0" 会被拒）。
+    let ua = std::env::var("FLUXDOWN_RT_UA").unwrap_or_default();
+    let client = build_client(&ProxyConfig::default(), &ua).expect("build_client");
+    let speed_limiter = SpeedLimiter::new(0);
+    let (tx, mut rx) = mpsc::channel::<ProgressUpdate>(256);
+    let last_status = Arc::new(std::sync::atomic::AtomicI32::new(0));
+    let ls = last_status.clone();
+    let collector = tokio::spawn(async move {
+        while let Some(u) = rx.recv().await {
+            if u.status >= 3 {
+                ls.store(u.status, std::sync::atomic::Ordering::SeqCst);
+            }
+            if !u.error_message.is_empty() {
+                eprintln!("[manual] error_message: {}", u.error_message);
+            }
+        }
+    });
+    let cancel = CancellationToken::new();
+    let params = DownloadParams {
+        auto_max_connections: 16, // 与桌面 App 默认 user_cap 一致
+        task_id: "manual".to_string(),
+        url,
+        save_dir: work_dir.to_string_lossy().to_string(),
+        file_name: "manual.bin".to_string(),
+        segment_count: 0,
+        is_resume: false,
+        range_verified: false, // 真实 hint 场景:Range 未验证
+        db: db.clone(),
+        client,
+        progress_tx: tx,
+        cancel_token: cancel.clone(),
+        speed_limiter,
+        cookies,
+        referrer: String::new(),
+        hint_file_size: size,
+        proxy_config: ProxyConfig::default(),
+        sink: std::sync::Arc::new(NoopTestSink),
+        selector: std::sync::Arc::new(fluxdown_engine::NoopSelection),
+        checksum: String::new(),
+        extra_headers: std::collections::HashMap::new(),
+        spec: RequestSpec::empty_get(),
+        audio_url: None,
+    };
+    run_download(params).await;
+    let _ = collector.await;
+    let status = last_status.load(std::sync::atomic::Ordering::SeqCst);
+    let dest = work_dir.join("manual.bin");
+    let disk = tokio::fs::metadata(&dest)
+        .await
+        .map(|m| m.len() as i64)
+        .unwrap_or(-1);
+    eprintln!(
+        "[manual] status={status}, dest={}, size_on_disk={disk}",
+        dest.display()
+    );
+    assert_eq!(status, 3, "❌ 真实端点下载未成功");
+    if size > 0 {
+        assert_eq!(disk, size, "❌ 落盘大小与预期不符");
+    }
 }
 
 /// 复现“下载过半后瞬时 200”：直接构造一个“已下载过半”的续传起点——按引擎真实的

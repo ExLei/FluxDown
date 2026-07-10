@@ -67,7 +67,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     orig_etag TEXT NOT NULL DEFAULT '',
     orig_last_modified TEXT NOT NULL DEFAULT '',
     audio_url TEXT NOT NULL DEFAULT '',
-    file_missing INTEGER NOT NULL DEFAULT 0
+    file_missing INTEGER NOT NULL DEFAULT 0,
+    range_verified INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS task_segments (
     task_id TEXT NOT NULL,
@@ -140,7 +141,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     orig_etag TEXT NOT NULL DEFAULT '',
     orig_last_modified TEXT NOT NULL DEFAULT '',
     audio_url TEXT NOT NULL DEFAULT '',
-    file_missing INTEGER NOT NULL DEFAULT 0
+    file_missing INTEGER NOT NULL DEFAULT 0,
+    range_verified INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS task_segments (
     task_id TEXT NOT NULL,
@@ -317,6 +319,13 @@ impl Db {
         self.add_column_if_missing("tasks", "referrer", "TEXT NOT NULL DEFAULT ''")
             .await?;
         self.add_column_if_missing("tasks", "extra_headers", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        // Range 能力验证标记：hint 任务（跳过 probe、Range 未验证）建任务后置
+        // 0，首响应证实支持（206/Accept-Ranges）时置回 1。resume 读取它决定
+        // 是否延续「首连接 plain GET」保守启动（配额型端点对 bounded Range
+        // 一律 400 且作废 token，resume 若落回默认 probe 会重新烧毁 token）。
+        // 默认 1 = 旧任务/probe 任务行为完全不变。
+        self.add_column_if_missing("tasks", "range_verified", "INTEGER NOT NULL DEFAULT 1")
             .await?;
         Ok(())
     }
@@ -1499,6 +1508,28 @@ impl Db {
         }
     }
 
+    /// 设置任务的 Range 能力验证标记（见 schema migration 注释）。
+    pub async fn set_task_range_verified(&self, id: &str, verified: bool) -> Result<(), DbError> {
+        sqlx::query("UPDATE tasks SET range_verified = $1 WHERE id = $2")
+            .bind(if verified { 1i32 } else { 0i32 })
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// 读取任务的 Range 能力验证标记。任务不存在/旧库默认视为已验证（true），
+    /// 保证 probe 任务与升级前创建的任务行为完全不变。
+    pub async fn get_task_range_verified(&self, id: &str) -> Result<bool, DbError> {
+        let row = sqlx::query("SELECT range_verified FROM tasks WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row
+            .map(|r| r.try_get::<i32, _>("range_verified").unwrap_or(1) != 0)
+            .unwrap_or(true))
+    }
+
     /// Manually run a WAL checkpoint to merge the write-ahead log back into the
     /// main database file.  Called when all downloads are idle (no active tasks)
     /// so the WAL doesn't grow unbounded and no background autocheckpoint causes
@@ -1674,13 +1705,36 @@ mod tests {
     static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
 
     /// Open a fresh Db in a unique temporary directory.
-    /// Returns (Db, dir_path) — caller should remove the dir when done.
+    /// Returns (Db, dir_path) — caller should clean up via [`close_test_db`].
+    ///
+    /// 目录名带纳秒时间戳：nextest 每测试一个进程（计数器恒 0），唯一性不能
+    /// 押在 pid 上——Windows 激进复用 pid，历史上残留库（见 close_test_db）
+    /// 会被 pid 复用后的测试进程继承，产生「多出陈旧任务行」的偶发失败。
     async fn open_test_db() -> (Db, std::path::PathBuf) {
         let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("fluxdown_test_{}_{}", std::process::id(), n));
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fluxdown_test_{}_{}_{}",
+            std::process::id(),
+            nanos,
+            n
+        ));
+        // 双保险：目录已存在（极端命名碰撞/上次清理失败）时先清空。
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let db = Db::open(&dir).await.expect("open test db");
         (db, dir)
+    }
+
+    /// 关闭连接池后再删除测试目录。Windows 上 sqlite 文件句柄未释放时
+    /// `remove_dir_all` 会静默失败——残留目录曾在 temp 累积 1400+ 个，且是
+    /// 历史 flaky（陈旧库被继承）的根因，必须先 close 再删。
+    async fn close_test_db(db: &Db, dir: std::path::PathBuf) {
+        db.pool.close().await;
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     async fn insert_task(db: &Db, id: &str) {
@@ -1712,7 +1766,7 @@ mod tests {
 
         let result = db.load_task_by_id("t1").await.expect("load after delete");
         assert!(result.is_none(), "task must be absent after delete");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -1726,7 +1780,7 @@ mod tests {
         let all = db.load_all_tasks().await.expect("load all");
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].task_id, "keep");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -1735,7 +1789,7 @@ mod tests {
         // Deleting an ID that was never inserted must not return an error.
         let result = db.delete_task("phantom-id").await;
         assert!(result.is_ok(), "delete of missing task must succeed");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -1749,7 +1803,7 @@ mod tests {
             result.is_ok(),
             "second delete of already-deleted task must succeed"
         );
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -1767,7 +1821,7 @@ mod tests {
             all.iter().all(|t| t.task_id != "task-2"),
             "deleted task must not appear in load_all"
         );
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     // -----------------------------------------------------------------------
@@ -1799,7 +1853,7 @@ mod tests {
                 .expect("query count");
 
         assert_eq!(count, 0, "task_segments must be empty after task delete");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -1829,7 +1883,7 @@ mod tests {
         assert_eq!(segs[0].end_byte, 2999, "parent end_byte must extend");
         assert_eq!(segs[1].index, 3, "unrelated segment must survive");
         assert_eq!(segs[1].end_byte, 3999);
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -1872,7 +1926,7 @@ mod tests {
             .await
             .expect("load missing");
         assert_eq!(missing, None);
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     // -----------------------------------------------------------------------
@@ -1918,7 +1972,7 @@ mod tests {
              check for WAL-checkpoint or transaction overhead"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     // -----------------------------------------------------------------------
@@ -1930,7 +1984,7 @@ mod tests {
         let (db, dir) = open_test_db().await;
         let result = db.wal_checkpoint().await;
         assert!(result.is_ok(), "wal_checkpoint must succeed on empty DB");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -1941,7 +1995,7 @@ mod tests {
         }
         let result = db.wal_checkpoint().await;
         assert!(result.is_ok(), "wal_checkpoint must succeed after writes");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     // -----------------------------------------------------------------------
@@ -1996,7 +2050,7 @@ mod tests {
             "DB total_bytes must be unchanged after CDN drift"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// A delta exceeding 1 % must update total_bytes (genuine file change).
@@ -2029,7 +2083,7 @@ mod tests {
             "DB total_bytes must be updated after genuine file size change"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// When stored total_bytes is 0 (first probe), always update.
@@ -2054,7 +2108,7 @@ mod tests {
             .expect("task exists");
         assert_eq!(task.total_bytes, probed);
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// Even when total_bytes is preserved, file_name must always be updated.
@@ -2089,7 +2143,7 @@ mod tests {
             "total_bytes must remain unchanged"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// Exact byte-for-byte equality → no update, returns stored value.
@@ -2107,7 +2161,7 @@ mod tests {
         assert!(!updated);
         assert_eq!(effective, stored);
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// Probe returns a *smaller* value beyond tolerance — must update.
@@ -2137,7 +2191,7 @@ mod tests {
             .expect("task exists");
         assert_eq!(task.total_bytes, probed);
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// Tolerance cap: for a 10 GB file the threshold is capped at 1 MiB,
@@ -2162,7 +2216,7 @@ mod tests {
         );
         assert_eq!(effective, probed);
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// A drift of exactly 1 byte beyond the threshold floor must update.
@@ -2186,7 +2240,7 @@ mod tests {
         );
         assert_eq!(effective, probed);
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     // -----------------------------------------------------------------------
@@ -2220,7 +2274,7 @@ mod tests {
             "陈旧的较小进度写入不得覆盖已落库的较大值"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// 单调写入对更大的值仍正常前进。
@@ -2243,7 +2297,7 @@ mod tests {
             .expect("task exists");
         assert_eq!(task.downloaded_bytes, 800, "更大的进度值必须正常写入");
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// 非单调的 `update_task_progress` 必须仍能复位到 0（验证两方法语义不同：
@@ -2271,7 +2325,7 @@ mod tests {
             "update_task_progress 必须能把进度复位到 0（不被 MAX 钳制）"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     // -----------------------------------------------------------------------
@@ -2288,7 +2342,7 @@ mod tests {
         // (block_index, state, downloaded_bytes, retry_count) 全默认。
         assert_eq!(blocks[0], (0, 0, 0, 0));
         assert_eq!(blocks[2].0, 2);
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -2310,7 +2364,7 @@ mod tests {
         let blocks = db.load_ed2k_blocks("e2").await.expect("load");
         assert_eq!(blocks[0], (0, 3, 100, 0), "verified, retry 未变");
         assert_eq!(blocks[1], (1, 0, 0, 2), "retry_count 自增两次");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -2328,7 +2382,7 @@ mod tests {
             .expect("some");
         assert_eq!(got, blob);
         assert_eq!(got.len(), 32, "存 part_count 个块哈希，不含 phantom 追加");
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     #[tokio::test]
@@ -2348,7 +2402,7 @@ mod tests {
             let port = s.rsplit(':').next().expect("has port");
             assert!(port.parse::<u16>().is_ok(), "端口须合法 u16: {s}");
         }
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     // -----------------------------------------------------------------------
@@ -2385,6 +2439,7 @@ mod tests {
         {
             let db = Db::open(&dir).await.expect("first open");
             insert_task(&db, "persist-1").await;
+            db.pool.close().await;
         }
         {
             let db = Db::open(&dir).await.expect("second open");
@@ -2394,8 +2449,8 @@ mod tests {
                 .expect("load")
                 .expect("survives reopen");
             assert_eq!(task.task_id, "persist-1");
+            close_test_db(&db, dir).await;
         }
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// PostgreSQL 冒烟（需要本地 pg 实例）：
@@ -2604,7 +2659,7 @@ mod tests {
             "plain task must not be mistaken for a paired-track task"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// save_audio_url 写入非空 URL 后，load_audio_url 必须原样读回，
@@ -2620,7 +2675,7 @@ mod tests {
         let audio_url = db.load_audio_url("pair1").await.expect("load audio_url");
         assert_eq!(audio_url, Some("http://example.com/audio.m4a".to_string()));
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 
     /// 先写入非空音频轨、再写入空串：表达“取消轨对”，load 必须回到 None
@@ -2643,6 +2698,6 @@ mod tests {
             "clearing the audio track must fall back to the default state"
         );
 
-        let _ = std::fs::remove_dir_all(dir);
+        close_test_db(&db, dir).await;
     }
 }

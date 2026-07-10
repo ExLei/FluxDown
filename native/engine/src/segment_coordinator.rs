@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -328,6 +328,21 @@ const RAMP_INITIAL_WORKERS: usize = 2;
 /// ramp 评估窗口间隔（秒）：每窗口测一次总吞吐，决定扩容/冻结。
 const RAMP_TICK_SECS: u64 = 2;
 
+/// Range 能力裁决（`range_verdict: AtomicU8` 的取值）。
+/// hint 模式（probe 被跳过、Range 从未验证）从 UNKNOWN 起步：首连接发不带
+/// Range 的 plain GET，从首响应（206 或 `Accept-Ranges: bytes`）学习；裁决前
+/// 绝不发出任何带 Range 的请求——配额型端点（fnOS multiple-download）对
+/// bounded Range 一律 400 且【作废 token】（实测），一次 Range 风暴 = 任务判死。
+/// probe/resume 路径直接以 SUPPORTED 起步（行为与既往完全一致）。
+const RANGE_VERDICT_UNKNOWN: u8 = 0;
+const RANGE_VERDICT_SUPPORTED: u8 = 1;
+const RANGE_VERDICT_UNSUPPORTED: u8 = 2;
+
+/// 「全员被拒 + 瞬时 200 家族」归一为 RangeNotSupported（触发清盘单流回退）
+/// 时允许丢弃的已下字节上限。低于此值：一次性下完的收益 > 重下代价；高于
+/// 此值：保留 fail-loud + 数据，用户 resume 重新 probe 后仍可多段续传。
+const RANGE_FAMILY_DISCARD_MAX: i64 = 8 * 1024 * 1024;
+
 /// 扩容有效判据：扩容后窗口吞吐 >= 扩容前吞吐 × 此系数才继续扩容，
 /// 否则冻结（新增连接没有带来净收益，继续加只会触发服务器风控）。
 const RAMP_IMPROVE_FACTOR: f64 = 1.05;
@@ -567,6 +582,11 @@ enum WorkerEvent {
         seg_index: i32,
         error: DownloadError,
     },
+    /// hint 模式首连接的 Range 能力裁决（每任务恰好一次，见
+    /// [`RANGE_VERDICT_UNKNOWN`]）。`supports_range == false` 时 coordinator
+    /// 必须立即把 Pending 段吸收进开放式首段（不能等 ramp tick——LAN 上首段
+    /// 预算可能在 2s 内跑完，Done 后就没有活流可吸收了）。
+    RangeVerdict { supports_range: bool },
 }
 
 /// Sent by the coordinator to a worker to assign work.
@@ -581,6 +601,10 @@ struct WorkerAssignment {
     /// 的 token 请求次数配额）拒绝其余连接时，coordinator 可把右侧 Pending 段
     /// 并入本段，复用这条已建立的流下完整个文件，无需任何新请求。
     open_ended: bool,
+    /// hint 模式（Range 未经验证）的首连接：完全不带 Range/If-Range 头的
+    /// plain GET。仅与 `open_ended` 同真（从字节 0 起的初始派工）；响应 200
+    /// 走与开放式 200 相同的"直接采用 + 预算截断"路径。
+    no_range: bool,
 }
 
 /// Result of `find_next_work`: an assignment plus optionally the index of the
@@ -611,6 +635,7 @@ struct WorkerSpawnCtx {
     worker_cancel: CancellationToken,
     conn_sensitive: Arc<AtomicBool>,
     reconnect_hostile: Arc<AtomicBool>,
+    range_verdict: Arc<AtomicU8>,
     total_downloaded: Arc<AtomicI64>,
     seg_states: Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     db: Db,
@@ -643,6 +668,7 @@ impl WorkerSpawnCtx {
             self.worker_cancel.clone(),
             self.conn_sensitive.clone(),
             self.reconnect_hostile.clone(),
+            self.range_verdict.clone(),
             self.total_downloaded.clone(),
             self.seg_states.clone(),
             self.db.clone(),
@@ -722,10 +748,23 @@ pub async fn run_coordinated_download(
 
     if existing.is_empty() {
         // Create fresh segments (uniform split).
-        let (fresh, db_segs) = build_fresh_segments(initial_segment_count, total_bytes);
+        //
+        // hint 模式（size_is_estimate，Range 未经 probe 验证）只规划【一个】
+        // 覆盖全文件的段：首连接是不带 Range 的 plain GET，若首响应证实
+        // Range 支持（RangeVerdict → SUPPORTED），ramp 补充循环会经
+        // find_next_work 的动态拆分把这个大段逐步切给带 Range 的并发
+        // worker（IDM 式先单流后升级）；若不支持，这个段本身就覆盖整个
+        // 文件，plain GET 流一路下完——**不存在**"预切段在吸收合并落地前
+        // 被旧预算截断"的竞速（预算从一开始就是全文件）。
+        let plan_count = if size_is_estimate {
+            1
+        } else {
+            initial_segment_count
+        };
+        let (fresh, db_segs) = build_fresh_segments(plan_count, total_bytes);
         segments = fresh;
         db.insert_segments(task_id, &db_segs).await?;
-        next_index = initial_segment_count;
+        next_index = plan_count;
     } else {
         // Restore from DB (resume scenario).
         next_index = 0;
@@ -1027,6 +1066,9 @@ pub async fn run_coordinated_download(
             // 从字节 0 起始的段用开放式 Range（fresh 下载恒有且仅有一个；
             // resume 时仅当该段零进度）。其余段闭区间。
             open_ended: s.start_byte + s.downloaded_bytes == 0,
+            // hint 模式（Range 未验证）的首连接完全不带 Range 头——配额型
+            // 端点对 bounded Range 一律 400 且作废 token（fnOS 实测）。
+            no_range: size_is_estimate && s.start_byte + s.downloaded_bytes == 0,
         })
         .collect();
     let mut assign_iter = pending_assignments.drain(..);
@@ -1053,6 +1095,14 @@ pub async fn run_coordinated_download(
     // 必然撞拒绝，等价于判死整个任务。
     let reconnect_hostile = Arc::new(AtomicBool::new(false));
 
+    // Range 能力裁决（见 RANGE_VERDICT_* 常量）：hint 模式从 UNKNOWN 起步，
+    // 首连接 plain GET 的响应决定裁决；probe/resume 路径恒 SUPPORTED。
+    let range_verdict = Arc::new(AtomicU8::new(if size_is_estimate {
+        RANGE_VERDICT_UNKNOWN
+    } else {
+        RANGE_VERDICT_SUPPORTED
+    }));
+
     // worker 生成上下文：启动与 ramp 扩容共用同一 spawn 路径。
     let ctx = WorkerSpawnCtx {
         event_tx,
@@ -1067,6 +1117,7 @@ pub async fn run_coordinated_download(
         conn_sensitive: conn_sensitive.clone(),
         reconnect_hostile: reconnect_hostile.clone(),
         total_downloaded: total_downloaded.clone(),
+        range_verdict: range_verdict.clone(),
         seg_states: seg_states.clone(),
         db: db.clone(),
         progress_tx: progress_tx.clone(),
@@ -1426,7 +1477,32 @@ pub async fn run_coordinated_download(
                             if let Some(seg) = segments.get_mut(&seg_index) {
                                 seg.state = SegState::Pending;
                             }
-                            let next_work = if serial_mode {
+                            let verdict_ok = range_verdict.load(Ordering::Relaxed)
+                                == RANGE_VERDICT_SUPPORTED;
+                            let next_work = if !verdict_ok {
+                                // Range 裁决未确认支持（hint 首枪 plain GET 抛出
+                                // TrueSizeLarger 的路径）：绝不生成带 Range 的重派工
+                                // ——配额型端点会被 bounded Range 作废 token。只允许
+                                // 「从 0 起的零进度段」保持 plain GET 语义重飞；其余
+                                // 段放回 Pending（该裁决下 ramp/proactive 均被门控，
+                                // 若因此无工可派，存活性兜底会 fail-loud 保数据）。
+                                match find_next_pending_only(&mut segments) {
+                                    Some(mut nw) if nw.assignment.actual_start == 0 => {
+                                        nw.assignment.open_ended = true;
+                                        nw.assignment.no_range = true;
+                                        Some(nw)
+                                    }
+                                    Some(nw) => {
+                                        if let Some(seg) =
+                                            segments.get_mut(&nw.assignment.seg_index)
+                                        {
+                                            seg.state = SegState::Pending;
+                                        }
+                                        None
+                                    }
+                                    None => None,
+                                }
+                            } else if serial_mode {
                                 let other_active = segments.values()
                                     .any(|s| s.state == SegState::Active);
                                 if other_active {
@@ -1444,6 +1520,7 @@ pub async fn run_coordinated_download(
                             };
                             if let Some(next) = next_work {
                                 let new_seg_idx = next.assignment.seg_index;
+                                let redispatch_open = next.assignment.open_ended;
                                 persist_segment_change(
                                     db, task_id, &segments,
                                     new_seg_idx, next.split_parent,
@@ -1455,11 +1532,16 @@ pub async fn run_coordinated_download(
                                     );
                                 }
                                 rebuild_seg_states(&segments, &seg_states);
-                                if let Some(Some(tx)) = worker_assign_txs.get(worker_id)
-                                    && tx.send(next.assignment).await.is_err()
-                                    && let Some(seg) = segments.get_mut(&new_seg_idx)
-                                {
-                                    seg.state = SegState::Pending;
+                                if let Some(Some(tx)) = worker_assign_txs.get(worker_id) {
+                                    if tx.send(next.assignment).await.is_err() {
+                                        if let Some(seg) = segments.get_mut(&new_seg_idx) {
+                                            seg.state = SegState::Pending;
+                                        }
+                                    } else if redispatch_open {
+                                        // plain/开放式语义的重飞段重新成为可吸收的
+                                        // 生命线（初始派工同款跟踪）。
+                                        open_ended_streaming = Some(new_seg_idx);
+                                    }
                                 }
                             } else if let Some(slot) = worker_assign_txs.get_mut(worker_id) {
                                 *slot = None;
@@ -1554,73 +1636,20 @@ pub async fn run_coordinated_download(
                             }
 
                             // ---- 开放式首段吸收（连接配额自救）----
-                            // 服务器拒绝新连接，但开放式首段的响应流仍活着：把它
-                            // 右侧【字节连续且零进度】的 Pending 段全部并入该段。
-                            // 开放式请求（bytes=X-）的流本就覆盖到文件末尾，worker
-                            // 写循环每 chunk 重读共享 end_byte，预算扩大后自然续写
-                            // ——无需任何新请求即可下完整个文件。这是"一个 token
-                            // 只允许固定次数成功 GET"的配额型端点（fnOS
-                            // multiple-download）唯一能下完的方式。
-                            if let Some(open_idx) = open_ended_streaming
-                                && let Some(open_end) = segments
-                                    .get(&open_idx)
-                                    .filter(|s| s.state == SegState::Active)
-                                    .map(|s| s.end_byte)
-                            {
-                                let mut new_end = open_end;
-                                let mut absorbed: Vec<i32> = Vec::new();
-                                while let Some((idx, end)) = segments
-                                    .values()
-                                    .find(|s| {
-                                        s.state == SegState::Pending
-                                            && s.downloaded_bytes == 0
-                                            && s.start_byte == new_end + 1
-                                    })
-                                    .map(|s| (s.index, s.end_byte))
-                                {
-                                    new_end = end;
-                                    absorbed.push(idx);
-                                }
-                                if !absorbed.is_empty() {
-                                    // DB 先行（单事务）：失败则放弃合并（内存不动，
-                                    // 降级照常进行），避免内存/DB 段布局分叉。
-                                    match db
-                                        .persist_merge(task_id, open_idx, new_end, &absorbed)
-                                        .await
-                                    {
-                                        Ok(()) => {
-                                            for idx in &absorbed {
-                                                segments.remove(idx);
-                                            }
-                                            if let Some(seg) = segments.get_mut(&open_idx) {
-                                                seg.end_byte = new_end;
-                                            }
-                                            rebuild_seg_states(&segments, &seg_states);
-                                            // 吸收合并 = 配额型端点实锤：这条
-                                            // 流从此是唯一生命线，重连必被拒。
-                                            // 提高其停滞容忍，禁止轻易掐流。
-                                            reconnect_hostile
-                                                .store(true, Ordering::Relaxed);
-                                            log_info!(
-                                                "[coordinator] task {} 开放式首段 #{} 吸收 {} 个 \
-                                                 Pending 段（新终点 {}），复用现有连接续流到文件尾",
-                                                task_id,
-                                                open_idx,
-                                                absorbed.len(),
-                                                new_end
-                                            );
-                                        }
-                                        Err(e) => {
-                                            log_info!(
-                                                "[coordinator] task {} persist_merge 失败：{}，\
-                                                 放弃合并走常规降级",
-                                                task_id,
-                                                e
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+                            // 服务器拒绝新连接，但开放式首段的响应流仍活着：把
+                            // 右侧【字节连续且零进度】的 Pending 段全部并入该段，
+                            // 复用这条已建立的流下完整个文件，无需任何新请求。
+                            // 这是配额型端点（fnOS multiple-download）唯一能下完
+                            // 的方式。见 absorb_pending_into_open_stream。
+                            absorb_pending_into_open_stream(
+                                db,
+                                task_id,
+                                &mut segments,
+                                &seg_states,
+                                open_ended_streaming,
+                                &reconnect_hostile,
+                            )
+                            .await;
 
                             // 退休当前失败的 worker（关闭其分配通道）
                             if let Some(slot) = worker_assign_txs.get_mut(worker_id) {
@@ -1628,13 +1657,39 @@ pub async fn run_coordinated_download(
                             }
 
                             // 安全检查：如果所有 worker 都已退休且无活跃分段，
-                            // 说明服务器甚至拒绝单连接 → 无法继续。
+                            // 说明服务器甚至拒绝单连接 → 多段路线无法继续。
                             let any_alive = worker_assign_txs.iter().any(|tx| tx.is_some())
                                 || segments.values().any(|s| s.state == SegState::Active);
                             if !any_alive && !all_done(&segments) {
-                                final_error = Some(DownloadError::Other(format!(
-                                    "服务器拒绝所有下载连接（包括单连接），无法继续下载：{error}"
-                                )));
+                                // 归一为 RangeNotSupported 上抛（run_download_inner
+                                // 捕获后清盘回退单流 plain GET）的两种情形：
+                                //   • any_data==0：从未有任何段拿到过 206/写入数据，
+                                //     磁盘无可保留进度。Range 敌对的配额型端点
+                                //     （fnOS multiple-download 对带 Range 的请求回
+                                //     400，仅裸 GET 可用）唯一能下完的方式。
+                                //   • 触发错误本身是 RangeNotSupported（瞬时 200
+                                //     家族且重试打满）**且已下进度可忽略**（<
+                                //     RANGE_FAMILY_DISCARD_MAX）：服务器持续对
+                                //     Range 回 200 全量——plain GET 必然可用，丢弃
+                                //     少量已下数据换一次性下完。
+                                // 其余 any_data>0 的失败保留致命错误（fail-loud +
+                                // 数据保留）：403/429/400 是配额/并发问题，清盘重下
+                                // 反丢进度；深进度大文件即便是 200 家族也绝不清盘
+                                // ——resume 重新 probe 后仍有机会多段续传，无条件
+                                // 清盘会把 90% 进度的 4GB 文件整个重下。
+                                let downloaded = total_downloaded.load(Ordering::Relaxed);
+                                let range_family =
+                                    matches!(error, DownloadError::RangeNotSupported(_));
+                                let discard_ok = downloaded < RANGE_FAMILY_DISCARD_MAX;
+                                final_error = Some(if !any_data || (range_family && discard_ok) {
+                                    DownloadError::RangeNotSupported(format!(
+                                        "every connection rejected ({error})"
+                                    ))
+                                } else {
+                                    DownloadError::Other(format!(
+                                        "服务器拒绝所有下载连接（包括单连接），无法继续下载：{error}"
+                                    ))
+                                });
                                 break;
                             }
 
@@ -1657,9 +1712,57 @@ pub async fn run_coordinated_download(
                                 *tx = None;
                             }
                             if final_error.is_none() {
-                                final_error = Some(error);
+                                // 连接级拒绝（400/403/429）且从未下到任何字节：与上方
+                                // "全员被拒"出口同理，归一为 RangeNotSupported 触发
+                                // 单流 plain GET 回退（16 连接同时被拒时，最后一个失败
+                                // 事件看到的其余段全是 Pending，走的是本分支而非上方）。
+                                final_error = Some(if conn_rejection && !any_data {
+                                    DownloadError::RangeNotSupported(format!(
+                                        "every connection rejected, no byte ever served: {error}"
+                                    ))
+                                } else {
+                                    error
+                                });
                             }
                             break;
+                        }
+                    }
+
+                    Some(WorkerEvent::RangeVerdict { supports_range }) => {
+                        if supports_range {
+                            // 首响应证实 Range 支持（206 或 Accept-Ranges: bytes）：
+                            // ramp 裁决门放行，后续 tick 照常扩容多段；持久化标记，
+                            // 此后 resume 走正常 probe 路径（写失败仅降级：resume
+                            // 会再走一次保守启动，多花一次裁决，无正确性影响）。
+                            let _ = db.set_task_range_verified(task_id, true).await;
+                            log_info!(
+                                "[coordinator] task {} hint 首响应确认 Range 支持，放行多段扩容",
+                                task_id
+                            );
+                        } else {
+                            // 首响应无 Range 能力证据：本任务判定为 Range 敌对/
+                            // 未知（配额型端点对 bounded Range 一律 400 且作废
+                            // token）。hint 任务规划期只建了一个覆盖全文件的段，
+                            // 这条 plain GET 流就是唯一生命线：冻结扩容、抑制
+                            // 主动拆分、提高停滞容忍（掐流重连必被拒）。吸收
+                            // 调用兜底 resume 等存在多段的边角（通常为 no-op）。
+                            log_info!(
+                                "[coordinator] task {} hint 首响应无 Range 支持证据，\
+                                 保持首段 plain GET 单流下完",
+                                task_id
+                            );
+                            ramp_frozen = true;
+                            conn_sensitive.store(true, Ordering::Relaxed);
+                            reconnect_hostile.store(true, Ordering::Relaxed);
+                            absorb_pending_into_open_stream(
+                                db,
+                                task_id,
+                                &mut segments,
+                                &seg_states,
+                                open_ended_streaming,
+                                &reconnect_hostile,
+                            )
+                            .await;
                         }
                     }
 
@@ -1678,7 +1781,14 @@ pub async fn run_coordinated_download(
             _ = proactive_interval.tick() => {
                 // conn_sensitive：一旦观察到服务器对 Range 返回非 206（见 do_segment 置位处），
                 // 停止【主动拆分】以降低连接 churn（reactive 拆分仍保留做尾段抢救）。
-                if !serial_mode && !conn_sensitive.load(Ordering::Relaxed) && !all_done(&segments) {
+                // range_verdict：hint 任务在首响应裁决前/裁决为不支持时，绝不拆分——
+                // 拆分会临时缩小首段共享预算，在「响应头已到、UNSUPPORTED 事件仍在
+                // 途中」的窗口里可能让首段 plain GET 流被旧预算提前截断。
+                if !serial_mode
+                    && !conn_sensitive.load(Ordering::Relaxed)
+                    && range_verdict.load(Ordering::Relaxed) == RANGE_VERDICT_SUPPORTED
+                    && !all_done(&segments)
+                {
                     sync_downloaded_from_shared(&mut segments, &seg_states);
                     // Try proactive split at the normal threshold first; if that fails
                     // (last segment has < current_min_split but >= TAIL_MIN_SPLIT_BYTES
@@ -1760,7 +1870,12 @@ pub async fn run_coordinated_download(
                 }
                 let mut alive = worker_assign_txs.iter().filter(|t| t.is_some()).count();
 
-                if !serial_mode && !all_done(&segments) {
+                // Range 裁决门（hint 模式）：首响应未到（UNKNOWN）或已判不支持
+                // （UNSUPPORTED，吸收合并已由 RangeVerdict 事件完成）时，跳过
+                // 扩容与补充——裁决前绝不发出任何带 Range 的请求。
+                let range_ok =
+                    range_verdict.load(Ordering::Relaxed) == RANGE_VERDICT_SUPPORTED;
+                if !serial_mode && !all_done(&segments) && range_ok {
                     // 2. 评估上一次扩容的效果：吞吐无足够增益 → 冻结在当前规模
                     //   （已找到服务器/链路的实际并发甜点，继续加只有风控风险）。
                     if awaiting_ramp_eval {
@@ -2162,6 +2277,7 @@ fn find_next_work(
             actual_start: seg.start_byte + seg.downloaded_bytes,
             seg_end: seg.end_byte,
             open_ended: false,
+            no_range: false,
         };
         let idx = seg.index;
         if let Some(s) = segments.get_mut(&idx) {
@@ -2233,6 +2349,7 @@ fn find_next_pending_only(segments: &mut BTreeMap<i32, LiveSegment>) -> Option<N
         actual_start: seg.start_byte + seg.downloaded_bytes,
         seg_end: seg.end_byte,
         open_ended: false,
+        no_range: false,
     };
     let idx = seg.index;
     if let Some(s) = segments.get_mut(&idx) {
@@ -2319,6 +2436,7 @@ fn try_split_largest(
         actual_start: split_point,
         seg_end: old_end,
         open_ended: false,
+        no_range: false,
     };
 
     segments.insert(new_index, new_seg);
@@ -2415,6 +2533,7 @@ fn try_proactive_split(
         actual_start: split_point,
         seg_end: old_end,
         open_ended: false,
+        no_range: false,
     };
 
     segments.insert(new_index, new_seg);
@@ -2492,6 +2611,83 @@ fn rebuild_seg_states(
             }
         }
         *states = new_states;
+    }
+}
+
+/// 把开放式首段右侧【字节连续且零进度】的 Pending 段全部并入该段。
+///
+/// DB 先行（单事务）：失败则放弃合并（内存不动），避免内存/DB 段布局分叉。
+/// 成功吸收 ≥1 段时置位 `reconnect_hostile`（这条流从此是唯一生命线，掐流
+/// 重连必被拒）并重建共享 seg_states。返回吸收的段数。
+///
+/// 两个调用点：连接级拒绝降级（服务器拒绝新连接但首段流仍活着）与 hint 模式
+/// `RangeVerdict { supports_range: false }`（首段 plain GET 流是唯一生命线）。
+async fn absorb_pending_into_open_stream(
+    db: &Db,
+    task_id: &str,
+    segments: &mut BTreeMap<i32, LiveSegment>,
+    seg_states: &Arc<StdMutex<Vec<SegmentProgressInfo>>>,
+    open_ended_streaming: Option<i32>,
+    reconnect_hostile: &AtomicBool,
+) -> usize {
+    let Some(open_idx) = open_ended_streaming else {
+        return 0;
+    };
+    let Some(open_end) = segments
+        .get(&open_idx)
+        .filter(|s| s.state == SegState::Active)
+        .map(|s| s.end_byte)
+    else {
+        return 0;
+    };
+    let mut new_end = open_end;
+    let mut absorbed: Vec<i32> = Vec::new();
+    while let Some((idx, end)) = segments
+        .values()
+        .find(|s| {
+            s.state == SegState::Pending && s.downloaded_bytes == 0 && s.start_byte == new_end + 1
+        })
+        .map(|s| (s.index, s.end_byte))
+    {
+        new_end = end;
+        absorbed.push(idx);
+    }
+    if absorbed.is_empty() {
+        return 0;
+    }
+    match db
+        .persist_merge(task_id, open_idx, new_end, &absorbed)
+        .await
+    {
+        Ok(()) => {
+            for idx in &absorbed {
+                segments.remove(idx);
+            }
+            if let Some(seg) = segments.get_mut(&open_idx) {
+                seg.end_byte = new_end;
+            }
+            rebuild_seg_states(segments, seg_states);
+            // 吸收合并 = 配额型端点实锤：这条流从此是唯一生命线，重连必被拒。
+            // 提高其停滞容忍，禁止轻易掐流。
+            reconnect_hostile.store(true, Ordering::Relaxed);
+            log_info!(
+                "[coordinator] task {} 开放式首段 #{} 吸收 {} 个 Pending 段（新终点 {}），\
+                 复用现有连接续流到文件尾",
+                task_id,
+                open_idx,
+                absorbed.len(),
+                new_end
+            );
+            absorbed.len()
+        }
+        Err(e) => {
+            log_info!(
+                "[coordinator] task {} persist_merge 失败：{}，放弃合并走常规降级",
+                task_id,
+                e
+            );
+            0
+        }
     }
 }
 
@@ -2672,6 +2868,7 @@ fn spawn_worker(
     cancel_token: CancellationToken,
     conn_sensitive: Arc<AtomicBool>,
     reconnect_hostile: Arc<AtomicBool>,
+    range_verdict: Arc<AtomicU8>,
     total_downloaded: Arc<AtomicI64>,
     seg_states: Arc<StdMutex<Vec<SegmentProgressInfo>>>,
     db: Db,
@@ -2698,10 +2895,13 @@ fn spawn_worker(
                 assignment.actual_start,
                 assignment.seg_end,
                 assignment.open_ended,
+                assignment.no_range,
                 &client,
                 &cancel_token,
                 &conn_sensitive,
                 &reconnect_hostile,
+                &range_verdict,
+                &event_tx,
                 &total_downloaded,
                 &planned_total,
                 size_is_estimate,
@@ -2784,10 +2984,13 @@ async fn do_segment_with_retry(
     mut actual_start: i64,
     mut seg_end: i64,
     open_ended: bool,
+    no_range: bool,
     client: &Client,
     cancel: &CancellationToken,
     conn_sensitive: &AtomicBool,
     reconnect_hostile: &AtomicBool,
+    range_verdict: &AtomicU8,
+    event_tx: &mpsc::Sender<WorkerEvent>,
     total_downloaded: &AtomicI64,
     planned_total: &AtomicI64,
     size_is_estimate: bool,
@@ -2813,10 +3016,13 @@ async fn do_segment_with_retry(
             actual_start,
             seg_end,
             open_ended,
+            no_range,
             client,
             cancel,
             conn_sensitive,
             reconnect_hostile,
+            range_verdict,
+            event_tx,
             total_downloaded,
             planned_total,
             size_is_estimate,
@@ -2873,6 +3079,23 @@ async fn do_segment_with_retry(
                     );
                     return Err(e);
                 }
+                // no_range 段（hint 首枪 plain GET）已写入部分字节后中途断流/停滞：
+                // 若 Range 裁决为不支持，重连只能带 Range（plain GET 无法从偏移
+                // 续传），而带 Range 会作废配额型 token（fnOS 实测）——不重试，
+                // 直接上报（fail-loud + 数据保留），把"是否重下"留给用户决策，
+                // 绝不替端点烧掉可能仍有效的 token。
+                if no_range
+                    && actual_start > seg_start
+                    && range_verdict.load(Ordering::Relaxed) == RANGE_VERDICT_UNSUPPORTED
+                {
+                    log_info!(
+                        "[segment-retry] task {} seg {} plain 流中途断开且服务器不支持 Range，\
+                         跳过带 Range 的重连直接上报",
+                        task_id,
+                        seg_idx
+                    );
+                    return Err(e);
+                }
                 attempts += 1;
                 if attempts >= MAX_RETRIES {
                     return Err(e);
@@ -2924,10 +3147,18 @@ async fn do_segment(
     actual_start: i64,
     seg_end: i64,
     open_ended: bool,
+    // hint 模式（Range 未经验证）的首连接：不带 Range/If-Range 的 plain GET，
+    // 仅在 actual_start == 0 时生效（重试推进起点后自然回到带 Range 路径）。
+    no_range: bool,
     client: &Client,
     cancel: &CancellationToken,
     conn_sensitive: &AtomicBool,
     reconnect_hostile: &AtomicBool,
+    // Range 能力裁决（RANGE_VERDICT_*）：仍为 UNKNOWN 时由本函数依据首响应
+    // 裁决（206 或 `Accept-Ranges: bytes` → SUPPORTED，否则 UNSUPPORTED），
+    // 并经 `event_tx` 通知 coordinator（吸收/放行 ramp）。
+    range_verdict: &AtomicU8,
+    event_tx: &mpsc::Sender<WorkerEvent>,
     total_downloaded: &AtomicI64,
     // 当前规划总大小的共享视图（coordinator 就地扩容时更新，见 planned_total 注释）。
     planned_total: &AtomicI64,
@@ -2951,40 +3182,80 @@ async fn do_segment(
         return Ok(seg_end - seg_start + 1);
     }
 
-    // 开放式段不给终点：服务器把流一直送到文件尾，写循环按共享 end_byte 预算
-    // 截断。coordinator 可在其余连接被拒时就地扩容本段预算续流（吸收合并），
-    // 也天然兼容"对带终点 Range 返回 400"的怪异端点。
-    let range = if open_ended {
-        format!("bytes={actual_start}-")
-    } else {
-        format!("bytes={}-{}", actual_start, seg_end)
-    };
+    // hint 模式首连接：完全不带 Range/If-Range 的 plain GET——配额型端点
+    // （fnOS multiple-download）对 bounded Range 一律 400 且【作废 token】，
+    // 首枪必须是裸 GET。响应 200 走下方"开放式 200 直接采用"路径（no_range
+    // 仅与 open_ended 同真），写循环按共享 end_byte 预算截断。
+    let plain_first = no_range && actual_start == 0;
     // 多段下载始终用 GET——上游 resolve_file_info 已确保 spec.is_get_like()，
     // 此处显式传入 GET 以规避：（1）调用方误传 non-GET spec；（2）spec.method
     // 是 HEAD（HEAD 不携带 body，没有意义）。
-    let mut req = crate::downloader::build_request(client, url, reqwest::Method::GET, spec)
-        .header("Range", range);
-    // If-Range：把"文件是否自 probe 起变化"的判定交给服务器。validator 一致 →
-    // 返回 206（正常分段）；不一致 → 返回 200 全量 → 下方 != 206 守卫触发
-    // RangeNotSupported，coordinator 取消并回退单流（download_single 的 If-Range
-    // 会再判一次），从而**即使 CDN 在 206 上剥离了 ETag/Last-Modified**也能阻止
-    // 新旧版本静默拼接（BUG-COORD-XVERSION-NO-CONDITIONAL）。下方逐段 ETag 比对
-    // 作为第二道防线保留（应对服务器忽略 If-Range 的情形）。
-    // If-Range 必须用【强】validator（RFC 7233 §3.2）：弱 ETag（`W/` 前缀）在
-    // If-Range 上语义未定义，部分严格服务器即便文件未变也会回 200，反而误触
-    // 下方回退。故强 ETag 优先，弱 ETag 跳过、回退 Last-Modified。
-    let validator = if !expected_etag.is_empty() && !expected_etag.starts_with("W/") {
-        Some(expected_etag.to_string())
-    } else if !expected_last_modified.is_empty() {
-        Some(expected_last_modified.to_string())
-    } else {
-        None
-    };
-    let validator_sent = validator.is_some();
-    if let Some(v) = validator {
-        req = req.header("If-Range", v);
+    let mut req = crate::downloader::build_request(client, url, reqwest::Method::GET, spec);
+    let mut validator_sent = false;
+    if !plain_first {
+        // 开放式段不给终点：服务器把流一直送到文件尾，写循环按共享 end_byte 预算
+        // 截断。coordinator 可在其余连接被拒时就地扩容本段预算续流（吸收合并），
+        // 也天然兼容"对带终点 Range 返回 400"的怪异端点。
+        let range = if open_ended {
+            format!("bytes={actual_start}-")
+        } else {
+            format!("bytes={}-{}", actual_start, seg_end)
+        };
+        req = req.header("Range", range);
+        // If-Range：把"文件是否自 probe 起变化"的判定交给服务器。validator 一致 →
+        // 返回 206（正常分段）；不一致 → 返回 200 全量 → 下方 != 206 守卫触发
+        // RangeNotSupported，coordinator 取消并回退单流（download_single 的 If-Range
+        // 会再判一次），从而**即使 CDN 在 206 上剥离了 ETag/Last-Modified**也能阻止
+        // 新旧版本静默拼接（BUG-COORD-XVERSION-NO-CONDITIONAL）。下方逐段 ETag 比对
+        // 作为第二道防线保留（应对服务器忽略 If-Range 的情形）。
+        // If-Range 必须用【强】validator（RFC 7233 §3.2）：弱 ETag（`W/` 前缀）在
+        // If-Range 上语义未定义，部分严格服务器即便文件未变也会回 200，反而误触
+        // 下方回退。故强 ETag 优先，弱 ETag 跳过、回退 Last-Modified。
+        let validator = if !expected_etag.is_empty() && !expected_etag.starts_with("W/") {
+            Some(expected_etag.to_string())
+        } else if !expected_last_modified.is_empty() {
+            Some(expected_last_modified.to_string())
+        } else {
+            None
+        };
+        validator_sent = validator.is_some();
+        if let Some(v) = validator {
+            req = req.header("If-Range", v);
+        }
     }
     let resp = req.send().await?.error_for_status()?;
+
+    // --- Range 能力裁决（hint 模式，每任务恰好一次）------------------------
+    // 依据首个成功响应：206（服务器履行了 Range）或 200 携带
+    // `Accept-Ranges: bytes`（plain GET 下服务器自述支持）→ SUPPORTED；
+    // 否则 UNSUPPORTED。CAS 保证只裁决一次；事件必须在进入写循环【之前】
+    // 送出——UNSUPPORTED 时 coordinator 要赶在本段预算耗尽前完成吸收合并。
+    if range_verdict.load(Ordering::Relaxed) == RANGE_VERDICT_UNKNOWN {
+        let supports_range = resp.status() == reqwest::StatusCode::PARTIAL_CONTENT
+            || resp
+                .headers()
+                .get(reqwest::header::ACCEPT_RANGES)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("bytes"));
+        let verdict = if supports_range {
+            RANGE_VERDICT_SUPPORTED
+        } else {
+            RANGE_VERDICT_UNSUPPORTED
+        };
+        if range_verdict
+            .compare_exchange(
+                RANGE_VERDICT_UNKNOWN,
+                verdict,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
+            let _ = event_tx
+                .send(WorkerEvent::RangeVerdict { supports_range })
+                .await;
+        }
+    }
 
     // --- Range support verification ----------------------------------------
     // We sent a `Range: bytes=X-Y` header; the server MUST respond with 206
@@ -3067,10 +3338,15 @@ async fn do_segment(
             return Err(DownloadError::RangeNotSupported(resp.status().to_string()));
         }
         log_info!(
-            "[coordinator] task {} seg {} 开放式首段收到 200 全量流（服务器忽略 Range），\
+            "[coordinator] task {} seg {} 开放式首段收到 200 全量流（{}），\
              从 0 起字节等价，直接采用",
             task_id,
-            seg_idx
+            seg_idx,
+            if plain_first {
+                "hint 首连接 plain GET"
+            } else {
+                "服务器忽略 Range"
+            }
         );
     }
 

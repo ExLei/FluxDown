@@ -2210,6 +2210,7 @@ impl DownloadManager {
                 file_name,
                 segment_count: segments,
                 is_resume: false,
+                range_verified: true,
                 db: self.db.clone(),
                 client: task_client,
                 progress_tx: self.progress_tx.clone(),
@@ -2791,6 +2792,19 @@ impl DownloadManager {
             } else {
                 (self.client.clone(), self.proxy_config.resolve())
             };
+            // Range 未验证的 hint 任务（tasks.range_verified==0：源自浏览器扩展
+            // hint、从未拿到过 206/Accept-Ranges 证据）：resume 以 DB 里的
+            // total_bytes 作 hint 延续「跳过 probe + 首连接 plain GET」保守启动
+            // ——落回默认 probe 会对配额型端点（fnOS multiple-download）重新
+            // 发 HEAD/Range 并作废 token。已验证任务/旧库任务：照常 probe。
+            let range_verified = self.db.get_task_range_verified(&tid).await.unwrap_or(true);
+            let resume_hint = if range_verified {
+                0 // no hint on resume; use probe to get current size
+            } else if task.total_bytes > 0 {
+                task.total_bytes
+            } else {
+                -1 // 大小未知但确认可下载（沿用扩展 webRequest 嗅探语义）
+            };
 
             let params = DownloadParams {
                 task_id: tid.clone(),
@@ -2806,7 +2820,8 @@ impl DownloadManager {
                 speed_limiter,
                 cookies: resume_cookies.clone(),
                 referrer: resume_referrer.clone(),
-                hint_file_size: 0, // no hint on resume; use probe to get current size
+                hint_file_size: resume_hint,
+                range_verified,
                 proxy_config: task_proxy,
                 sink: self.sink.clone(),
                 selector: self.selector.clone(),

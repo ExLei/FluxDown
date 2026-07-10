@@ -199,6 +199,13 @@ pub struct DownloadParams {
     /// When > 0, the probe phase (HEAD + Range:0-0) is skipped entirely.
     /// This prevents one-time CDN URLs from being "consumed" by probe requests.
     pub hint_file_size: i64,
+    /// 该任务的 Range 能力是否已被验证（probe 确认过、或此前任一 206/
+    /// Accept-Ranges 证据，持久化于 tasks.range_verified）。
+    /// fresh 任务恒 true（hint 与否由 hint_file_size 表达）；resume 时由
+    /// download_manager 从 DB 读取——`false` 表示该任务源自 hint 且从未拿到
+    /// Range 支持证据，resume 须延续「首连接 plain GET」保守启动，绝不发
+    /// bounded Range（配额型端点会被作废 token）。
+    pub range_verified: bool,
     /// Proxy configuration — used by FTP downloader for SOCKS/HTTP CONNECT tunneling.
     /// HTTP downloads use the proxy via the `client` field (already configured).
     pub proxy_config: crate::proxy_config::ProxyConfig,
@@ -2302,6 +2309,18 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
     //          skip probe to preserve one-time tokens
     //    0   — no hint, run normal probe
     let info = if p.hint_file_size != 0 {
+        // fresh hint 任务：Range 能力未经验证，持久化标记（coordinator 首响应
+        // 证实支持后置回 1）。resume 据此延续「首连接 plain GET」保守启动。
+        // 写失败仅降级（resume 落回 probe 路径，即改动前行为），不阻断下载。
+        if !p.is_resume
+            && let Err(e) = p.db.set_task_range_verified(&p.task_id, false).await
+        {
+            log_info!(
+                "[download] task {} 持久化 range_verified=0 失败：{:?}（resume 保守启动可能退化）",
+                p.task_id,
+                e
+            );
+        }
         let name = if p.file_name.is_empty() {
             // Hint mode skips the HEAD probe entirely, so we have no response
             // headers to extract the filename from.  Try the URL path first;
@@ -2564,16 +2583,16 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
     // Chrome-style: write to a temporary file during download, rename on success.
     let temp_path = PathBuf::from(format!("{}{}", dest_path.display(), TEMP_EXT));
 
-    // `size_is_estimate`：本次规划的 total 是否为【未经 probe 验证的估计值】。仅
-    // fresh 的 hint 模式下 total 直接取自浏览器扩展 hint——一个可能偏小的猜测；
-    // 此时服务器在 206 `Content-Range` 分母里自报的真实大小才是权威值，coordinator
-    // 的扩容检查须采【零容差】（见 segment_coordinator::do_segment）。probe 路径的
-    // total 已被校准，保留 CDN 漂移容差。
-    //
-    // `!p.is_resume` 是防御性冗余：resume 入口（download_manager 三处）恒传
-    // hint_file_size=0 并重新 probe，故 resume 时本表达式左项已为 false；保留该项
-    // 仅为杜绝未来调用方在 resume 时误传 hint 导致零容差误触。
-    let size_is_estimate = p.hint_file_size > 0 && !p.is_resume;
+    // `size_is_estimate`：本次规划的 total 是否为【未经 probe 验证的估计值】。
+    // 两种情形为 true：
+    //   • fresh 的 hint 模式——total 直接取自浏览器扩展 hint（可能偏小的猜测），
+    //     服务器在 206 `Content-Range` 分母里自报的真实大小才是权威值，
+    //     coordinator 的扩容检查须采【零容差】（见 segment_coordinator::do_segment）；
+    //   • resume 一个【从未验证过 Range 能力】的 hint 任务（range_verified==false，
+    //     download_manager 以 DB total 作 hint 传入）——延续保守启动语义：
+    //     coordinator 的 range_verdict 以 UNKNOWN 起步、零进度首段以 plain GET 起飞。
+    // probe 路径与已验证任务的 resume：total 已被校准，保留 CDN 漂移容差。
+    let size_is_estimate = p.hint_file_size > 0 && (!p.is_resume || !p.range_verified);
 
     // Dynamic segment calculation when user chose "auto" (segment_count <= 0).
     let segments = if p.segment_count <= 0 {
@@ -2688,7 +2707,10 @@ async fn run_download_inner(p: &DownloadParams) -> Result<(i64, Option<String>),
             | Err(DownloadError::VersionChanged(status))
             | Err(DownloadError::RangeMisaligned(status)) => {
                 // 多段尝试中止，回退单流。三种触发：
-                //   • RangeNotSupported：服务器无视 Range（返回 200 全量，如 FnOS NAS）。
+                //   • RangeNotSupported：服务器无视 Range（返回 200 全量），或对任何
+                //     带 Range 的请求直接回 4xx 且全程未服务过一个字节（coordinator
+                //     在"全员被拒 + any_data==0"时归一为本变体，如 fnOS
+                //     multiple-download 配额端点——仅裸 GET 可用）。
                 //   • VersionChanged：文件在 probe 与分段请求间变了（If-Range validator
                 //     不匹配 → 200 全量新版本），旧数据作废需重下。
                 //   • RangeMisaligned：服务器回 206 却发【从 0 的全量流】（Content-Range
