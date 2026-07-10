@@ -723,8 +723,8 @@ topTabs.addEventListener('click', (e) => {
 });
 
 // ===== 资源面板（当前活跃 tab 的嗅探结果） =====
-// 与页内浮动面板同一数据源（background resource-store），popup 侧只做
-// 轻量列表：类型筛选 + 单个/批量下载，预览/选轨等重交互留在页内面板。
+// 与页内浮动面板同一数据源（background resource-store），popup 侧做
+// 轻量列表：类型筛选 + 预览 + 单个/批量下载，选轨等重交互留在页内面板。
 
 /** 与页内面板一致的类型 tab 顺序（无资源的类型不渲染）。 */
 const RES_TABS: Array<{ key: ResourceType | 'all'; i18nKey: string }> = [
@@ -813,6 +813,147 @@ function resDownloadPayload(r: DetectedResource) {
   };
 }
 
+// ===== 资源预览（与页内浮动面板同规则：图片/音频/视频直链/流分片按类型分发，
+// 原生播放失败诚实降级提示，禁止引入 hls.js） =====
+
+const SVG_PREVIEW =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8Z"/><circle cx="12" cy="12" r="3"/></svg>';
+const SVG_PREVIEW_CLOSE =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+let previewModalEl: HTMLElement | null = null;
+
+/** 仅这些类型显示预览按钮；document/archive/其他不可预览。 */
+function isPreviewable(r: DetectedResource): boolean {
+  return (
+    r.type === 'image' || r.type === 'video' || r.type === 'audio' || r.type === 'stream'
+  );
+}
+
+type PreviewKind = 'image' | 'audio' | 'direct-video' | 'hls' | 'dash' | 'fragment' | 'unsupported';
+
+/** 按结构特征（type + URL 后缀）分发预览渲染方式，不做站点特判。 */
+function previewKind(r: DetectedResource): PreviewKind {
+  const mime = r.mimeType?.toLowerCase() || '';
+  const url = r.url.toLowerCase();
+  if (r.type === 'image' || mime.startsWith('image/')) return 'image';
+  if (r.type === 'stream') {
+    if (url.includes('.m3u8')) return 'hls';
+    if (url.includes('.mpd')) return 'dash';
+    return 'fragment'; // m4s 等分片：单文件常缺 moov/init，原生播放大概率失败
+  }
+  if (r.type === 'audio') return 'audio';
+  if (r.type === 'video') return 'direct-video';
+  return 'unsupported';
+}
+
+function ensurePreviewModal(): HTMLElement {
+  if (previewModalEl) return previewModalEl;
+  const modal = document.createElement('div');
+  modal.className = 'res-preview-modal';
+  modal.innerHTML = `
+    <div class="res-preview-card">
+      <div class="preview-header">
+        <span class="preview-title"></span>
+        <button type="button" class="preview-close" title="${t('panel.previewClose')}">${SVG_PREVIEW_CLOSE}</button>
+      </div>
+      <div class="preview-body"></div>
+    </div>
+  `;
+  // 点遮罩关闭；点卡片内部（含控件交互）不关闭
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closePreview();
+  });
+  modal.querySelector('.preview-close')?.addEventListener('click', closePreview);
+  document.body.appendChild(modal);
+  previewModalEl = modal;
+  return modal;
+}
+
+/** 用降级提示替换预览区内容（不黑屏、不假装能播放）。 */
+function showPreviewFallback(bodyEl: HTMLElement, message: string): void {
+  bodyEl.textContent = '';
+  const fb = document.createElement('div');
+  fb.className = 'preview-fallback';
+  fb.textContent = message;
+  bodyEl.appendChild(fb);
+}
+
+/** 打开预览弹层：按资源类型分发渲染，原生播放失败诚实降级。 */
+function openPreview(r: DetectedResource): void {
+  const modal = ensurePreviewModal();
+  const titleEl = modal.querySelector('.preview-title') as HTMLElement;
+  const bodyEl = modal.querySelector('.preview-body') as HTMLElement;
+  titleEl.textContent = r.filename || r.url;
+  bodyEl.textContent = '';
+
+  const kind = previewKind(r);
+  if (kind === 'image') {
+    const img = document.createElement('img');
+    img.className = 'preview-media';
+    img.addEventListener('load', () => {
+      const hint = document.createElement('div');
+      hint.className = 'preview-hint';
+      hint.textContent = `${img.naturalWidth} × ${img.naturalHeight}`;
+      bodyEl.appendChild(hint);
+    });
+    img.addEventListener('error', () => showPreviewFallback(bodyEl, t('panel.previewFailed')));
+    img.src = r.url;
+    bodyEl.appendChild(img);
+  } else if (kind === 'audio') {
+    const audio = document.createElement('audio');
+    audio.className = 'preview-media';
+    audio.controls = true;
+    audio.addEventListener('error', () => showPreviewFallback(bodyEl, t('panel.previewFailed')));
+    audio.src = r.url;
+    bodyEl.appendChild(audio);
+  } else if (kind === 'direct-video') {
+    const video = document.createElement('video');
+    video.className = 'preview-media';
+    video.controls = true;
+    video.autoplay = true;
+    video.muted = true;
+    video.addEventListener('error', () => showPreviewFallback(bodyEl, t('panel.previewFailed')));
+    video.src = r.url;
+    bodyEl.appendChild(video);
+  } else if (kind === 'fragment' || kind === 'hls' || kind === 'dash') {
+    // m4s 分片 / hls / dash：浏览器原生尝试，失败诚实降级（禁止引入 hls.js）
+    const video = document.createElement('video');
+    video.className = 'preview-media';
+    video.controls = true;
+    const fallbackMsg =
+      kind === 'hls' ? t('panel.previewHlsUnsupported')
+      : kind === 'dash' ? t('panel.previewDashUnsupported')
+      : t('panel.previewFragmentUnsupported');
+    video.addEventListener('error', () => showPreviewFallback(bodyEl, fallbackMsg));
+    video.src = r.url;
+    bodyEl.appendChild(video);
+  } else {
+    showPreviewFallback(bodyEl, t('panel.previewUnsupported'));
+  }
+
+  modal.classList.add('visible');
+}
+
+/** 关闭预览弹层，销毁 video/audio 元素释放资源（暂停 + 清空 src）。 */
+function closePreview(): void {
+  if (!previewModalEl) return;
+  previewModalEl.classList.remove('visible');
+  for (const el of previewModalEl.querySelectorAll('video, audio')) {
+    const m = el as HTMLMediaElement;
+    m.pause();
+    m.src = '';
+    m.load();
+  }
+}
+
+// Esc 关闭预览弹层
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && previewModalEl?.classList.contains('visible')) {
+    closePreview();
+  }
+});
+
 function buildResRow(r: DetectedResource): HTMLElement {
   const row = document.createElement('div');
   row.className = 'res-row';
@@ -849,6 +990,16 @@ function buildResRow(r: DetectedResource): HTMLElement {
     info.appendChild(meta);
   }
   row.appendChild(info);
+
+  if (isPreviewable(r)) {
+    const pv = document.createElement('button');
+    pv.type = 'button';
+    pv.className = 'res-preview-btn';
+    pv.title = t('panel.previewTitle');
+    pv.innerHTML = SVG_PREVIEW;
+    pv.addEventListener('click', () => openPreview(r));
+    row.appendChild(pv);
+  }
 
   const dl = document.createElement('button');
   dl.type = 'button';

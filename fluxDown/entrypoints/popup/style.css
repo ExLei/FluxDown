@@ -1229,6 +1229,132 @@ select:focus {
   pointer-events: none;
 }
 
+.res-preview-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.res-preview-btn:hover {
+  color: var(--accent);
+  background: var(--accent-muted);
+  border-color: var(--accent);
+}
+
+/* ===== 资源预览弹层（与页内浮动面板同交互：遮罩居中模态） ===== */
+.res-preview-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.res-preview-modal.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.res-preview-card {
+  display: flex;
+  flex-direction: column;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 32px);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  transform: scale(0.96);
+  transition: transform 0.15s;
+}
+
+.res-preview-modal.visible .res-preview-card {
+  transform: scale(1);
+}
+
+.res-preview-card .preview-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.res-preview-card .preview-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.res-preview-card .preview-close {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.res-preview-card .preview-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.res-preview-card .preview-body {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  overflow: auto;
+}
+
+.res-preview-card .preview-media {
+  display: block;
+  max-width: calc(100vw - 64px);
+  max-height: calc(100vh - 110px);
+}
+
+.res-preview-card .preview-hint {
+  margin-top: 6px;
+  text-align: center;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.res-preview-card .preview-fallback {
+  max-width: 260px;
+  padding: 18px 14px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
 .res-footer {
   display: flex;
   align-items: center;
