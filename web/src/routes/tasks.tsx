@@ -10,7 +10,7 @@ import { Sidebar } from '../components/tasks/Sidebar'
 import { StatusBar } from '../components/tasks/StatusBar'
 import { StatusTabs } from '../components/tasks/StatusTabs'
 import { TaskList } from '../components/tasks/TaskList'
-import { TasksUiProvider } from '../components/tasks/context'
+import { TasksUiProvider, useTasksUi } from '../components/tasks/context'
 import { TopBar } from '../components/tasks/TopBar'
 import { api } from '../lib/api'
 import { connectWs } from '../lib/ws'
@@ -30,6 +30,7 @@ export function TasksScreen() {
     <TasksUiProvider>
       <section className="wscreen active" id="screen-main">
         <Sidebar />
+        <SideBackdrop />
         <div className="center">
           <TopBar />
           <ManageBar />
@@ -42,4 +43,11 @@ export function TasksScreen() {
       <GlobalDialogs />
     </TasksUiProvider>
   )
+}
+
+/** 移动端抽屉侧边栏的遮罩：仅在小屏且抽屉展开时可见（CSS 控制），点击收起。 */
+function SideBackdrop() {
+  const { sidebarOpen, setSidebarOpen } = useTasksUi()
+  if (!sidebarOpen) return null
+  return <div className="side-backdrop" onClick={() => setSidebarOpen(false)} />
 }

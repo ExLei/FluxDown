@@ -24,6 +24,8 @@ interface TasksUiState {
   toggleFold: (g: TimeGroup) => void
   currentTaskId: string | null
   detailOpen: boolean
+  sidebarOpen: boolean
+  setSidebarOpen: Dispatch<SetStateAction<boolean>>
   detailTab: DetailTab
   setDetailTab: Dispatch<SetStateAction<DetailTab>>
   selectTask: (id: string) => void
@@ -42,6 +44,7 @@ export function TasksUiProvider({ children }: { children: ReactNode }) {
   const [folded, setFolded] = useState<Set<TimeGroup>>(new Set())
   const [currentTaskId, setCurrentTaskId] = useState<string | null>(null)
   const [detailOpen, setDetailOpen] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [detailTab, setDetailTab] = useState<DetailTab>('general')
 
   function setManageMode(v: SetStateAction<boolean>) {
@@ -83,6 +86,8 @@ export function TasksUiProvider({ children }: { children: ReactNode }) {
         toggleFold,
         currentTaskId,
         detailOpen,
+        sidebarOpen,
+        setSidebarOpen,
         detailTab,
         setDetailTab,
         selectTask,

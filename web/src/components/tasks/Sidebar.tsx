@@ -33,7 +33,7 @@ export function Sidebar() {
   const { t } = useI18n()
   const tasks = useViewTasks()
   const { data: queues = [] } = useQuery({ queryKey: ['queues'], queryFn: api.listQueues })
-  const { typeFilter, setTypeFilter, queueFilter, setQueueFilter } = useTasksUi()
+  const { typeFilter, setTypeFilter, queueFilter, setQueueFilter, sidebarOpen, setSidebarOpen } = useTasksUi()
   const speed = useGlobalSpeed()
   const conn = useStore(connStore)
   const update = useUpdateCheck()
@@ -82,7 +82,7 @@ export function Sidebar() {
         : t('sidebar.disconnected')
 
   return (
-    <aside className="sidebar">
+    <aside className={cn('sidebar', sidebarOpen && 'open')}>
       <div className="side-brand">
         <span className="side-logo">
           <svg viewBox="30 30 452 452" role="img" xmlns="http://www.w3.org/2000/svg">
@@ -106,7 +106,7 @@ export function Sidebar() {
             const Icon = TYPE_ICONS[k]
             const count = k === 'all' ? tasks.length : tasks.filter((t) => fileType(t.fileName, t.url) === k).length
             return (
-              <button key={k} type="button" className={cn('side-item', typeFilter === k && 'active')} onClick={() => setTypeFilter(k)}>
+              <button key={k} type="button" className={cn('side-item', typeFilter === k && 'active')} onClick={() => { setTypeFilter(k); setSidebarOpen(false) }}>
                 <Icon size={15} />
                 <span>{typeLabel(k)}</span>
                 <em>{count || ''}</em>
@@ -122,7 +122,7 @@ export function Sidebar() {
           </button>
         </p>
         <nav className="side-nav">
-          <button type="button" className={cn('side-item', queueFilter === 'all' && 'active')} onClick={() => setQueueFilter('all')}>
+          <button type="button" className={cn('side-item', queueFilter === 'all' && 'active')} onClick={() => { setQueueFilter('all'); setSidebarOpen(false) }}>
             <List size={15} />
             <span>{t('sidebar.allTasks')}</span>
             <em>{tasks.length || ''}</em>
@@ -134,7 +134,7 @@ export function Sidebar() {
                 <button
                   type="button"
                   className={cn('side-item', queueFilter === q.queueId && 'active')}
-                  onClick={() => setQueueFilter(q.queueId)}
+                  onClick={() => { setQueueFilter(q.queueId); setSidebarOpen(false) }}
                 >
                   <List size={15} />
                   <span>{q.name}</span>

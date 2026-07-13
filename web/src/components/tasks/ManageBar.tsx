@@ -48,11 +48,11 @@ export function ManageBar() {
         <i />
         {t('common.selectAll')}
       </label>
-      <span>{t('manage.selected', { n: selected.size })}</span>
+      <span className="msel-pill">{t('manage.selected', { n: selected.size })}</span>
       <span className="flex1" />
       <button
         type="button"
-        className="btn ghost sm"
+        className="mbtn"
         disabled={selected.size === 0}
         onClick={() => batchPause.mutate(Array.from(selected))}
       >
@@ -60,7 +60,7 @@ export function ManageBar() {
       </button>
       <button
         type="button"
-        className="btn ghost sm"
+        className="mbtn"
         disabled={selected.size === 0}
         onClick={() => batchContinue.mutate(Array.from(selected))}
       >
@@ -68,7 +68,7 @@ export function ManageBar() {
       </button>
       <button
         type="button"
-        className="btn danger sm"
+        className="mbtn danger"
         disabled={selected.size === 0}
         onClick={async () => {
           if (
@@ -80,7 +80,8 @@ export function ManageBar() {
       >
         {t('common.delete')}
       </button>
-      <button type="button" className="btn ghost sm" onClick={() => setManageMode(false)}>
+      <span className="vsep" />
+      <button type="button" className="btn primary sm" onClick={() => setManageMode(false)}>
         {t('common.done')}
       </button>
     </div>

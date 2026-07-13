@@ -1,10 +1,10 @@
 // 顶部工具栏：搜索、批量管理开关、全局暂停/恢复、限速快览、新建下载、设置入口。
 // 对齐 design/web/index.html .topbar 结构；批量选择状态见 ManageBar。
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { Gauge, ListChecks, Pause, Play, Plus, Search, Settings } from 'lucide-react'
+import { Gauge, ListChecks, Menu, Pause, Play, Plus, Search, Settings } from 'lucide-react'
 import { api } from '../../lib/api'
 import { cn } from '../../lib/cn'
 import { openNewDownload } from '../../lib/dialogs'
@@ -17,10 +17,18 @@ import { useViewTasks } from './useViewTasks'
 export function TopBar() {
   const { t } = useI18n()
   const navigate = useNavigate()
-  const { search, setSearch, manageMode, setManageMode } = useTasksUi()
+  const { search, setSearch, manageMode, setManageMode, setSidebarOpen } = useTasksUi()
   const tasks = useViewTasks()
   const qc = useQueryClient()
   const inputRef = useRef<HTMLInputElement>(null)
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 820px)').matches)
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 820px)')
+    const onChange = (e: MediaQueryListEvent) => setNarrow(e.matches)
+    mq.addEventListener('change', onChange)
+    return () => mq.removeEventListener('change', onChange)
+  }, [])
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -40,12 +48,15 @@ export function TopBar() {
 
   return (
     <header className="topbar">
+      <button type="button" className="icon-btn menu-btn" title={t('common.menu')} onClick={() => setSidebarOpen(true)}>
+        <Menu size={17} />
+      </button>
       <div className="search">
         <Search size={14} />
         <input
           ref={inputRef}
           type="text"
-          placeholder={t('topbar.searchPlaceholder')}
+          placeholder={t(narrow ? 'topbar.searchPlaceholderShort' : 'topbar.searchPlaceholder')}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           onKeyDown={(e) => {
@@ -72,7 +83,7 @@ export function TopBar() {
         <span className="vsep" />
         <button type="button" className="btn primary" onClick={openNewDownload}>
           <Plus size={15} />
-          {t('topbar.newDownload')}
+          <span className="btn-label">{t('topbar.newDownload')}</span>
         </button>
         <button type="button" className="icon-btn" title={t('common.settings')} onClick={() => navigate({ to: '/settings' })}>
           <Settings size={17} />
