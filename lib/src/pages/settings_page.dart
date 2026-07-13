@@ -5720,40 +5720,57 @@ class _Ed2kServerSubEditorState extends State<_Ed2kServerSubEditor> {
 
 // ─────────────────────────────────────────────
 // 语言选择器（跟随系统 + I18nStore 自动发现的全部语言）
+//
+// 用 ShadSelect 下拉而非卡片 Wrap：语言由社区经 Weblate 持续贡献，
+// 数量可达几十种，下拉在弹层内滚动，任意数量都不会挤乱设置页布局。
 // ─────────────────────────────────────────────
 
 class _LanguageSelector extends StatelessWidget {
   const _LanguageSelector();
 
+  String _label(S s, String pref) =>
+      pref == kLocaleSystem ? s.languageSystem : I18nStore.nativeName(pref);
+
   @override
   Widget build(BuildContext context) {
     final current = localeNotifier.preference;
-    final c = AppColors.of(context);
     final s = LocaleScope.of(context);
 
-    final options = [
-      (pref: kLocaleSystem, label: s.languageSystem, icon: LucideIcons.monitor),
-      for (final code in I18nStore.available)
-        (
-          pref: code,
-          label: I18nStore.nativeName(code),
-          icon: LucideIcons.languages,
-        ),
-    ];
+    final prefs = [kLocaleSystem, ...I18nStore.available];
 
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        for (final item in options)
-          _ThemeModeCard(
-            icon: item.icon,
-            label: item.label,
-            selected: current == item.pref,
-            colors: c,
-            onTap: () => localeNotifier.setLocale(item.pref),
-          ),
-      ],
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 260),
+      child: ShadSelect<String>(
+        initialValue: current,
+        placeholder: Text(_label(s, current)),
+        options: [
+          for (final pref in prefs)
+            ShadOption(
+              value: pref,
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    pref == kLocaleSystem
+                        ? LucideIcons.monitor
+                        : LucideIcons.languages,
+                    size: 14,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(_label(s, pref)),
+                ],
+              ),
+            ),
+        ],
+        selectedOptionBuilder: (context, value) => Text(
+          _label(s, value),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        onChanged: (v) {
+          if (v != null) localeNotifier.setLocale(v);
+        },
+      ),
     );
   }
 }

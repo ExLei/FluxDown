@@ -3,7 +3,7 @@ import { useLocale } from "@/lib/i18n";
 import { GITHUB_REPO_URL } from "@/lib/utils";
 
 export default function Footer() {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   // SSR 安全：初始值固定，useEffect 中更新为实际年份，避免 hydration mismatch
   const [year, setYear] = useState(2025);
   useEffect(() => {
@@ -130,6 +130,10 @@ export default function Footer() {
             <ul className="space-y-2.5">
               {[
                 { href: "/announcements/", label: t("footer.announcements") },
+                {
+                  href: `/docs/${locale === "zh" ? "zh" : "en"}/contributing/translations/`,
+                  label: t("footer.translate"),
+                },
                 { href: "/logo-vote/", label: t("footer.logoVote") },
                 { href: "/macos-gatekeeper/", label: t("footer.macosGatekeeper") },
               ].map(({ href, label }) => (

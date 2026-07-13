@@ -205,22 +205,30 @@ const SECTION_META: Record<
       <div class="mt-10 flex flex-col items-start justify-between gap-4 rounded-3xl border border-dark-border bg-dark-surface1/50 p-6 backdrop-blur-sm sm:flex-row sm:items-center">
         <div>
           <h2 class="text-sm font-semibold text-dark-text">
-            {zh ? "发现问题或想补充内容?" : "Spotted an issue or want to add something?"}
+            {zh ? "发现问题、想补充内容,或想看到你的语言?" : "Spotted an issue, want to add something, or want FluxDown in your language?"}
           </h2>
           <p class="mt-1 text-sm text-dark-text-muted">
             {
               zh
-                ? "文档托管在公开仓库,每页底部都有\u201c编辑此页\u201d入口,欢迎提交 PR。"
-                : "Docs live in a public repo — every page has an “Edit this page” link. PRs welcome."
+                ? "文档托管在公开仓库,每页底部都有\u201c编辑此页\u201d入口;应用与官网的翻译在浏览器里即可参与,无需写代码。"
+                : "Docs live in a public repo — every page has an “Edit this page” link. App and website translations happen right in the browser, no coding needed."
             }
           </p>
         </div>
-        <a
-          href={`/docs/${lang}/contributing/docs/`}
-          class="shrink-0 rounded-full border border-brand-sky/30 bg-brand-sky/10 px-4 py-2 text-sm font-medium text-brand-sky transition-colors hover:bg-brand-sky/20"
-        >
-          {zh ? "贡献指南 →" : "Contribution guide →"}
-        </a>
+        <div class="flex shrink-0 flex-wrap gap-3">
+          <a
+            href={`/docs/${lang}/contributing/translations/`}
+            class="rounded-full border border-brand-sky/30 bg-brand-sky/10 px-4 py-2 text-sm font-medium text-brand-sky transition-colors hover:bg-brand-sky/20"
+          >
+            {zh ? "参与翻译 →" : "Translate FluxDown →"}
+          </a>
+          <a
+            href={`/docs/${lang}/contributing/docs/`}
+            class="rounded-full border border-dark-border bg-dark-surface2/60 px-4 py-2 text-sm font-medium text-dark-text-secondary transition-colors hover:text-dark-text"
+          >
+            {zh ? "贡献指南 →" : "Contribution guide →"}
+          </a>
+        </div>
       </div>
     </div>
   </main>
