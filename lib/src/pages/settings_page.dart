@@ -468,6 +468,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
+    final m = AppMetrics.of(context);
     return Column(
       children: [
         // 顶部标题栏
@@ -566,42 +567,64 @@ class _SettingsPageState extends State<SettingsPage> {
                   ),
           ),
         ),
-        // 主体：侧边栏 + 内容区
+        // 主体：侧边栏 + 内容区。分隔线由内容区左边框绘制（无底色差），
+        // 拖拽命中区是骑在边界上的透明浮层（不占布局宽度）。
         Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+          child: Stack(
             children: [
-              // 左侧导航栏
-              _SettingsSidebar(
-                width: _sidebarWidth,
-                selected: _selected,
-                onSelect: (cat) => setState(() => _selected = cat),
-                onSearchSelect: _onSearchSelect,
-              ),
-              // 可拖拽分隔线（7px 命中区，中央 1px 线）
-              _SidebarResizeHandle(
-                color: c.border,
-                onDrag: (dx) {
-                  setState(() {
-                    _sidebarWidth = (_sidebarWidth + dx).clamp(
-                      _sidebarMinWidth,
-                      _sidebarMaxWidth,
-                    );
-                  });
-                },
-              ),
-              // 右侧内容区
-              Expanded(
-                child: _HighlightScope(
-                  request: _highlight,
-                  onConsumed: _onHighlightConsumed,
-                  child: _SettingsContent(
-                    category: _selected,
-                    onSelectCategory: (cat) => setState(() => _selected = cat),
-                    settingsProvider: widget.settingsProvider,
-                    pluginProvider: widget.pluginProvider,
-                    downloadController: widget.downloadController,
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // 左侧导航栏
+                  _SettingsSidebar(
+                    width: _sidebarWidth,
+                    selected: _selected,
+                    onSelect: (cat) => setState(() => _selected = cat),
+                    onSearchSelect: _onSearchSelect,
                   ),
+                  // 右侧内容区
+                  Expanded(
+                    child: DecoratedBox(
+                      position: DecorationPosition.foreground,
+                      decoration: BoxDecoration(
+                        border: Border(
+                          left: BorderSide(color: c.border, width: 1),
+                        ),
+                      ),
+                      child: _HighlightScope(
+                        request: _highlight,
+                        onConsumed: _onHighlightConsumed,
+                        child: _SettingsContent(
+                          category: _selected,
+                          onSelectCategory: (cat) =>
+                              setState(() => _selected = cat),
+                          settingsProvider: widget.settingsProvider,
+                          pluginProvider: widget.pluginProvider,
+                          downloadController: widget.downloadController,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              // 拖拽命中浮层（1px 分隔线居中，平时透明，悬浮/拖拽浮现主题色淡线）
+              Positioned(
+                top: 0,
+                bottom: 0,
+                left: _sidebarWidth - (_SidebarResizeHandle.hitSize - 1) / 2,
+                width: _SidebarResizeHandle.hitSize,
+                child: _SidebarResizeHandle(
+                  color: Colors.transparent,
+                  hoverColor: m.selectedBorder(c.accent),
+                  dragColor: m.focusRing(c.accent),
+                  onDrag: (dx) {
+                    setState(() {
+                      _sidebarWidth = (_sidebarWidth + dx).clamp(
+                        _sidebarMinWidth,
+                        _sidebarMaxWidth,
+                      );
+                    });
+                  },
                 ),
               ),
             ],
@@ -612,27 +635,58 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-/// 可拖拽的分隔线：1px 视觉线居中 + 7px 透明命中区，便于鼠标悬浮命中
-class _SidebarResizeHandle extends StatelessWidget {
+/// 可拖拽的分隔线：1px 视觉线居中 + 7px 透明命中区，便于鼠标悬浮命中；
+/// 悬浮显示 hoverColor（主题强调色低透明度），拖拽中显示 dragColor（更强）。
+class _SidebarResizeHandle extends StatefulWidget {
   final Color color;
+  final Color? hoverColor;
+  final Color? dragColor;
   final ValueChanged<double> onDrag;
 
   /// 命中区厚度（视觉线居中，两侧透明可命中）
   static const double hitSize = 7;
 
-  const _SidebarResizeHandle({required this.color, required this.onDrag});
+  const _SidebarResizeHandle({
+    required this.color,
+    required this.onDrag,
+    this.hoverColor,
+    this.dragColor,
+  });
+
+  @override
+  State<_SidebarResizeHandle> createState() => _SidebarResizeHandleState();
+}
+
+class _SidebarResizeHandleState extends State<_SidebarResizeHandle> {
+  bool _isHovered = false;
+  bool _isDragging = false;
 
   @override
   Widget build(BuildContext context) {
+    final lineColor = _isDragging
+        ? (widget.dragColor ?? widget.hoverColor ?? widget.color)
+        : _isHovered
+        ? (widget.hoverColor ?? widget.color)
+        : widget.color;
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
-      onHorizontalDragUpdate: (details) => onDrag(details.delta.dx),
+      onHorizontalDragStart: (_) => setState(() => _isDragging = true),
+      onHorizontalDragEnd: (_) => setState(() => _isDragging = false),
+      onHorizontalDragUpdate: (details) => widget.onDrag(details.delta.dx),
       child: MouseRegion(
         cursor: SystemMouseCursors.resizeColumn,
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
         child: SizedBox(
-          width: hitSize,
+          width: _SidebarResizeHandle.hitSize,
           height: double.infinity,
-          child: Center(child: Container(width: 1, color: color)),
+          child: Center(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
+              width: 1,
+              color: lineColor,
+            ),
+          ),
         ),
       ),
     );

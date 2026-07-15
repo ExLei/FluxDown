@@ -418,61 +418,27 @@ class _HomePageState extends State<HomePage> {
             settingsProvider: _settingsProvider,
           ),
         ),
-        // Sidebar resize handle（7px 命中区，中央 1px 线）
-        Column(
-          children: [
-            SizedBox(
-              width: _ResizeHandle.hitSize,
-              height: 40,
-              child: Center(child: Container(width: 1, color: c.border)),
-            ),
-            Expanded(
-              child: ColoredBox(
-                color: c.bg,
-                child: _ResizeHandle(
-                  color: c.border,
-                  onDrag: (dx) {
-                    setState(() {
-                      _sidebarWidth = (_sidebarWidth + dx).clamp(
-                        _sidebarMinWidth,
-                        _sidebarMax(totalWidth),
-                      );
-                    });
-                  },
-                ),
-              ),
-            ),
-          ],
-        ),
       ],
-      Expanded(child: _buildContentArea(c, totalHeight)),
-      // 详情面板（右侧模式）
-      if (_isDetailOpen && _detailOnRight) ...[
-        Column(
-          children: [
-            SizedBox(
-              width: _ResizeHandle.hitSize,
-              height: 40,
-              child: Center(child: Container(width: 1, color: c.border)),
+      // 分隔线由内容区边框绘制（全高连续，与 HeaderBar 底边框无缝相接）；
+      // 拖拽命中区是骑在边界上的透明浮层（见 build 的 Stack）。
+      Expanded(
+        child: DecoratedBox(
+          position: DecorationPosition.foreground,
+          decoration: BoxDecoration(
+            border: Border(
+              left: _sidebarVisible
+                  ? BorderSide(color: c.border, width: 1)
+                  : BorderSide.none,
+              right: _isDetailOpen && _detailOnRight
+                  ? BorderSide(color: c.border, width: 1)
+                  : BorderSide.none,
             ),
-            Expanded(
-              child: ColoredBox(
-                color: c.bg,
-                child: _ResizeHandle(
-                  color: c.border,
-                  onDrag: (dx) {
-                    setState(() {
-                      _detailWidth = (_detailWidth - dx).clamp(
-                        _detailMinWidth,
-                        _detailMaxW(totalWidth),
-                      );
-                    });
-                  },
-                ),
-              ),
-            ),
-          ],
+          ),
+          child: _buildContentArea(c, totalHeight),
         ),
+      ),
+      // 详情面板（右侧模式）
+      if (_isDetailOpen && _detailOnRight)
         SizedBox(
           width: _detailWidth,
           child: Column(
@@ -489,7 +455,6 @@ class _HomePageState extends State<HomePage> {
             ],
           ),
         ),
-      ],
     ];
   }
 
@@ -540,6 +505,8 @@ class _HomePageState extends State<HomePage> {
             // 水平分隔线（可拖拽调整详情面板高度）
             _ResizeHandle(
               color: c.border,
+              hoverColor: AppMetrics.of(context).selectedBorder(c.accent),
+              dragColor: AppMetrics.of(context).focusRing(c.accent),
               isVertical: true,
               onDrag: (dy) {
                 setState(() {
@@ -569,6 +536,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final c = AppColors.of(context);
+    final m = AppMetrics.of(context);
 
     // 设置页面
     if (_showSettings) {
@@ -668,9 +636,7 @@ class _HomePageState extends State<HomePage> {
             // HeaderBar — 独立于内容区，不受 DetailPanel 宽度影响
             Positioned(
               top: 0,
-              left: _sidebarVisible
-                  ? _sidebarWidth + _ResizeHandle.hitSize
-                  : 0,
+              left: _sidebarVisible ? _sidebarWidth + 1 : 0,
               right: 0,
               height: 40,
               child: HeaderBar(
@@ -704,6 +670,49 @@ class _HomePageState extends State<HomePage> {
                 }),
               ),
             ),
+            // 拖拽命中浮层：骑在面板边界上（1px 分隔线居中），不占布局宽度；
+            // 平时全透明，悬浮/拖拽时浮现淡线提示。贯穿 titlebar/header
+            // （高亮与分隔线全高一致），仅避开 StatusBar(28)。
+            if (_sidebarVisible)
+              Positioned(
+                top: 0,
+                bottom: 28,
+                left: _sidebarWidth - (_ResizeHandle.hitSize - 1) / 2,
+                width: _ResizeHandle.hitSize,
+                child: _ResizeHandle(
+                  color: Colors.transparent,
+                  hoverColor: m.selectedBorder(c.accent),
+                  dragColor: m.focusRing(c.accent),
+                  onDrag: (dx) {
+                    setState(() {
+                      _sidebarWidth = (_sidebarWidth + dx).clamp(
+                        _sidebarMinWidth,
+                        _sidebarMax(totalWidth),
+                      );
+                    });
+                  },
+                ),
+              ),
+            if (_isDetailOpen && _detailOnRight)
+              Positioned(
+                top: 0,
+                bottom: 28,
+                right: _detailWidth - (_ResizeHandle.hitSize - 1) / 2,
+                width: _ResizeHandle.hitSize,
+                child: _ResizeHandle(
+                  color: Colors.transparent,
+                  hoverColor: m.selectedBorder(c.accent),
+                  dragColor: m.focusRing(c.accent),
+                  onDrag: (dx) {
+                    setState(() {
+                      _detailWidth = (_detailWidth - dx).clamp(
+                        _detailMinWidth,
+                        _detailMaxW(totalWidth),
+                      );
+                    });
+                  },
+                ),
+              ),
             // 批量删除进度覆盖层（带平滑动画）
             _BatchDeleteOverlay(controller: _controller),
           ],
@@ -713,9 +722,12 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-/// 可拖拽的分隔线：1px 视觉线居中 + 7px 透明命中区，便于鼠标悬浮命中
-class _ResizeHandle extends StatelessWidget {
+/// 可拖拽的分隔线：1px 视觉线居中 + 7px 透明命中区，便于鼠标悬浮命中；
+/// 悬浮显示 hoverColor（主题强调色低透明度），拖拽中显示 dragColor（更强）。
+class _ResizeHandle extends StatefulWidget {
   final Color color;
+  final Color? hoverColor;
+  final Color? dragColor;
   final ValueChanged<double> onDrag;
   final bool isVertical; // true=水平线（上下拖拽），false=垂直线（左右拖拽）
 
@@ -725,31 +737,62 @@ class _ResizeHandle extends StatelessWidget {
   const _ResizeHandle({
     required this.color,
     required this.onDrag,
+    this.hoverColor,
+    this.dragColor,
     this.isVertical = false,
   });
 
   @override
+  State<_ResizeHandle> createState() => _ResizeHandleState();
+}
+
+class _ResizeHandleState extends State<_ResizeHandle> {
+  bool _isHovered = false;
+  bool _isDragging = false;
+
+  @override
   Widget build(BuildContext context) {
+    final isVertical = widget.isVertical;
+    final lineColor = _isDragging
+        ? (widget.dragColor ?? widget.hoverColor ?? widget.color)
+        : _isHovered
+        ? (widget.hoverColor ?? widget.color)
+        : widget.color;
     return GestureDetector(
       behavior: HitTestBehavior.translucent,
+      onVerticalDragStart: isVertical
+          ? (_) => setState(() => _isDragging = true)
+          : null,
+      onVerticalDragEnd: isVertical
+          ? (_) => setState(() => _isDragging = false)
+          : null,
       onVerticalDragUpdate: isVertical
-          ? (details) => onDrag(details.delta.dy)
+          ? (details) => widget.onDrag(details.delta.dy)
+          : null,
+      onHorizontalDragStart: !isVertical
+          ? (_) => setState(() => _isDragging = true)
+          : null,
+      onHorizontalDragEnd: !isVertical
+          ? (_) => setState(() => _isDragging = false)
           : null,
       onHorizontalDragUpdate: !isVertical
-          ? (details) => onDrag(details.delta.dx)
+          ? (details) => widget.onDrag(details.delta.dx)
           : null,
       child: MouseRegion(
         cursor: isVertical
             ? SystemMouseCursors.resizeRow
             : SystemMouseCursors.resizeColumn,
+        onEnter: (_) => setState(() => _isHovered = true),
+        onExit: (_) => setState(() => _isHovered = false),
         child: SizedBox(
-          width: isVertical ? double.infinity : hitSize,
-          height: isVertical ? hitSize : double.infinity,
+          width: isVertical ? double.infinity : _ResizeHandle.hitSize,
+          height: isVertical ? _ResizeHandle.hitSize : double.infinity,
           child: Center(
-            child: Container(
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 120),
               width: isVertical ? double.infinity : 1,
               height: isVertical ? 1 : double.infinity,
-              color: color,
+              color: lineColor,
             ),
           ),
         ),
