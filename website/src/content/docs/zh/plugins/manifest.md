@@ -3,7 +3,7 @@ title: Manifest 参考
 description: manifest.json 全部字段、设置项 widget 矩阵、URL pattern 规则。
 section: plugins
 order: 3
-sourceHash: "a54c005928f3"
+sourceHash: "b8cae49fcfee"
 ---
 
 `manifest.json` 放在插件文件夹根部。所有键名用 camelCase。**未知键会被拒绝**——写错字段名会让整份 manifest 校验失败，而不是被静默忽略。
@@ -110,6 +110,8 @@ sourceHash: "a54c005928f3"
 | `required` | 否 | 表单拒绝保存空值。 |
 | `min` / `max` | 仅 number | 有限数、闭区间、`min ≤ max`。 |
 | `pattern` | 仅 string | **JavaScript RegExp** 语法（不是 Rust regex），保存时对值做校验。 |
+| `helperScript` | 仅 string | 一段脚本，宿主会在该字段旁渲染一个**复制**按钮。宿主只把脚本文本复制到剪贴板，**绝不执行**。用户把它粘贴到目标站点的浏览器开发者工具 Console 中运行（典型用途：读取 `document.cookie` 并把登录 Cookie 复制回该字段）。须非空、≤ 4 KB。 |
+| `helperLabel` | 与 `helperScript` 同时出现 | 按钮文案（≤ 60 字符）。只能与 `helperScript` 一起使用；省略时用通用文案「复制获取脚本」。 |
 
 ### widget × type 合法矩阵
 

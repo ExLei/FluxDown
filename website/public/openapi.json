@@ -1746,6 +1746,20 @@
           "description": {
             "type": "string"
           },
+          "helperLabel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "辅助脚本按钮文案（空则用默认文案）。"
+          },
+          "helperScript": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "辅助脚本（非空时 UI 在字段旁渲染复制按钮，仅复制文本、绝不执行）。"
+          },
           "key": {
             "type": "string"
           },

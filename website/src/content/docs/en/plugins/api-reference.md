@@ -37,6 +37,8 @@ Return `null` or `undefined` to pass through (FluxDown downloads `ctx.url` uncha
 | `extraHeaders` | object | Headers to send when downloading the resolved link. |
 | `ephemeral` | boolean | `true` = the link is one-shot / anti-hotlinked: skip the metadata probe (at the cost of weaker resume-integrity checks). Default `false`: probe normally and keep ETag-based resume validation. |
 | `rangeSupported` | boolean | `true` = you guarantee the resolved host honours HTTP Range requests (e.g. googlevideo). Combined with `ephemeral`, FluxDown still skips the probe but plans a full multi-segment download right away instead of the conservative single-stream start. Default `false`: without a probe, Range capability is learned from the first response. |
+| `variants` | array | Multiple quality/format choices. When present with more than one entry, FluxDown shows a picker dialog and the user's choice collapses into a single link before download (in a headless server or do-not-disturb download, `defaultVariantIndex` is used silently, exactly like HLS quality selection). Each entry: `{ label, url, audioUrl?, fileName?, totalBytes?, bandwidth?, width?, height?, container? }` — `label` and `url` are required. When `variants` is non-empty the top-level `url` may be empty. Up to 50 entries; each `label` ≤ 200 chars. |
+| `defaultVariantIndex` | number | Which variant is the default (used on 60 s timeout / do-not-disturb / headless). Out-of-range values fall back to `0`. Default `0`. |
 
 After resolution, FluxDown re-examines the *resolved* URL to pick the protocol engine — a resolver may return an HLS playlist, a magnet link or an FTP URL and the right engine takes over.
 

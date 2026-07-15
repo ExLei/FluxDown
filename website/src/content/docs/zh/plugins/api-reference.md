@@ -3,7 +3,7 @@ title: 插件 API 参考
 description: 入口函数签名、flux.* 完整接口、全部运行时限制。
 section: plugins
 order: 4
-sourceHash: "fa95fde1efd4"
+sourceHash: "4af14f66308d"
 ---
 
 插件脚本能看到的一切：FluxDown 会调用的五个入口函数，和注入的 `flux` 对象。跨越 JS 边界的字段名全部是 camelCase。
@@ -38,6 +38,8 @@ sourceHash: "fa95fde1efd4"
 | `extraHeaders` | object | 下载解析后直链时附带的请求头。 |
 | `ephemeral` | boolean | `true` = 直链是一次性的/有防盗链：跳过元数据探测（代价是续传一致性校验变弱）。默认 `false`：正常探测并保留基于 ETag 的续传校验。 |
 | `rangeSupported` | boolean | `true` = 你担保解析后的服务支持 HTTP Range 请求（如 googlevideo）。与 `ephemeral` 组合时，FluxDown 依旧跳过探测，但直接按多线程分段规划下载，而不是保守的单流启动。默认 `false`：没有探测时，Range 能力只能从首个响应学习。 |
+| `variants` | array | 多个画质/格式选项。存在且多于一项时，FluxDown 弹出选择对话框，用户选中后在下载前收敛为单一直链（headless 服务器或免打扰下载场景直接静默使用 `defaultVariantIndex`，与 HLS 画质选择完全一致）。每项：`{ label, url, audioUrl?, fileName?, totalBytes?, bandwidth?, width?, height?, container? }`——`label` 和 `url` 必填。`variants` 非空时顶层 `url` 允许为空。最多 50 项，每个 `label` ≤ 200 字符。 |
+| `defaultVariantIndex` | number | 默认变体索引（60 秒超时 / 免打扰 / headless 时使用）。越界回退为 `0`。默认 `0`。 |
 
 解析完成后，FluxDown 会用**解析后的** URL 重新判定协议引擎——resolver 可以返回 HLS 播放列表、磁力链接或 FTP 地址，对应引擎会自动接管。
 

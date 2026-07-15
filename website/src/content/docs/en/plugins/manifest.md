@@ -110,6 +110,8 @@ Each entry describes one field; the app generates the form. Keys must be unique 
 | `required` | no | The form refuses to save an empty value. |
 | `min` / `max` | number only | Finite, inclusive bounds, `min ≤ max`. |
 | `pattern` | string only | A **JavaScript RegExp** (not Rust regex) validated against the value on save. |
+| `helperScript` | string only | A snippet the host shows a **Copy** button for, next to the field. The host only copies the text to the clipboard — it never runs it. The user pastes it into the target site's browser DevTools console (typical use: read `document.cookie` and copy a login cookie back into the field). Non-empty, ≤ 4 KB. |
+| `helperLabel` | with `helperScript` | Button label (≤ 60 chars). Only valid together with `helperScript`; defaults to a generic "Copy helper script" when omitted. |
 
 ### Widget × type matrix
 
