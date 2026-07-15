@@ -49,22 +49,20 @@ gh release list --limit 20
 
 ```bash
 V=v0.3.0            # 稳定版；前沿版示例：V=v0.3.0-rc.1
-# 1) 格式：稳定 ^v[0-9]+\.[0-9]+\.[0-9]+$ ；前沿 ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$
+# 1) 格式合法：稳定 ^v[0-9]+\.[0-9]+\.[0-9]+$ ；前沿 ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$
 printf '%s\n' "$V" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$' && echo OK || echo "格式非法"
-# 2) 不得重复
+# 2) tag 不重复
 git rev-parse -q --verify "refs/tags/$V" >/dev/null && echo "已存在，换号" || echo "可用"
 # 3) 单调递增：新版须高于最新同类（对照下面输出）
 git tag -l 'v[0-9]*' --sort=-v:refname | head -3
 # 4) 工作树干净、停在目标提交
 git status --porcelain    # 须为空
 git log -1 --oneline
-# 5) 构建绿（按改动范围裁剪，别跑全 workspace）
-cargo check -p hub --lib && flutter analyze && (cd web && bun run build)
-# 6) 可选：本地预览 release notes（需装 git-cliff；未装则跳过，CI 仍会生成，无规范 commit 时用默认标题）
+# 5) 可选：本地预览 release notes（需装 git-cliff；未装则跳过，CI 仍会生成，无规范 commit 时用默认标题）
 command -v git-cliff >/dev/null && git cliff --latest --strip header | head -40
 ```
 
-版本"可用"的硬条件：格式合法 · tag 不重复 · 高于同渠道最新 · 目标提交构建通过。
+版本"可用"的硬条件：格式合法 · tag 不重复 · 高于同渠道最新 · 工作树干净停在目标提交。构建绿由调用者在发布前自行保证。
 前沿版额外确认：后缀是 `-rc.N` 且 N 递增（前沿用户按 SemVer 收 `rc.1 < rc.2 < … < 转正 X.Y.Z`）。
 
 ## 4. 发布（不可逆，仅用户明确要求时）
