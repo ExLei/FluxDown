@@ -1,17 +1,21 @@
-// 单个插件的设置表单 —— 按 widget 分发既有 controls.tsx 行组件；提交前做
+// 单个插件的设置对话框 —— 点击卡片上的「设置」齿轮按钮弹出，按 widget 分发 controls.tsx
+// 行组件渲染全部受支持控件（text/password/textarea/number/toggle/select/folder），提交前做
 // required/pattern/min-max/select 成员前置校验（全部通过才发起 PUT，避免 all-or-nothing 请求半路失败）。
 
-import { Fragment, useEffect, useRef, useState } from 'react'
-import { Check, ClipboardCopy } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import * as Dialog from '@radix-ui/react-dialog'
+import { Check, ClipboardCopy, Settings2, X } from 'lucide-react'
 import type { I18nKey } from '../../lib/i18n'
 import { useI18n } from '../../lib/i18n'
 import type { PluginDto, SettingFieldDto } from '../../lib/types'
+import { FsPicker } from '../dialogs/fs-picker'
 import { NumberFieldRow, SetRow, SetSelect, SetSwitch, TextAreaFieldRow, TextFieldRow } from './controls'
 
-export interface PluginSettingFormProps {
+export interface PluginSettingsDialogProps {
   plugin: PluginDto
   saving?: boolean
-  onSave: (entries: Record<string, string>) => void
+  /** 校验通过后提交；`onDone` 供成功回调（用于关闭对话框）。 */
+  onSave: (entries: Record<string, string>, onDone: () => void) => void
 }
 
 /** 单条设置项前置校验：required → number/min/max → pattern → select 成员。首个失败项即返回。 */
@@ -40,10 +44,19 @@ function validateField(field: SettingFieldDto, raw: string): I18nKey | null {
   return null
 }
 
-export function PluginSettingForm({ plugin, saving, onSave }: PluginSettingFormProps) {
+export function PluginSettingsDialog({ plugin, saving, onSave }: PluginSettingsDialogProps) {
   const { t } = useI18n()
+  const [open, setOpen] = useState(false)
   const [values, setValues] = useState<Record<string, string>>(() => ({ ...plugin.settingsValues }))
   const [errors, setErrors] = useState<Partial<Record<string, I18nKey>>>({})
+
+  // 每次打开都从插件当前已保存值重置表单（丢弃上次未提交的编辑）。
+  useEffect(() => {
+    if (open) {
+      setValues({ ...plugin.settingsValues })
+      setErrors({})
+    }
+  }, [open, plugin])
 
   function valueOf(field: SettingFieldDto): string {
     return values[field.key] ?? field.default ?? ''
@@ -67,26 +80,63 @@ export function PluginSettingForm({ plugin, saving, onSave }: PluginSettingFormP
     }
     setErrors(nextErrors)
     if (Object.keys(nextErrors).length > 0) return
-    onSave(values)
+    onSave(values, () => setOpen(false))
   }
 
-  if (plugin.settings.length === 0) return null
-
   return (
-    <div className="overflow-hidden rounded-lg border border-line bg-surface2">
-      {plugin.settings.map((field) => (
-        <Fragment key={field.key}>
-          <SettingFieldRow field={field} value={valueOf(field)} onChange={(v) => setValue(field.key, v)} />
-          {field.helperScript && <HelperScriptButton field={field} />}
-          {errors[field.key] && <p className="px-4 pb-2 text-[11px] text-danger">{t(errors[field.key]!)}</p>}
-        </Fragment>
-      ))}
-      <div className="flex justify-end border-t border-line p-3">
-        <button type="button" className="btn primary sm" disabled={saving} onClick={submit}>
-          {saving ? t('common.loading') : t('plugins.saveSettings')}
+    <Dialog.Root open={open} onOpenChange={setOpen}>
+      <Dialog.Trigger asChild>
+        <button type="button" className="icon-btn sm text-text3" title={t('plugins.configure')} aria-label={t('plugins.configure')}>
+          <Settings2 size={14} />
         </button>
-      </div>
-    </div>
+      </Dialog.Trigger>
+      <Dialog.Portal>
+        <Dialog.Overlay className="wbackdrop show" />
+        <Dialog.Content
+          asChild
+          onPointerDownOutside={(e) => {
+            // 表单对话框：点击外部不关闭（防误触丢失编辑，兼根治 Radix Select-in-Dialog
+            // 展开时点内部元素被误判为 outside 而连带关闭的已知问题）。关闭路径：✕ / 取消 / Esc。
+            e.preventDefault()
+          }}
+        >
+          <div className="dialog show">
+            <header className="dlg-head">
+              <Dialog.Title asChild>
+                <b>{t('plugins.settingsTitle', { name: plugin.name })}</b>
+              </Dialog.Title>
+              <Dialog.Close asChild>
+                <button type="button" className="icon-btn sm" aria-label={t('common.close')}>
+                  <X size={16} />
+                </button>
+              </Dialog.Close>
+            </header>
+            <Dialog.Description className="sr-only">{plugin.description || plugin.name}</Dialog.Description>
+            <div className="dlg-body">
+              <div className="set-group" style={{ marginBottom: 0 }}>
+                {plugin.settings.map((field) => (
+                  <div className="plugin-field" key={field.key}>
+                    <SettingFieldRow field={field} value={valueOf(field)} onChange={(v) => setValue(field.key, v)} />
+                    {field.helperScript && <HelperScriptButton field={field} />}
+                    {errors[field.key] && <p className="px-4 pb-2 text-[11px] text-danger">{t(errors[field.key]!)}</p>}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <footer className="dlg-foot">
+              <Dialog.Close asChild>
+                <button type="button" className="btn ghost">
+                  {t('common.cancel')}
+                </button>
+              </Dialog.Close>
+              <button type="button" className="btn primary" disabled={saving} onClick={submit}>
+                {saving ? t('common.loading') : t('plugins.saveSettings')}
+              </button>
+            </footer>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }
 
@@ -99,6 +149,7 @@ function SettingFieldRow({
   value: string
   onChange: (v: string) => void
 }) {
+  const { t } = useI18n()
   const title = (
     <>
       {field.title || field.key}
@@ -131,13 +182,27 @@ function SettingFieldRow({
     case 'select':
       return (
         <SetRow title={title} desc={desc}>
-          <SetSelect value={value} onValueChange={onChange} options={field.options} />
+          <SetSelect
+            value={value}
+            onValueChange={onChange}
+            options={field.options}
+            placeholder={t('plugins.selectPlaceholder')}
+          />
         </SetRow>
       )
     case 'folder':
       return (
         <SetRow title={title} desc={desc}>
-          <input className="text-input" readOnly value={value} />
+          <div className="dir-row" style={{ width: 260, flexShrink: 0 }}>
+            <input
+              className="text-input"
+              spellCheck={false}
+              placeholder={t('plugins.folderPlaceholder')}
+              value={value}
+              onChange={(e) => onChange(e.target.value)}
+            />
+            <FsPicker value={value} onChange={onChange} />
+          </div>
         </SetRow>
       )
     case 'text':
@@ -145,6 +210,7 @@ function SettingFieldRow({
       return <TextFieldRow title={title} desc={desc} value={value} onCommit={onChange} />
   }
 }
+
 /** 字段级辅助脚本复制按钮：仅复制文本到剪贴板（绝不执行），供用户粘贴到目标
  *  网站的开发者工具 Console 运行（典型用途：提取 cookie）。 */
 function HelperScriptButton({ field }: { field: SettingFieldDto }) {
@@ -156,7 +222,7 @@ function HelperScriptButton({ field }: { field: SettingFieldDto }) {
     <div className="px-4 pb-2">
       <button
         type="button"
-        className="btn sm"
+        className="btn ghost sm"
         onClick={() => {
           void navigator.clipboard.writeText(field.helperScript ?? '')
           setCopied(true)

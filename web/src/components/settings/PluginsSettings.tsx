@@ -18,7 +18,7 @@ import {
   useUpdatePluginSettingsMutation,
 } from '../../hooks/usePlugins'
 import { SetRow, SetSwitch } from './controls'
-import { PluginSettingForm } from './PluginSettingForm'
+import { PluginSettingsDialog } from './PluginSettingForm'
 
 export function PluginsSettings() {
   const { t } = useI18n()
@@ -238,6 +238,13 @@ function PluginCard({ plugin }: { plugin: PluginDto }) {
           )}
         </div>
         <div className="flex flex-shrink-0 items-center gap-2">
+          {plugin.settings.length > 0 && (
+            <PluginSettingsDialog
+              plugin={plugin}
+              saving={settingsMut.isPending}
+              onSave={(entries, onDone) => settingsMut.mutate({ identity: plugin.identity, entries }, { onSuccess: onDone })}
+            />
+          )}
           <SetSwitch
             checked={plugin.enabled}
             onCheckedChange={(v) => enabledMut.mutate({ identity: plugin.identity, enabled: v })}
@@ -254,15 +261,6 @@ function PluginCard({ plugin }: { plugin: PluginDto }) {
           </button>
         </div>
       </div>
-      {plugin.settings.length > 0 && (
-        <div className="mt-3 border-t border-line pt-3">
-          <PluginSettingForm
-            plugin={plugin}
-            saving={settingsMut.isPending}
-            onSave={(entries) => settingsMut.mutate({ identity: plugin.identity, entries })}
-          />
-        </div>
-      )}
     </div>
   )
 }

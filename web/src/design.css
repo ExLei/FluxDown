@@ -113,12 +113,15 @@ svg { display: block; }
 .text-input.area { height: auto; padding: 9px 11px; resize: none; line-height: 1.5; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
 
 .select {
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
   height: 34px; padding: 0 11px; border-radius: 8px;
   border: 1px solid var(--border); background: var(--surface);
   font-size: 13px; cursor: pointer; color: var(--text);
   transition: border-color .15s, box-shadow .15s, background .15s;
 }
+/* Radix Select 的值文本（首个 span）：单行 + 溢出省略，防长版本号（如日期）换行挤压。 */
+.select > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.select > span:last-child { flex-shrink: 0; display: inline-flex; }
 .select svg { width: 14px; height: 14px; color: var(--text3); transition: transform .18s ease; }
 .select:hover { border-color: var(--text3); }
 .select[data-state="open"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-weak); }
@@ -148,6 +151,15 @@ svg { display: block; }
 .select-item[data-state="checked"] { background: var(--accent-weak); color: var(--accent); font-weight: 500; }
 .select-item-check { position: absolute; right: 9px; display: inline-flex; align-items: center; color: var(--accent); }
 .select-item-check svg { width: 14px; height: 14px; }
+.select-scroll {
+  display: flex; align-items: center; justify-content: center;
+  height: 22px; color: var(--text3); cursor: default; background: var(--surface);
+}
+/* 插件设置对话框：把「字段行 + 辅助脚本按钮 + 错误提示」归为一个带下边框的整体，
+ *  避免辅助按钮被字段行自身的下边框切走、看起来像属于下一字段。 */
+.plugin-field { border-bottom: 1px solid var(--border); }
+.plugin-field:last-child { border-bottom: none; }
+.plugin-field .set-row { border-bottom: none; }
 
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 

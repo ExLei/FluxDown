@@ -170,7 +170,7 @@ function ComponentCard({
           <SetSelect
             value={selectedVersion}
             onValueChange={setSelectedVersion}
-            width={180}
+            width={230}
             options={[
               { value: '', label: t('components.latestStable', { version: data.latestStable }) },
               ...data.versions.map((v) => ({ value: v, label: v })),

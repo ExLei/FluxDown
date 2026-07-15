@@ -3,7 +3,7 @@
 
 import * as SelectPrimitive from '@radix-ui/react-select'
 import * as SwitchPrimitive from '@radix-ui/react-switch'
-import { Check, ChevronDown } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import { cn } from '../../lib/cn'
 
@@ -55,21 +55,30 @@ export interface SelectOption {
   label: string
 }
 
+/** Radix Select 不允许 Item 的 value 为空字符串（会被当作"清空 → 显示 placeholder"），
+ *  用哨兵值在边界处映射（"" ↔ EMPTY_VALUE），使值为空串的选项也能正常回显选中态。 */
+const EMPTY_VALUE = '__empty__'
+
 export function SetSelect({
   value,
   onValueChange,
   options,
   width = 220,
+  placeholder,
 }: {
   value: string
   onValueChange: (v: string) => void
   options: SelectOption[]
   width?: number
+  placeholder?: string
 }) {
   return (
-    <SelectPrimitive.Root value={value} onValueChange={onValueChange}>
+    <SelectPrimitive.Root
+      value={value === '' ? EMPTY_VALUE : value}
+      onValueChange={(v) => onValueChange(v === EMPTY_VALUE ? '' : v)}
+    >
       <SelectPrimitive.Trigger className="select" style={{ width, flexShrink: 0 }}>
-        <SelectPrimitive.Value />
+        <SelectPrimitive.Value placeholder={placeholder} />
         <SelectPrimitive.Icon>
           <ChevronDown />
         </SelectPrimitive.Icon>
@@ -79,13 +88,20 @@ export function SetSelect({
           position="popper"
           sideOffset={6}
           className="select-pop"
-          style={{ minWidth: 'var(--radix-select-trigger-width)', boxShadow: 'var(--shadow)' }}
+          style={{
+            minWidth: 'var(--radix-select-trigger-width)',
+            maxHeight: 'min(320px, var(--radix-select-content-available-height))',
+            boxShadow: 'var(--shadow)',
+          }}
         >
+          <SelectPrimitive.ScrollUpButton className="select-scroll">
+            <ChevronUp className="h-3.5 w-3.5" />
+          </SelectPrimitive.ScrollUpButton>
           <SelectPrimitive.Viewport>
             {options.map((o) => (
               <SelectPrimitive.Item
                 key={o.value}
-                value={o.value}
+                value={o.value === '' ? EMPTY_VALUE : o.value}
                 className="select-item"
               >
                 <SelectPrimitive.ItemText>{o.label}</SelectPrimitive.ItemText>
@@ -95,6 +111,9 @@ export function SetSelect({
               </SelectPrimitive.Item>
             ))}
           </SelectPrimitive.Viewport>
+          <SelectPrimitive.ScrollDownButton className="select-scroll">
+            <ChevronDown className="h-3.5 w-3.5" />
+          </SelectPrimitive.ScrollDownButton>
         </SelectPrimitive.Content>
       </SelectPrimitive.Portal>
     </SelectPrimitive.Root>
