@@ -32,10 +32,24 @@ const NAV: { key: Category; labelKey: I18nKey; icon: LucideIcon }[] = [
   { key: 'about', labelKey: 'set.about', icon: Info },
 ]
 
+const CAT_KEY = 'fluxdown.settingsCat'
+const CATEGORIES = new Set<Category>(NAV.map((n) => n.key))
+
+function readStoredCat(): Category {
+  const v = localStorage.getItem(CAT_KEY)
+  return v && CATEGORIES.has(v as Category) ? (v as Category) : 'general'
+}
+
 export function SettingsScreen() {
   const navigate = useNavigate()
   const { t } = useI18n()
-  const [cat, setCat] = useState<Category>('general')
+  const [cat, setCatState] = useState<Category>(readStoredCat)
+
+  function setCat(next: Category) {
+    localStorage.setItem(CAT_KEY, next)
+    setCatState(next)
+  }
+
   const { data: config, isLoading, isError } = useConfigQuery()
   const mutation = useConfigMutation()
 
