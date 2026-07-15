@@ -60,6 +60,7 @@ CHECKSUM=$(md5sum "$stage/package.tgz" | cut -d' ' -f1)
 	echo 'thirdparty="yes"'
 	echo 'startable="yes"'
 	echo 'adminport="17800"'
+	echo 'dsm_ui_dir="ui"'
 	echo "extractsize=\"$EXTRACT_KB\""
 	echo "checksum=\"$CHECKSUM\""
 	if [ "$DSM" = "dsm7" ]; then
@@ -94,8 +95,31 @@ else
 fi
 convert "$LOGO" -resize 256x256 "$stage/PACKAGE_ICON_256.PNG"
 
+# ── ui/config：主菜单/导航窗格应用入口（.url 类型，允许拖到桌面）──
+# DSM 用访问 NAS 的主机名补全 host（冒号前留空），端口固定 17800。
+# 图标 grid_* 供主菜单/桌面显示；DSM 7 需 32/48/72，DSM 6 亦兼容。
+mkdir -p "$stage/ui/images"
+convert "$LOGO" -resize 32x32  "$stage/ui/images/icon_32.png"
+convert "$LOGO" -resize 48x48  "$stage/ui/images/icon_48.png"
+convert "$LOGO" -resize 72x72  "$stage/ui/images/icon_72.png"
+cat > "$stage/ui/config" <<'UICONF'
+{
+  ".url": {
+    "com.fluxdown.server": {
+      "type": "url",
+      "title": "FluxDown",
+      "desc": "Blazing fast, multi-protocol download manager",
+      "icon": "images/icon_{0}.png",
+      "url": "http://:17800",
+      "allUsers": true,
+      "grantPrivilege": "local"
+    }
+  }
+}
+UICONF
+
 # ── 顶层 tar 即 .spk ──
 mkdir -p "$(dirname "$OUT")"
 tar -cf "$OUT" --owner=0 --group=0 --numeric-owner -C "$stage" \
-	INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG package.tgz scripts conf
+	INFO PACKAGE_ICON.PNG PACKAGE_ICON_256.PNG package.tgz scripts conf ui
 echo "built: $OUT"
