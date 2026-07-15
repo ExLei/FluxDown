@@ -539,6 +539,8 @@
     "recheck": "重新检查",
     "updateFailedTitle": "上次更新失败",
     "updateFailedOpenSite": "前往官网下载",
+    "updateFallbackToTask": "改用下载任务下载",
+    "updateFallbackTaskCreated": "已将更新加入下载列表",
     "officialWebsite": "官方网站",
     "visitWebsiteForMore": "访问官网获取更多信息",
     "logExport": "导出日志",

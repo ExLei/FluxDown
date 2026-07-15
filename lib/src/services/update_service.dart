@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:rinf/rinf.dart';
 
 import '../bindings/bindings.dart';
+import '../models/download_controller.dart';
 import '../models/settings_provider.dart';
 import 'kv_store.dart';
 import 'log_service.dart';
@@ -222,6 +223,50 @@ class UpdateService extends ChangeNotifier {
       version: result.latestVersion,
       fileSize: result.fileSize,
     ).sendSignalToRust();
+  }
+
+  /// Whether the "download via task" fallback is available for the current
+  /// state: a checked update whose asset URL is known. Used to surface the
+  /// fallback button when the built-in updater download/fetch fails.
+  bool get canFallbackToTask {
+    final r = _checkResult;
+    return r != null && r.hasUpdate && r.downloadUrl.isNotEmpty;
+  }
+
+  /// Fallback for when the built-in updater download fails (e.g. the helper's
+  /// temp path is unusable — os error 123). Hands the update package URL to the
+  /// main download engine as an ordinary task so it lands in the download list;
+  /// the user installs it manually afterwards.
+  ///
+  /// Returns `true` when a task was created. Requires a prior successful check
+  /// (so [downloadUrl] is known) plus the global controller/settings singletons.
+  bool downloadUpdateViaTask() {
+    final result = _checkResult;
+    if (result == null || !result.hasUpdate || result.downloadUrl.isEmpty) {
+      return false;
+    }
+    final controller = DownloadController.globalInstance;
+    if (controller == null) return false;
+    final settings = SettingsProvider.globalInstance;
+    final saveDir = settings?.defaultSaveDir ?? '';
+    if (saveDir.isEmpty) return false;
+
+    logInfo(
+      'UpdateService',
+      'fallback: create download task for update v${result.latestVersion}',
+    );
+    controller.createTask(
+      url: result.downloadUrl,
+      saveDir: saveDir,
+      segments: settings?.defaultSegments ?? 0,
+    );
+
+    // The update now lives in the main download list; reset the update UI so
+    // it no longer shows the failed built-in download.
+    _status = UpdateStatus.idle;
+    _errorMessage = '';
+    notifyListeners();
+    return true;
   }
 
   /// Launch the installer.

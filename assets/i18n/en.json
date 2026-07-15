@@ -539,6 +539,8 @@
     "recheck": "Recheck",
     "updateFailedTitle": "Previous Update Failed",
     "updateFailedOpenSite": "Download from Website",
+    "updateFallbackToTask": "Download via Task",
+    "updateFallbackTaskCreated": "Added the update to the download list",
     "officialWebsite": "Official Website",
     "visitWebsiteForMore": "Visit website for more information",
     "logExport": "Export Logs",

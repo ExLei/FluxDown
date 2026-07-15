@@ -756,6 +756,8 @@ class S {
   String get recheck => _r('recheck');
   String get updateFailedTitle => _r('updateFailedTitle');
   String get updateFailedOpenSite => _r('updateFailedOpenSite');
+  String get updateFallbackToTask => _r('updateFallbackToTask');
+  String get updateFallbackTaskCreated => _r('updateFallbackTaskCreated');
   String get officialWebsite => _r('officialWebsite');
   String get visitWebsiteForMore => _r('visitWebsiteForMore');
 

@@ -8233,6 +8233,34 @@ class _AboutContent extends StatelessWidget {
                   ],
                 ),
               ),
+            if (status == UpdateStatus.error && svc.canFallbackToTask) ...[
+              const SizedBox(width: 8),
+              ShadButton.outline(
+                size: ShadButtonSize.sm,
+                onPressed: () {
+                  if (svc.downloadUpdateViaTask()) {
+                    ShadSonner.of(context).show(
+                      ShadToast(
+                        title: Text(s.updateFallbackTaskCreated),
+                        duration: const Duration(seconds: 3),
+                      ),
+                    );
+                  }
+                },
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      LucideIcons.circlePlus,
+                      size: 13,
+                      color: c.textSecondary,
+                    ),
+                    const SizedBox(width: 6),
+                    Text(s.updateFallbackToTask),
+                  ],
+                ),
+              ),
+            ],
             if (status == UpdateStatus.checking)
               ShadButton.outline(
                 size: ShadButtonSize.sm,
