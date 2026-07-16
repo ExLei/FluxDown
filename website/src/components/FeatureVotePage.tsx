@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useLocale } from "@/lib/i18n";
+import IssueDetailModal from "./IssueDetailModal";
 
 interface FeatureEntry {
   id: number;
@@ -8,6 +9,7 @@ interface FeatureEntry {
   description: string;
   createdAt: string;
   votes: number;
+  comments: number;
 }
 
 interface FeatureListData {
@@ -18,6 +20,39 @@ interface FeatureListData {
 const STORAGE_KEY = "fluxdown-feature-votes";
 
 const RANK_COLORS = ["#F5C518", "#C0C4CC", "#CD8C5C"]; // gold / silver / bronze
+
+const PAGE_SIZE = 10;
+
+/**
+ * Windowed page numbers: all pages when few, otherwise
+ * 1 … (current±1) … last, with -1 as ellipsis marker.
+ */
+function pageWindow(current: number, total: number): number[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages = new Set<number>([1, total, current - 1, current, current + 1]);
+  const sorted = [...pages]
+    .filter((p) => p >= 1 && p <= total)
+    .sort((a, b) => a - b);
+  const out: number[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i] - sorted[i - 1] > 1) out.push(-1);
+    out.push(sorted[i]);
+  }
+  return out;
+}
+
+/** Compact locale-aware date, e.g. "Jul 16, 2026" / "2026年7月16日". */
+function formatDate(dateStr: string, locale: string): string {
+  try {
+    return new Intl.DateTimeFormat(locale, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    }).format(new Date(dateStr));
+  } catch {
+    return dateStr.slice(0, 10);
+  }
+}
 
 function loadVotedIds(): Set<number> {
   try {
@@ -40,7 +75,7 @@ function saveVotedIds(ids: Set<number>): void {
 }
 
 export default function FeatureVotePage() {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [data, setData] = useState<FeatureListData | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -52,7 +87,16 @@ export default function FeatureVotePage() {
   const [proposeDesc, setProposeDesc] = useState("");
   const [proposing, setProposing] = useState(false);
   const [justCreatedId, setJustCreatedId] = useState<number | null>(null);
+  const [detailIssue, setDetailIssue] = useState<number | null>(null);
+  const [page, setPage] = useState(1);
   const statusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  /** Change page and bring the list top back into view. */
+  const goPage = useCallback((p: number) => {
+    setPage(p);
+    listRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
 
   const flashStatus = useCallback((text: string, type: "success" | "error") => {
     setStatusMsg({ text, type });
@@ -181,16 +225,31 @@ export default function FeatureVotePage() {
       setProposeDesc("");
       setShowPropose(false);
       setJustCreatedId(result.featureId);
-      // Cache already busted server-side — fetch the fresh list right away
-      await refetch(true).catch(() => {});
+      // Cache already busted server-side — fetch the fresh list right away,
+      // then jump to the page containing the new proposal.
+      const fresh = await refetch(true).catch(() => null);
+      if (fresh) {
+        const idx = fresh.features.findIndex((f) => f.id === result.featureId);
+        if (idx >= 0) goPage(Math.floor(idx / PAGE_SIZE) + 1);
+      }
     } catch {
       flashStatus(t("featureVote.proposeError"), "error");
     } finally {
       setProposing(false);
     }
-  }, [proposeTitle, proposeDesc, proposing, t, flashStatus, refetch]);
+  }, [proposeTitle, proposeDesc, proposing, t, flashStatus, refetch, goPage]);
 
   const maxVotes = data ? Math.max(1, ...data.features.map((f) => f.votes)) : 1;
+  const totalPages = data
+    ? Math.max(1, Math.ceil(data.features.length / PAGE_SIZE))
+    : 1;
+  // Clamp instead of resetting: a refetch that shrinks the list must not
+  // silently teleport the reader back to page 1.
+  const safePage = Math.min(page, totalPages);
+  const pageStart = (safePage - 1) * PAGE_SIZE;
+  const visibleFeatures = data
+    ? data.features.slice(pageStart, pageStart + PAGE_SIZE)
+    : [];
 
   return (
     <section className="pt-24 sm:pt-32 pb-16 sm:pb-20">
@@ -322,15 +381,16 @@ export default function FeatureVotePage() {
                 {t("featureVote.empty")}
               </div>
             ) : (
-              <div className="space-y-3">
-                <AnimatePresence initial={false}>
-                  {data.features.map((feature, i) => {
+              <div ref={listRef} className="space-y-3 scroll-mt-24">
+                <AnimatePresence initial={false} mode="popLayout">
+                  {visibleFeatures.map((feature, i) => {
+                    const rank = pageStart + i;
                     const isVoted = votedIds.has(feature.id);
                     const isPending = pendingId === feature.id;
                     const isNew = justCreatedId === feature.id;
                     const pct = Math.round((feature.votes / maxVotes) * 100);
-                    const rankColor = i < 3 && feature.votes > 0 ? RANK_COLORS[i] : undefined;
-
+                    const rankColor =
+                      rank < 3 && feature.votes > 0 ? RANK_COLORS[rank] : undefined;
                     return (
                       <motion.div
                         key={feature.id}
@@ -339,77 +399,172 @@ export default function FeatureVotePage() {
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, scale: 0.97 }}
                         transition={{ duration: 0.35, delay: loading ? 0 : Math.min(0.05 * i, 0.3) }}
-                        className={`group relative rounded-xl border overflow-hidden backdrop-blur-sm transition-colors ${
+                        className={`group relative rounded-xl border overflow-hidden bg-dark-surface1/60 transition-all duration-200 hover:-translate-y-0.5 hover:bg-dark-surface1 hover:shadow-lg hover:shadow-brand-sky/5 ${
                           isNew
                             ? "border-brand-sky/60 ring-1 ring-brand-sky/30"
-                            : isVoted
-                              ? "border-brand-sky/40"
-                              : "border-dark-border hover:border-dark-text-muted"
-                        } bg-dark-surface1/40`}
+                            : "border-dark-border hover:border-brand-sky/30"
+                        }`}
                       >
-                        {/* Relative popularity bar (background fill) */}
-                        <motion.div
-                          className="absolute inset-y-0 left-0 bg-gradient-to-r from-brand-sky/[0.07] to-brand-cyan/[0.04] pointer-events-none"
-                          initial={false}
-                          animate={{ width: `${pct}%` }}
-                          transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
-                        />
-
-                        <div className="relative flex items-center gap-4 p-4 sm:p-5">
-                          {/* Rank */}
+                        <div className="flex items-start gap-3 sm:gap-4 p-4 sm:p-5">
+                          {/* Rank medal */}
                           <div
-                            className={`flex-shrink-0 flex items-center justify-center w-8 h-8 rounded-lg bg-dark-surface2 text-sm font-bold tabular-nums ${rankColor ? "" : "text-dark-text-muted"}`}
-                            style={rankColor ? { color: rankColor } : undefined}
+                            className={`flex-shrink-0 flex items-center justify-center w-7 h-7 mt-0.5 rounded-full border text-xs font-bold tabular-nums ${
+                              rankColor
+                                ? ""
+                                : "border-dark-border bg-dark-surface2 text-dark-text-muted"
+                            }`}
+                            style={
+                              rankColor
+                                ? {
+                                    color: rankColor,
+                                    backgroundColor: `${rankColor}1A`,
+                                    borderColor: `${rankColor}59`,
+                                  }
+                                : undefined
+                            }
                           >
-                            {i + 1}
+                            {rank + 1}
                           </div>
 
-                          {/* Title + description */}
-                          <div className="flex-1 min-w-0">
-                            <h3 className="text-sm sm:text-base font-semibold text-dark-text truncate">
+                          {/* Title + description + meta (click → issue detail) */}
+                          <div
+                            className="flex-1 min-w-0 cursor-pointer"
+                            role="button"
+                            tabIndex={0}
+                            onClick={() => setDetailIssue(feature.id)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter" || e.key === " ") {
+                                e.preventDefault();
+                                setDetailIssue(feature.id);
+                              }
+                            }}
+                          >
+                            <h3 className="text-sm sm:text-[15px] font-semibold text-dark-text truncate group-hover:text-brand-sky transition-colors">
                               {feature.title}
                             </h3>
                             {feature.description && (
-                              <p className="mt-0.5 text-xs sm:text-sm text-dark-text-muted line-clamp-2 leading-relaxed">
+                              <p className="mt-1 text-xs sm:text-[13px] text-dark-text-muted line-clamp-2 leading-relaxed">
                                 {feature.description}
                               </p>
                             )}
+                            <div className="mt-2 flex items-center gap-3 text-[11px] text-dark-text-muted/80">
+                              <span className="inline-flex items-center gap-1">
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                  <path d="M8 2v4" />
+                                  <path d="M16 2v4" />
+                                  <rect width="18" height="18" x="3" y="4" rx="2" />
+                                  <path d="M3 10h18" />
+                                </svg>
+                                {formatDate(feature.createdAt, locale)}
+                              </span>
+                              {feature.comments > 0 && (
+                                <span className="inline-flex items-center gap-1">
+                                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                                    <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z" />
+                                  </svg>
+                                  {feature.comments} {t("issueDetail.replies")}
+                                </span>
+                              )}
+                            </div>
                           </div>
 
-                          {/* Vote button */}
+                          {/* Vote pill */}
                           <button
                             onClick={() => handleToggleVote(feature)}
                             disabled={isPending}
                             aria-pressed={isVoted}
-                            className={`flex-shrink-0 flex flex-col items-center justify-center gap-0.5 w-16 h-16 rounded-xl border transition-all ${
+                            className={`flex-shrink-0 self-center inline-flex items-center gap-1.5 h-9 pl-3 pr-3.5 rounded-full border text-sm font-semibold tabular-nums transition-all duration-200 ${
                               isVoted
-                                ? "border-brand-sky/60 bg-brand-sky/10 text-brand-sky"
-                                : "border-dark-border bg-dark-surface2/60 text-dark-text-secondary hover:border-brand-sky/40 hover:text-dark-text hover:-translate-y-0.5"
-                            } ${isPending ? "opacity-50 cursor-wait" : "cursor-pointer"}`}
+                                ? "border-transparent bg-gradient-to-r from-brand-sky to-brand-cyan text-black shadow-md shadow-brand-sky/25"
+                                : "border-dark-border bg-dark-surface2/60 text-dark-text-secondary hover:border-brand-sky/50 hover:text-brand-sky hover:bg-brand-sky/5"
+                            } ${isPending ? "opacity-50 cursor-wait" : "cursor-pointer active:scale-95"}`}
                           >
                             <motion.svg
-                              width="18"
-                              height="18"
+                              width="15"
+                              height="15"
                               viewBox="0 0 24 24"
                               fill={isVoted ? "currentColor" : "none"}
                               stroke="currentColor"
                               strokeWidth="2"
                               strokeLinecap="round"
                               strokeLinejoin="round"
-                              animate={isVoted ? { scale: [1, 1.35, 1] } : {}}
+                              animate={isVoted ? { scale: [1, 1.35, 1], rotate: [0, -12, 0] } : {}}
                               transition={{ duration: 0.35 }}
                             >
-                              <path d="m18 15-6-6-6 6" />
+                              <path d="M7 10v12" />
+                              <path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88Z" />
                             </motion.svg>
-                            <span className="text-sm font-bold tabular-nums leading-none">
-                              {feature.votes}
-                            </span>
+                            {feature.votes}
                           </button>
+                        </div>
+
+                        {/* Relative popularity — thin bar hugging the card bottom */}
+                        <div className="absolute bottom-0 inset-x-0 h-[2px] bg-dark-surface2/60">
+                          <motion.div
+                            className="h-full bg-gradient-to-r from-brand-sky to-brand-cyan"
+                            initial={false}
+                            animate={{ width: feature.votes > 0 ? `${Math.max(pct, 4)}%` : "0%" }}
+                            transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+                          />
                         </div>
                       </motion.div>
                     );
                   })}
                 </AnimatePresence>
+
+                {/* ── Pager ── */}
+                {totalPages > 1 && (
+                  <nav
+                    className="flex items-center justify-center gap-1.5 pt-5"
+                    aria-label={t("featureVote.pagination")}
+                  >
+                    <button
+                      onClick={() => goPage(safePage - 1)}
+                      disabled={safePage <= 1}
+                      aria-label={t("featureVote.prevPage")}
+                      className="flex items-center justify-center w-9 h-9 rounded-lg border border-dark-border bg-dark-surface1/50 text-dark-text-secondary transition-all enabled:hover:border-brand-sky/40 enabled:hover:text-dark-text enabled:cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m15 18-6-6 6-6" />
+                      </svg>
+                    </button>
+
+                    {pageWindow(safePage, totalPages).map((p, idx) =>
+                      p === -1 ? (
+                        <span
+                          key={`gap-${idx}`}
+                          className="w-6 text-center text-sm text-dark-text-muted select-none"
+                        >
+                          …
+                        </span>
+                      ) : (
+                        <button
+                          key={p}
+                          onClick={() => goPage(p)}
+                          aria-current={p === safePage ? "page" : undefined}
+                          className={`min-w-9 h-9 px-2 rounded-lg border text-sm font-medium tabular-nums transition-all cursor-pointer ${
+                            p === safePage
+                              ? "border-brand-sky/60 bg-brand-sky/10 text-brand-sky"
+                              : "border-dark-border bg-dark-surface1/50 text-dark-text-secondary hover:border-brand-sky/40 hover:text-dark-text"
+                          }`}
+                        >
+                          {p}
+                        </button>
+                      ),
+                    )}
+
+                    <button
+                      onClick={() => goPage(safePage + 1)}
+                      disabled={safePage >= totalPages}
+                      aria-label={t("featureVote.nextPage")}
+                      className="flex items-center justify-center w-9 h-9 rounded-lg border border-dark-border bg-dark-surface1/50 text-dark-text-secondary transition-all enabled:hover:border-brand-sky/40 enabled:hover:text-dark-text enabled:cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m9 18 6-6-6-6" />
+                      </svg>
+                    </button>
+                  </nav>
+                )}
               </div>
             )}
 
@@ -419,11 +574,19 @@ export default function FeatureVotePage() {
               transition={{ delay: 0.4 }}
               className="mt-8 text-center text-sm text-dark-text-muted tabular-nums"
             >
-              {t("featureVote.totalVotes", { n: String(data.totalVotes) })}
+              {t("featureVote.stats", {
+                items: String(data.features.length),
+                votes: String(data.totalVotes),
+              })}
             </motion.p>
           </>
         )}
       </div>
+
+      <IssueDetailModal
+        issueNumber={detailIssue}
+        onClose={() => setDetailIssue(null)}
+      />
     </section>
   );
 }

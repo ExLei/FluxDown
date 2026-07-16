@@ -4,16 +4,19 @@ import { GITHUB_TOKEN, GITHUB_REPO } from "astro:env/server";
 export const prerender = false;
 
 // ─────────────────────────────────────────────
-// Feature voting backed entirely by GitHub Issues:
-//   * Candidate features  = open issues titled  "[FeatureVote] ..."
-//   * Vote records        = comments in ONE tracking issue (JSON blocks)
-// GET needs only 2 GitHub API calls: list issues + list tracking comments.
-// POST (vote/unvote/propose) busts the in-memory cache so the next GET
-// re-fetches fresh data immediately.
+// Feature voting backed by the SAME GitHub Issues as user feedback:
+//   * Candidate features = open issues labeled "enhancement"
+//     (i.e. feedback of type=feature, from website form / app / vote page)
+//   * Vote count = GitHub 👍 reactions on the issue
+//                + anonymous website votes (JSON records in ONE tracking issue,
+//                  per-IP dedup — a single bot token cannot emit one reaction
+//                  per visitor, so site votes are recorded separately and summed)
+// GET needs only 2 GitHub API calls: list issues (reactions included) +
+// list tracking comments. POST (vote/unvote/propose) patches the cached view.
 // ─────────────────────────────────────────────
 
 const VOTES_ISSUE_TITLE = "[FluxDown] Feature Vote Records";
-const FEATURE_TITLE_PREFIX = "[FeatureVote]";
+const FEATURE_LABEL = "enhancement";
 
 const CACHE_TTL = 30_000; // 30 s
 
@@ -44,11 +47,20 @@ interface GHIssue {
   title: string;
   body: string | null;
   created_at: string;
+  state?: string;
+  comments?: number;
+  labels?: Array<{ name: string } | string>;
+  reactions?: { "+1"?: number };
+  pull_request?: unknown;
 }
 
 interface GHComment {
   id: number;
   body: string;
+}
+
+function labelNames(issue: GHIssue): string[] {
+  return (issue.labels ?? []).map((l) => (typeof l === "string" ? l : l.name));
 }
 
 /** Fetch with simple retry (up to 3 attempts, back-off). */
@@ -71,11 +83,14 @@ async function fetchWithRetry(
   throw lastErr;
 }
 
-/** Fetch ALL comments for an issue (paginated). Returns [] on error. */
+/**
+ * Fetch comments for an issue (paginated, capped at 10 pages = 1000 records
+ * to bound worst-case API usage). Returns [] on error.
+ */
 async function fetchAllComments(issueNumber: number): Promise<GHComment[]> {
   const all: GHComment[] = [];
   let page = 1;
-  while (true) {
+  while (page <= 10) {
     let res: Response;
     try {
       res = await fetchWithRetry(
@@ -96,16 +111,60 @@ async function fetchAllComments(issueNumber: number): Promise<GHComment[]> {
 }
 
 /**
- * Scan open issues (max 3 pages = 300 issues) once, splitting them into
- * the votes-tracking issue and the feature-candidate issues.
+ * Fetch open feature-suggestion issues (label "enhancement", max 3 pages).
+ * These are the same issues the feedback tracker lists — one source of truth.
+ * Throws when even the FIRST page cannot be fetched (rate limit / outage) so
+ * callers never cache an empty list; later-page failures degrade gracefully.
  */
-async function scanIssues(): Promise<{
-  votesIssueNumber: number | null;
-  features: GHIssue[];
-}> {
+async function fetchFeatureIssues(): Promise<GHIssue[]> {
   const features: GHIssue[] = [];
-  let votesIssueNumber: number | null = null;
+  for (let page = 1; page <= 3; page++) {
+    let res: Response;
+    try {
+      res = await fetchWithRetry(
+        `https://api.github.com/repos/${GITHUB_REPO}/issues?state=open&labels=${FEATURE_LABEL}&per_page=100&page=${page}`,
+        { headers: ghHeaders() },
+      );
+    } catch (err) {
+      if (page === 1) throw err;
+      break;
+    }
+    if (!res.ok) {
+      if (page === 1) {
+        throw new Error(
+          `list issues failed: ${res.status}${isRateLimitedResponse(res) ? " (rate limited)" : ""}`,
+        );
+      }
+      break;
+    }
+    const issues: GHIssue[] = await res.json();
+    if (!Array.isArray(issues)) break;
+    for (const issue of issues) {
+      if (issue.pull_request) continue;
+      if (issue.title === VOTES_ISSUE_TITLE) continue;
+      features.push(issue);
+    }
+    if (issues.length < 100) break;
+  }
+  return features;
+}
 
+/** GitHub rate-limit / abuse responses (403 with remaining=0, or 429). */
+function isRateLimitedResponse(res: Response): boolean {
+  return (
+    res.status === 429 ||
+    (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0")
+  );
+}
+
+// The tracking issue never moves once discovered — cache its number for the
+// lifetime of the serverless instance to save up to 3 list calls per request.
+let votesIssueNumberCache: number | null = null;
+
+/** Find or lazily create the single votes-tracking issue. */
+async function findOrCreateVotesIssue(): Promise<number> {
+  if (votesIssueNumberCache !== null) return votesIssueNumberCache;
+  // Search open issues for the tracking issue by exact title.
   for (let page = 1; page <= 3; page++) {
     let res: Response;
     try {
@@ -119,23 +178,13 @@ async function scanIssues(): Promise<{
     if (!res.ok) break;
     const issues: GHIssue[] = await res.json();
     if (!Array.isArray(issues)) break;
-    for (const issue of issues) {
-      if (issue.title === VOTES_ISSUE_TITLE) {
-        votesIssueNumber = issue.number;
-      } else if (issue.title.startsWith(FEATURE_TITLE_PREFIX)) {
-        features.push(issue);
-      }
+    const hit = issues.find((i) => i.title === VOTES_ISSUE_TITLE);
+    if (hit) {
+      votesIssueNumberCache = hit.number;
+      return hit.number;
     }
     if (issues.length < 100) break;
   }
-
-  return { votesIssueNumber, features };
-}
-
-/** Find or lazily create the single votes-tracking issue. */
-async function findOrCreateVotesIssue(): Promise<number> {
-  const { votesIssueNumber } = await scanIssues();
-  if (votesIssueNumber !== null) return votesIssueNumber;
 
   const res = await fetchWithRetry(
     `https://api.github.com/repos/${GITHUB_REPO}/issues`,
@@ -160,6 +209,7 @@ async function findOrCreateVotesIssue(): Promise<number> {
     throw new Error(`Failed to create votes issue: ${res.status} ${text}`);
   }
   const created: GHIssue = await res.json();
+  votesIssueNumberCache = created.number;
   return created.number;
 }
 
@@ -206,7 +256,7 @@ function buildVoteCommentBody(record: VoteRecord): string {
   ].join("\n");
 }
 
-/** Net votes for a feature. Per-IP replay: last action wins. */
+/** Net website votes for a feature. Per-IP replay: last action wins. */
 function countVotes(records: VoteRecord[], featureId: number): number {
   const perIp = new Map<string, "vote" | "unvote">();
   for (const r of records) {
@@ -220,13 +270,65 @@ function countVotes(records: VoteRecord[], featureId: number): number {
 }
 
 // ─────────────────────────────────────────────
-// Feature description extraction
+// Vote-records cache (shared by GET and vote handler)
+//
+// Every vote/unvote appends one tracking comment, so re-reading ALL comments
+// on every request is the biggest API cost. Cache the parsed records for
+// CACHE_TTL and append new records in place after each successful write —
+// the cached view stays exact for this instance; TTL expiry reconciles
+// cross-instance drift with GitHub as the source of truth.
 // ─────────────────────────────────────────────
 
-/** Strip our proposal meta block; return a display-friendly excerpt. */
+let recordsCache: { records: VoteRecord[]; timestamp: number } | null = null;
+
+async function loadVoteRecords(): Promise<VoteRecord[]> {
+  if (recordsCache && Date.now() - recordsCache.timestamp < CACHE_TTL) {
+    return recordsCache.records;
+  }
+  const votesIssueNumber = await findOrCreateVotesIssue();
+  const comments = await fetchAllComments(votesIssueNumber);
+  const records = comments
+    .map((c) => parseVoteComment(c.body))
+    .filter((r): r is VoteRecord => r !== null);
+  recordsCache = { records, timestamp: Date.now() };
+  return records;
+}
+
+function appendRecordToCache(record: VoteRecord): void {
+  if (!recordsCache) return;
+  recordsCache.records.push(record);
+  recordsCache.timestamp = Date.now();
+}
+
+// ─────────────────────────────────────────────
+// Title / description extraction (feedback issue format)
+// ─────────────────────────────────────────────
+
+/**
+ * Strip the feedback/feature title decoration:
+ *   "✨ [Website Feedback] xxx" / "🐛 [App Feedback] xxx" /
+ *   "✨ [Feature] xxx" / legacy "[FeatureVote] xxx" → "xxx"
+ */
+function displayTitle(raw: string): string {
+  return raw
+    .replace(
+      /^[^[\]]{0,6}\[[^\]]*(?:Feedback|Feature)[^\]]*\]\s*/iu,
+      "",
+    )
+    .trim();
+}
+
+/**
+ * Extract a display-friendly excerpt from a feedback-format body:
+ * take the part before the metadata separator, drop markdown headings
+ * and legacy meta blocks.
+ */
 function extractDescription(body: string | null): string {
   if (!body) return "";
-  const cleaned = body
+  const sepIdx = body.indexOf("\n---\n");
+  const content = sepIdx >= 0 ? body.slice(0, sepIdx) : body;
+  const cleaned = content
+    .replace(/^#{1,6}\s+.*$/gm, "")
     .replace(/<!--\s*fluxdown:feature-meta[\s\S]*?-->/g, "")
     .replace(/```json\s*[\s\S]*?```/g, "")
     .trim();
@@ -243,6 +345,7 @@ interface FeatureEntry {
   description: string;
   createdAt: string;
   votes: number;
+  comments: number;
 }
 
 interface ListCache {
@@ -341,22 +444,24 @@ export const GET: APIRoute = async () => {
   }
 
   try {
-    const { votesIssueNumber, features } = await scanIssues();
+    const features = await fetchFeatureIssues();
 
     let records: VoteRecord[] = [];
-    if (votesIssueNumber !== null) {
-      const comments = await fetchAllComments(votesIssueNumber);
-      records = comments
-        .map((c) => parseVoteComment(c.body))
-        .filter((r): r is VoteRecord => r !== null);
+    try {
+      records = await loadVoteRecords();
+    } catch (err) {
+      // Site votes are additive — degrade to reactions-only counts.
+      console.error("[feature-vote] failed to load vote records:", err);
     }
 
     const entries: FeatureEntry[] = features.map((issue) => ({
       id: issue.number,
-      title: issue.title.slice(FEATURE_TITLE_PREFIX.length).trim(),
+      title: displayTitle(issue.title),
       description: extractDescription(issue.body),
       createdAt: issue.created_at,
-      votes: countVotes(records, issue.number),
+      votes:
+        (issue.reactions?.["+1"] ?? 0) + countVotes(records, issue.number),
+      comments: issue.comments ?? 0,
     }));
 
     // Sort: most votes first, then newest first
@@ -373,7 +478,14 @@ export const GET: APIRoute = async () => {
     });
   } catch (err) {
     console.error("[feature-vote] GET error:", err);
-    return json({ error: "Failed to fetch feature list" }, 500);
+    // Serve the last good snapshot (even past its TTL) instead of failing —
+    // typical cause is a GitHub rate limit, which resolves within the hour.
+    if (listCache) {
+      return json(listCache.data, 200, {
+        "Cache-Control": "public, s-maxage=30, stale-while-revalidate=60",
+      });
+    }
+    return json({ error: "Failed to fetch feature list" }, 503);
   }
 };
 
@@ -423,7 +535,7 @@ async function handleVote(
     return json({ error: "featureId is required" }, 400);
   }
 
-  // Validate: must be an existing open feature issue
+  // Validate: must be an existing open issue labeled as a feature suggestion
   let checkRes: Response;
   try {
     checkRes = await fetchWithRetry(
@@ -434,24 +546,30 @@ async function handleVote(
     return json({ error: "Failed to validate feature" }, 502);
   }
   if (!checkRes.ok) {
+    if (isRateLimitedResponse(checkRes)) {
+      return json({ error: "GitHub rate limited, try again later" }, 503);
+    }
     return json({ error: "Feature not found" }, 404);
   }
   const issue: GHIssue = await checkRes.json();
-  if (!issue.title.startsWith(FEATURE_TITLE_PREFIX)) {
+  if (
+    issue.pull_request ||
+    issue.state !== "open" ||
+    !labelNames(issue).includes(FEATURE_LABEL)
+  ) {
     return json({ error: "Feature not found" }, 404);
   }
 
   try {
     const votesIssueNumber = await findOrCreateVotesIssue();
 
-    // Determine current state for this IP + feature (last action wins)
-    const comments = await fetchAllComments(votesIssueNumber);
-    const mine = comments
-      .map((c) => parseVoteComment(c.body))
-      .filter(
-        (r): r is VoteRecord =>
-          r !== null && r.featureId === featureId && r.ip === ip,
-      );
+    // Determine current state for this IP + feature (last action wins).
+    // Uses the shared records cache — a fresh miss re-reads GitHub; hits
+    // reuse records patched in place by previous votes on this instance.
+    const records = await loadVoteRecords();
+    const mine = records.filter(
+      (r) => r.featureId === featureId && r.ip === ip,
+    );
     const lastAction = mine.length > 0 ? mine[mine.length - 1].action : null;
 
     // Idempotent checks
@@ -484,11 +602,25 @@ async function handleVote(
         `[feature-vote] Failed to post vote comment: ${commentRes.status}`,
         text,
       );
+      if (commentRes.status === 404) {
+        // Tracking issue vanished (deleted/transferred) — drop the cached
+        // number so the next attempt re-discovers or re-creates it.
+        votesIssueNumberCache = null;
+        recordsCache = null;
+      }
+      if (isRateLimitedResponse(commentRes)) {
+        return json({ error: "GitHub rate limited, try again later" }, 503);
+      }
       return json({ error: "Failed to record vote" }, 502);
     }
 
-    // Patch the cached view in place (GitHub list APIs lag by seconds;
+    // NOTE: 不用 bot 帐号补 👍 reaction —— 站内票已计入 tracking 记录，
+    // bot reaction 会在缓存过期后与记录双重计数（单 token 也只能 +1）。
+    // GitHub 侧真实用户的 👍 与站内记录相加即为总票数。
+
+    // Patch the cached views in place (GitHub list APIs lag by seconds;
     // a plain cache-bust would just re-cache stale counts).
+    appendRecordToCache(record);
     patchCacheVote(featureId, action === "vote" ? 1 : -1);
 
     return json(
@@ -523,22 +655,33 @@ async function handlePropose(
   }
 
   try {
+    // Create the proposal as a regular feedback issue (feature type), so it
+    // shows up in BOTH the feedback tracker and the vote list, and the
+    // detail modal can parse its structured metadata.
+    const issueBody = [
+      "## Feature Request",
+      "",
+      "### 建议内容 / Proposal",
+      "",
+      description || "_(no description)_",
+      "",
+      "---",
+      "",
+      "**Type:** feature",
+      "**Source:** Website feature vote",
+      `**Submitted:** ${new Date().toISOString()}`,
+      `**IP:** \`${ip}\``,
+    ].join("\n");
+
     const res = await fetchWithRetry(
       `https://api.github.com/repos/${GITHUB_REPO}/issues`,
       {
         method: "POST",
         headers: ghHeaders(),
         body: JSON.stringify({
-          title: `${FEATURE_TITLE_PREFIX} ${title}`,
-          body: [
-            description || "_(no description)_",
-            "",
-            `<!-- fluxdown:feature-meta ${JSON.stringify({
-              source: "website",
-              ip,
-              date: new Date().toISOString(),
-            })} -->`,
-          ].join("\n"),
+          title: `\u2728 [Website Feedback] ${title}`,
+          body: issueBody,
+          labels: ["user-feedback", FEATURE_LABEL],
         }),
       },
     );
@@ -546,6 +689,9 @@ async function handlePropose(
     if (!res.ok) {
       const text = await res.text();
       console.error(`[feature-vote] Failed to create issue: ${res.status}`, text);
+      if (isRateLimitedResponse(res)) {
+        return json({ error: "GitHub rate limited, try again later" }, 503);
+      }
       return json({ error: "Failed to create feature" }, 502);
     }
 
@@ -559,6 +705,7 @@ async function handlePropose(
         description.length > 300 ? `${description.slice(0, 300)}…` : description,
       createdAt: created.created_at,
       votes: 0,
+      comments: 0,
     });
 
     return json({ success: true, featureId: created.number }, 201);

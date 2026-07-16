@@ -8,11 +8,11 @@
  * {
  *   type: "feature" | "bug" | "other" | "docs",
  *   title: string,
- *   description: string,
+ *   description?: string // 详细描述；feature 类型可选，其余类型必填
  *   contact?: string     // 可选的联系方式（邮箱等）
  *   pagePath?: string    // 可选，docs 反馈关联的页面路径（需以 /docs/ 开头且 ≤200 字符，校验失败则静默忽略）
  *   logs?: string        // 可选，客户端日志（脱敏后），独立折叠展示，上限 30000 字符（超限截断保留末尾）
- *   appVersion: string   // 应用版本号（≤50 字符）；除 docs 反馈外必填（App 端自动注入，网站表单手动填写）
+ *   appVersion?: string  // 应用版本号（≤50 字符）；bug/other 必填，feature/docs 可选（App 端自动注入，网站表单手动填写）
  *   environment?: string // 可选，客户端环境摘要（OS/浏览器/语言等，客户端自动检测并在表单中明示；单行 ≤300 字符）
  * }
  *
@@ -115,8 +115,9 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
 
   const { type, title, description, contact, pagePath, logs, source, appVersion, environment } = body;
 
-  // 验证必填字段
-  if (!type || !title || !description) {
+  // 验证必填字段。功能建议（feature）一句标题即可成立，描述可选；
+  // bug / other 仍需描述才能定位问题。
+  if (!type || !title || (!description && type !== "feature")) {
     return new Response(
       JSON.stringify({
         error: "Missing required fields: type, title, description",
@@ -143,20 +144,24 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
     );
   }
 
-  if (description.length > 5000) {
+  const safeDescription =
+    typeof description === "string" ? description.trim() : "";
+
+  if (safeDescription.length > 5000) {
     return new Response(
       JSON.stringify({ error: "Description too long (max 5000 characters)" }),
       { status: 400, headers: { "Content-Type": "application/json" } },
     );
   }
 
-  // 版本号：除 docs 反馈外必填（App 端构建时注入自动上报，网站表单由用户填写）。
+  // 版本号：bug / other 必填（App 端构建时注入自动上报，网站表单由用户填写）；
+  // feature 与 docs 反馈可选 —— 功能建议与具体版本通常无关。
   const safeAppVersion =
     typeof appVersion === "string" && appVersion.trim().length > 0
       ? appVersion.trim().slice(0, 50)
       : undefined;
 
-  if (type !== "docs" && !safeAppVersion) {
+  if (type !== "docs" && type !== "feature" && !safeAppVersion) {
     return new Response(
       JSON.stringify({ error: "Missing required field: appVersion" }),
       { status: 400, headers: { "Content-Type": "application/json" } },
@@ -222,7 +227,7 @@ export const POST: APIRoute = async ({ request, clientAddress }) => {
         ? "### 建议内容 / Proposal"
         : null,
     type === "bug" || type === "feature" ? "" : null,
-    description,
+    safeDescription || "_(no description)_",
     "",
     "---",
     "",

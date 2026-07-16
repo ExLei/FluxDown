@@ -63,8 +63,13 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
   const [errorMsg, setErrorMsg] = useState("");
   const [environment] = useState(detectEnvironment);
 
+  // 功能建议只需要一句标题就值得提交；描述与版本号仅对 bug/其他反馈必填。
+  const requiresDetail = form.type !== "feature";
+
   const handleSubmit = useCallback(async () => {
-    if (!form.title.trim() || !form.description.trim() || !form.appVersion.trim()) return;
+    if (!form.title.trim()) return;
+    if (requiresDetail && (!form.description.trim() || !form.appVersion.trim()))
+      return;
 
     setStatus("submitting");
     setErrorMsg("");
@@ -76,8 +81,8 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
         body: JSON.stringify({
           type: form.type,
           title: form.title.trim(),
-          description: form.description.trim(),
-          appVersion: form.appVersion.trim(),
+          description: form.description.trim() || undefined,
+          appVersion: form.appVersion.trim() || undefined,
           contact: form.contact.trim() || undefined,
           environment: environment || undefined,
         }),
@@ -106,12 +111,13 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
       setStatus("error");
       setErrorMsg(t("fb.submitError"));
     }
-  }, [form, t, onSuccess, environment]);
+  }, [form, requiresDetail, t, onSuccess, environment]);
 
   const canSubmit =
     form.title.trim().length > 0 &&
-    form.description.trim().length > 0 &&
-    form.appVersion.trim().length > 0 &&
+    (!requiresDetail ||
+      (form.description.trim().length > 0 &&
+        form.appVersion.trim().length > 0)) &&
     status !== "submitting";
 
   return (
@@ -200,7 +206,12 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
             {/* Description */}
             <div className="mb-5">
               <label htmlFor="fb-desc" className="block text-sm font-medium text-dark-text mb-2">
-                {t("fb.descLabel")} <span className="text-danger">*</span>
+                {t("fb.descLabel")}{" "}
+                {requiresDetail ? (
+                  <span className="text-danger">*</span>
+                ) : (
+                  <span className="text-dark-text-muted font-normal ml-0.5">({t("fb.optional")})</span>
+                )}
               </label>
               <textarea
                 id="fb-desc"
@@ -214,10 +225,15 @@ export default function FeedbackSection({ onSuccess }: FeedbackSectionProps) {
               <p className="mt-1 text-[10px] text-dark-text-muted text-right">{form.description.length}/5000</p>
             </div>
 
-            {/* App Version (required) */}
+            {/* App Version (required for bug/other, optional for feature) */}
             <div className="mb-5">
               <label htmlFor="fb-version" className="block text-sm font-medium text-dark-text mb-2">
-                {t("fb.versionLabel")} <span className="text-danger">*</span>
+                {t("fb.versionLabel")}{" "}
+                {requiresDetail ? (
+                  <span className="text-danger">*</span>
+                ) : (
+                  <span className="text-dark-text-muted font-normal ml-0.5">({t("fb.optional")})</span>
+                )}
               </label>
               <input
                 id="fb-version"
