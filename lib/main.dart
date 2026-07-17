@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:launch_at_startup/launch_at_startup.dart';
 import 'package:rinf/rinf.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
+import 'src/widgets/flux_sonner.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import 'src/bindings/bindings.dart';
@@ -992,7 +993,7 @@ class _FluxDownAppState extends State<FluxDownApp>
                 color: theme.colorScheme.foreground,
               ),
               child: ShadToaster(
-                child: ShadSonner(
+                child: FluxSonner(
                   child: ExcludeSemantics(
                     child: WidgetsApp(
                       navigatorKey: _navigatorKey,

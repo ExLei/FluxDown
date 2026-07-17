@@ -3,10 +3,11 @@
 // 面板本地功能；已登录展示资料卡 + 设备列表 + 云服务器地址。
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, Check, ChevronRight, Cloud, Monitor, Pencil, Search, Smartphone, Trash2, X } from 'lucide-react'
-import { type FormEvent, useEffect, useMemo, useState } from 'react'
+import { ArrowLeft, Check, ChevronRight, Cloud, Copy, Monitor, Pencil, Search, Smartphone, Trash2, X } from 'lucide-react'
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { cn } from '../../lib/cn'
 import { cloudApi, getCloudBaseUrl, isCloudBaseUrlCustom, resetCloudBaseUrl, setCloudBaseUrl } from '../../lib/cloud/client'
+import { suggest } from '../../lib/cloud/nickname'
 import { applyCloudSession, clearCloudSession, cloudDeviceId, getCloudRefreshToken, useCloudSession } from '../../lib/cloud/session'
 import { CloudApiError, type CloudDevice } from '../../lib/cloud/types'
 import { confirmDialog } from '../../lib/confirm'
@@ -225,6 +226,11 @@ function VerificationCodeStep({
 type LoginStep = 'form' | 'codeVerify' | 'deviceVerify'
 type LoginTab = 'code' | 'password'
 
+/** 纯数字视为 Origin ID；预填注册邮箱框时排除（注册接口仅认邮箱，见契约 v1.2）。 */
+function looksLikeOriginId(v: string): boolean {
+  return /^\d+$/.test(v.trim())
+}
+
 function LoginCard({
   onSwitchToRegister,
   onRegistrationIncomplete,
@@ -232,10 +238,10 @@ function LoginCard({
   onSwitchToRegister: (email: string) => void
   onRegistrationIncomplete: (email: string, password: string) => void
 }) {
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
   const [tab, setTab] = useState<LoginTab>('code')
   const [step, setStep] = useState<LoginStep>('form')
-  const [email, setEmail] = useState('')
+  const [account, setAccount] = useState('')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
   const [ttl, setTtl] = useState(0)
@@ -244,7 +250,7 @@ function LoginCard({
   const [busy, setBusy] = useState(false)
 
   async function sendLoginCode() {
-    const e = email.trim()
+    const e = account.trim()
     if (!e) return
     setBusy(true)
     setError('')
@@ -261,12 +267,14 @@ function LoginCard({
   }
 
   async function submitCodeLogin() {
-    const e = email.trim()
+    const e = account.trim()
     if (!e || !code.trim()) return
     setBusy(true)
     setError('')
     try {
-      const auth = await cloudApi.codeVerify(e, code.trim())
+      // 邮箱不存在时命中自动注册，恒传建议昵称（服务端仅在自动注册新用户时采用，
+      // 已存在用户忽略该字段，恒传安全）。
+      const auth = await cloudApi.codeVerify(e, code.trim(), suggest(locale))
       applyCloudSession(auth)
     } catch (err) {
       setError(cloudErrorText(t, err))
@@ -276,7 +284,7 @@ function LoginCard({
   }
 
   async function performLogin() {
-    const e = email.trim()
+    const e = account.trim()
     if (!e || !password) return
     setBusy(true)
     setError('')
@@ -291,7 +299,7 @@ function LoginCard({
       setStep('deviceVerify')
     } catch (err) {
       if (err instanceof CloudApiError && err.code === 'registration_incomplete') {
-        onRegistrationIncomplete(e, password)
+        onRegistrationIncomplete(looksLikeOriginId(e) ? '' : e, password)
         return
       }
       setError(cloudErrorText(t, err))
@@ -305,7 +313,7 @@ function LoginCard({
     setBusy(true)
     setError('')
     try {
-      const auth = await cloudApi.loginVerify(email.trim(), password, code.trim())
+      const auth = await cloudApi.loginVerify(account.trim(), password, code.trim())
       applyCloudSession(auth)
     } catch (err) {
       setError(cloudErrorText(t, err))
@@ -324,9 +332,11 @@ function LoginCard({
   const headTitle = step === 'deviceVerify' ? t('cloud.deviceVerifyTitle') : step === 'codeVerify' ? t('cloud.loginTabCode') : t('cloud.loginTitle')
   const headSubtitle =
     step === 'deviceVerify'
-      ? t('cloud.deviceVerifySubtitle', { email: email.trim() })
+      ? looksLikeOriginId(account)
+        ? t('cloud.deviceVerifySubtitleAccount')
+        : t('cloud.deviceVerifySubtitle', { email: account.trim() })
       : step === 'codeVerify'
-        ? t('cloud.codeLoginSubtitle', { email: email.trim() })
+        ? t('cloud.codeLoginSubtitle', { email: account.trim() })
         : t('cloud.loginSubtitle')
 
   return (
@@ -396,17 +406,18 @@ function LoginCard({
             }}
           >
             <label className="field-label" style={{ marginTop: 0 }}>
-              {t('cloud.emailPlaceholder')}
+              {useCode ? t('cloud.emailPlaceholder') : t('cloud.accountPlaceholder')}
             </label>
             <input
               className="text-input"
-              type="email"
+              type={useCode ? 'email' : 'text'}
               required
               spellCheck={false}
-              placeholder={t('cloud.emailPlaceholder')}
-              value={email}
+              autoComplete="username"
+              placeholder={useCode ? t('cloud.emailPlaceholder') : t('cloud.accountPlaceholder')}
+              value={account}
               disabled={busy}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => setAccount(e.target.value)}
             />
             {useCode ? null : (
               <>
@@ -428,7 +439,7 @@ function LoginCard({
             </button>
             <p className="mt-4 text-center text-[11.5px] text-text3">
               {t('cloud.noAccountYet')}{' '}
-              <button type="button" className="link-btn" onClick={() => onSwitchToRegister(email.trim())}>
+              <button type="button" className="link-btn" onClick={() => onSwitchToRegister(looksLikeOriginId(account) ? '' : account.trim())}>
                 {t('cloud.register')}
               </button>
             </p>
@@ -456,11 +467,13 @@ function RegisterCard({
   incomplete: boolean
   onSwitchToLogin: () => void
 }) {
-  const { t } = useI18n()
+  const { t, locale } = useI18n()
   const [step, setStep] = useState<RegisterStep>('form')
   const [email, setEmail] = useState(initialEmail)
   const [password, setPassword] = useState(initialPassword)
-  const [nickname, setNickname] = useState('')
+  // 预填「形容词+动物」建议昵称（情绪触点前置，见 lib/cloud/nickname.ts）；
+  // 用户可改可清空，清空后不自动重填，仅提交前静默兜底（见 doRegister）。
+  const [nickname, setNickname] = useState(() => suggest(locale))
   const [code, setCode] = useState('')
   const [ttl, setTtl] = useState(0)
   const [sentAt, setSentAt] = useState(0)
@@ -470,8 +483,11 @@ function RegisterCard({
   async function doRegister() {
     setBusy(true)
     setError('')
+    // 提交前若昵称被清空，静默重新建议一个，保证非空且不打断用户操作。
+    const finalNickname = nickname.trim() || suggest(locale)
+    if (finalNickname !== nickname) setNickname(finalNickname)
     try {
-      const res = await cloudApi.register(email.trim(), password, nickname)
+      const res = await cloudApi.register(email.trim(), password, finalNickname)
       setTtl(res.ttlSeconds)
       setSentAt(Date.now())
       setStep('verify')
@@ -562,14 +578,28 @@ function RegisterCard({
           />
           <p className="mt-1 text-[11px] text-text3">{t('cloud.passwordHint')}</p>
           <label className="field-label">{t('cloud.nicknamePlaceholder')}</label>
-          <input
-            className="text-input"
-            type="text"
-            placeholder={t('cloud.nicknamePlaceholder')}
-            value={nickname}
-            disabled={busy}
-            onChange={(e) => setNickname(e.target.value)}
-          />
+          <div className="flex items-center gap-2">
+            <input
+              className="text-input flex-1"
+              type="text"
+              placeholder={t('cloud.nicknamePlaceholder')}
+              value={nickname}
+              disabled={busy}
+              onChange={(e) => setNickname(e.target.value)}
+            />
+            <button
+              type="button"
+              className="icon-btn flex-shrink-0"
+              disabled={busy}
+              title={t('cloud.nicknameReroll')}
+              aria-label={t('cloud.nicknameReroll')}
+              onClick={() => setNickname(suggest(locale))}
+            >
+              <span aria-hidden="true" className="text-[15px] leading-none">
+                🎲
+              </span>
+            </button>
+          </div>
           {error ? <p className="mt-2 text-[12px] text-danger">{error}</p> : null}
           <button type="submit" className="btn primary block mt-5" disabled={busy}>
             {busy ? t('common.loading') : t('cloud.register')}
@@ -590,7 +620,7 @@ function RegisterCard({
 // 已登录：资料卡 + 设备列表
 // ---------------------------------------------------------------------------
 
-function LoggedInPanel({ user }: { user: { nickname: string; email: string; plan: string } }) {
+function LoggedInPanel({ user }: { user: { nickname: string; email: string; plan: string; originId: number | null } }) {
   const { t } = useI18n()
   const [loggingOut, setLoggingOut] = useState(false)
   const displayName = user.nickname || user.email.split('@')[0]
@@ -612,22 +642,59 @@ function LoggedInPanel({ user }: { user: { nickname: string; email: string; plan
     <>
       <div className="set-group">
         <div className="flex items-center gap-3 p-4">
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2">
-              <b className="text-[14px] font-semibold">{displayName}</b>
-              {user.plan ? (
-                <span className="rounded-full bg-accent-weak px-2 py-0.5 text-[10.5px] font-semibold text-accent">{user.plan}</span>
-              ) : null}
-            </div>
-            <p className="mt-0.5 text-[12px] text-text3">{user.email}</p>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+            <b className="text-[14px] font-semibold">{displayName}</b>
+            {user.plan ? (
+              <span className="rounded-full bg-accent-weak px-2 py-0.5 text-[10.5px] font-semibold text-accent">{user.plan}</span>
+            ) : null}
+            <OriginIdBadge originId={user.originId} />
           </div>
           <button type="button" className="btn ghost sm flex-shrink-0" disabled={loggingOut} onClick={() => void logout()}>
             {t('common.logout')}
           </button>
         </div>
       </div>
+      <p className="mb-1 mt-6 text-[12.5px] font-semibold text-text2">{t('cloud.securityTitle')}</p>
+      <p className="set-desc" style={{ marginBottom: 10 }}>
+        {t('cloud.securityDesc')}
+      </p>
+      <div className="set-group">
+        <SetRow title={t('cloud.emailLabel')}>
+          <span className="min-w-0 flex-shrink truncate text-[12.5px] text-text2">{user.email}</span>
+        </SetRow>
+      </div>
       <DeviceListSection />
     </>
+  )
+}
+
+/** Origin ID 徽标：胶囊 pill（accent 弱底、圆角、tabular-nums），点击复制纯数字
+ *  （clipboard API 不可用/被拒时静默降级，不阻断其它交互）。null（pending 用户）兜底
+ *  显示 #— 且不可点。颜色走 design.css .origin-badge（unlayered，显式声明背景/颜色
+ *  才压得过下方全局 button 重置，Tailwind 工具类在这个元素上不生效，同 .link-btn 注释）。 */
+function OriginIdBadge({ originId }: { originId: number | null }) {
+  const { t } = useI18n()
+  const [copied, setCopied] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+
+  async function copy() {
+    if (originId == null) return
+    try {
+      await navigator.clipboard.writeText(String(originId))
+      setCopied(true)
+      window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // 剪贴板 API 不可用（非安全上下文 / 权限被拒等），静默降级，不阻断其它交互
+    }
+  }
+
+  return (
+    <button type="button" className="origin-badge flex-shrink-0" disabled={originId == null} onClick={() => void copy()} title={t('cloud.originId')}>
+      <span>#{originId == null ? '—' : originId}</span>
+      {originId != null ? copied ? <Check size={11} /> : <Copy size={11} /> : null}
+    </button>
   )
 }
 

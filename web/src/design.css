@@ -113,6 +113,20 @@ svg { display: block; }
 .link-btn:hover { text-decoration: underline; }
 .link-btn:disabled { color: var(--text3); cursor: not-allowed; text-decoration: none; }
 
+/* Origin ID 徽标（资料卡 meta 行）：胶囊 pill，同 .link-btn 注释——unlayered，显式声明
+   背景/颜色才压得过下方全局 button 重置。disabled 态（pending 用户，originId 为空）
+   降级为中性灰底，不可点。 */
+.origin-badge {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 2.5px 9px; border-radius: 999px;
+  background: var(--accent-weak); color: var(--accent);
+  font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+  transition: filter .15s;
+}
+.origin-badge svg { width: 11px; height: 11px; }
+.origin-badge:hover:not(:disabled) { filter: brightness(1.08); }
+.origin-badge:disabled { background: var(--surface2); color: var(--text3); cursor: default; }
+
 /* 等宽分段控件（验证码/密码登录 Tab 等）：对齐 .day-chip 的实心 pill 语言。 */
 .seg-tabs { display: flex; gap: 2px; padding: 3px; background: var(--surface2); border-radius: 9px; }
 .seg-tab { flex: 1; padding: 7px 0; border-radius: 7px; font-size: 12.5px; font-weight: 500; color: var(--text3); text-align: center; transition: all .15s; }

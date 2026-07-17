@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rinf/rinf.dart';
 import 'package:shadcn_ui/shadcn_ui.dart';
+import '../widgets/flux_sonner.dart';
 import '../../main.dart';
 import '../bindings/bindings.dart';
 import '../i18n/locale_provider.dart';
@@ -25,7 +26,9 @@ import '../models/ua_presets.dart';
 import '../services/app_icon_service.dart';
 import '../services/cloud/cloud_auth_service.dart';
 import '../services/cloud/cloud_client.dart';
+import '../services/cloud/config_sync_service.dart';
 import '../services/cloud/cloud_models.dart';
+import '../services/cloud/nickname_pool.dart';
 import '../services/floating_ball/floating_ball_service.dart';
 import '../services/log_service.dart';
 import '../services/update_service.dart';
@@ -2729,7 +2732,7 @@ class _AppIconSelectorState extends State<_AppIconSelector> {
     } catch (e, stack) {
       logError('AppIconSelector', 'failed to apply custom icon', e, stack);
       if (mounted) {
-        ShadSonner.of(context).show(
+        FluxSonner.of(context).show(
           ShadToast.destructive(
             title: Text(LocaleScope.of(context).appIconApplyFailed),
             description: Text(e.toString()),
@@ -3361,7 +3364,7 @@ class _SaveDirPickerState extends State<_SaveDirPicker> {
       FilePickerFailReason.nativeDialogFailed => s.filePickerErrorNative,
       FilePickerFailReason.unknown => s.filePickerErrorGeneric,
     };
-    ShadSonner.of(context).show(ShadToast.destructive(title: Text(message)));
+    FluxSonner.of(context).show(ShadToast.destructive(title: Text(message)));
   }
 
   @override
@@ -3449,7 +3452,7 @@ class _ConnPolicyClearButtonState extends State<_ConnPolicyClearButton> {
           enabled: count > 0,
           onPressed: () {
             widget.settingsProvider.clearDomainConnCaps();
-            ShadSonner.of(
+            FluxSonner.of(
               context,
             ).show(ShadToast(title: Text(s.connPolicyCacheCleared)));
           },
@@ -4527,7 +4530,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
     final value = int.tryParse(_portController.text.trim());
     if (value == null || value < 1024 || value > 65535) {
       setState(() => _portController.text = sp.localServerPort.toString());
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast.destructive(
           title: Text(LocaleScope.of(context).apiServicePortInvalid),
         ),
@@ -4563,7 +4566,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
       ClipboardData(text: widget.settingsProvider.localServerToken),
     );
     if (!mounted) return;
-    ShadSonner.of(context).show(
+    FluxSonner.of(context).show(
       ShadToast(
         title: Text(LocaleScope.of(context).apiServiceCopied),
         duration: const Duration(seconds: 2),
@@ -4574,7 +4577,7 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
   void _clearToken() {
     widget.settingsProvider.clearLocalServerToken();
     if (!mounted) return;
-    ShadSonner.of(context).show(
+    FluxSonner.of(context).show(
       ShadToast(
         title: Text(LocaleScope.of(context).apiServiceTokenCleared),
         duration: const Duration(seconds: 2),
@@ -4896,7 +4899,7 @@ class _ApiSubFeatureCard extends StatelessWidget {
   Future<void> _copyAddress(BuildContext context) async {
     await Clipboard.setData(ClipboardData(text: address));
     if (!context.mounted) return;
-    ShadSonner.of(context).show(
+    FluxSonner.of(context).show(
       ShadToast(
         title: Text(LocaleScope.of(context).apiServiceCopied),
         duration: const Duration(seconds: 2),
@@ -5003,7 +5006,7 @@ class _CopyUserscriptButton extends StatelessWidget {
       final script = await rootBundle.loadString('userscript/fluxdown.user.js');
       await Clipboard.setData(ClipboardData(text: script));
       if (!context.mounted) return;
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast(
           title: Text(s.apiServiceScriptCopied),
           duration: const Duration(seconds: 3),
@@ -5011,7 +5014,7 @@ class _CopyUserscriptButton extends StatelessWidget {
       );
     } catch (e) {
       if (!context.mounted) return;
-      ShadSonner.of(
+      FluxSonner.of(
         context,
       ).show(ShadToast.destructive(title: Text('Error: $e')));
     }
@@ -5130,7 +5133,7 @@ class _ComponentsContentState extends State<_ComponentsContent> {
     final isUninstall = _pendingOp == 'uninstall';
     final name = _title(s);
     if (ok) {
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast(
           title: Text(
             isUninstall
@@ -5142,7 +5145,7 @@ class _ComponentsContentState extends State<_ComponentsContent> {
       );
       return;
     }
-    ShadSonner.of(context).show(
+    FluxSonner.of(context).show(
       ShadToast.destructive(
         title: Text(
           isUninstall
@@ -7204,7 +7207,7 @@ class _ThemeActions extends StatelessWidget {
         FilePickerFailReason.nativeDialogFailed => s.filePickerErrorNative,
         FilePickerFailReason.unknown => s.filePickerErrorGeneric,
       };
-      ShadSonner.of(context).show(ShadToast.destructive(title: Text(msg)));
+      FluxSonner.of(context).show(ShadToast.destructive(title: Text(msg)));
       return;
     }
     if (result == null || result.isEmpty) return;
@@ -7229,7 +7232,7 @@ class _ThemeActions extends StatelessWidget {
     if (!context.mounted) return;
 
     if (successCount > 0) {
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast(
           title: Text('${s.themeImportSuccess} ($successCount)'),
           duration: const Duration(seconds: 2),
@@ -7237,7 +7240,7 @@ class _ThemeActions extends StatelessWidget {
       );
     }
     if (errors.isNotEmpty) {
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast.destructive(
           title: Text(s.themeImportError),
           description: Text(errors.join('\n')),
@@ -7273,7 +7276,7 @@ class _ThemeActions extends StatelessWidget {
         FilePickerFailReason.nativeDialogFailed => s.filePickerErrorNative,
         FilePickerFailReason.unknown => s.filePickerErrorGeneric,
       };
-      ShadSonner.of(context).show(ShadToast.destructive(title: Text(msg)));
+      FluxSonner.of(context).show(ShadToast.destructive(title: Text(msg)));
       return;
     }
     if (result == null) return;
@@ -7281,7 +7284,7 @@ class _ThemeActions extends StatelessWidget {
     try {
       await File(result).writeAsString(json);
       if (!context.mounted) return;
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast(
           title: Text(s.themeExportSuccess),
           duration: const Duration(seconds: 2),
@@ -7289,7 +7292,7 @@ class _ThemeActions extends StatelessWidget {
       );
     } catch (e) {
       if (!context.mounted) return;
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast.destructive(
           title: Text(s.themeImportError),
           description: Text(e.toString()),
@@ -8503,7 +8506,7 @@ class _AboutContent extends StatelessWidget {
       builder: (context, _) {
         final svc = UpdateService.instance;
         return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // App info card
             _SettingCard(
@@ -8758,7 +8761,7 @@ class _AboutContent extends StatelessWidget {
                 size: ShadButtonSize.sm,
                 onPressed: () {
                   if (svc.downloadUpdateViaTask()) {
-                    ShadSonner.of(context).show(
+                    FluxSonner.of(context).show(
                       ShadToast(
                         title: Text(s.updateFallbackTaskCreated),
                         duration: const Duration(seconds: 3),
@@ -9056,14 +9059,14 @@ class _LogExportCardState extends State<_LogExportCard> {
       final count = await LogService.instance.exportLogs(savePath);
       if (!mounted) return;
       if (count > 0) {
-        ShadSonner.of(context).show(
+        FluxSonner.of(context).show(
           ShadToast(
             title: Text(s.logExportSuccess(count)),
             duration: const Duration(seconds: 3),
           ),
         );
       } else {
-        ShadSonner.of(context).show(
+        FluxSonner.of(context).show(
           ShadToast(
             title: Text(s.logExportEmpty),
             duration: const Duration(seconds: 2),
@@ -9072,7 +9075,7 @@ class _LogExportCardState extends State<_LogExportCard> {
       }
     } catch (e) {
       if (mounted) {
-        ShadSonner.of(context).show(
+        FluxSonner.of(context).show(
           ShadToast.destructive(
             title: Text(LocaleScope.of(context).logExportFailed),
             description: Text(e.toString()),
@@ -9223,7 +9226,30 @@ class _AccountContent extends StatefulWidget {
   State<_AccountContent> createState() => _AccountContentState();
 }
 
+/// 本次 App 会话内是否已触发过账户 section 的 /me 静默刷新——避免每次切换到
+/// 「账户」分类（State 会随分类切换重建）都重复请求，只需登录后首次进入刷新一次。
+bool _cloudProfileRefreshedThisSession = false;
+
 class _AccountContentState extends State<_AccountContent> {
+  @override
+  void initState() {
+    super.initState();
+    // 修正登录会话恢复时的旧快照（如 originId 在 kv 缓存里仍是注册前的 null）；
+    // 静默刷新，失败只记日志不打扰 UI。
+    if (!_cloudProfileRefreshedThisSession && CloudAuthService.instance.isLoggedIn) {
+      _cloudProfileRefreshedThisSession = true;
+      unawaited(_silentRefreshProfile());
+    }
+  }
+
+  Future<void> _silentRefreshProfile() async {
+    try {
+      await CloudAuthService.instance.refreshProfile();
+    } catch (e, stack) {
+      logError('CloudAuth', 'silent /me refresh on account page failed', e, stack);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     // 居中窄栏排版：账户是低频页面，内容少，铺满整宽会显得空旷。
@@ -9244,10 +9270,59 @@ class _AccountContentState extends State<_AccountContent> {
               children: [
                 _AccountCard(
                   child: loggedIn && user != null
-                      ? _profileBody(s, c, user)
+                      ? _profileBody(context, s, c, user)
                       : _heroBody(context, s, c),
                 ),
-                if (loggedIn) ...[
+                if (loggedIn && user != null) ...[
+                  const SizedBox(height: 20),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 4, bottom: 6),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          s.accountSecurityGroup,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w600,
+                            color: c.textSecondary,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          s.accountSecurityGroupDesc,
+                          style: TextStyle(fontSize: 11, color: c.textMuted),
+                        ),
+                      ],
+                    ),
+                  ),
+                  _AccountCard(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    child: Row(
+                      children: [
+                        Text(
+                          s.accountEmailPlaceholder,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w500,
+                            color: c.textPrimary,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        // 邮箱值右对齐：Expanded 占满剩余宽度，内部 Align 居右，超长省略号截断。
+                        Expanded(
+                          child: Align(
+                            alignment: Alignment.centerRight,
+                            child: Text(
+                              user.email,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12.5, color: c.textMuted),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                   const SizedBox(height: 20),
                   const _DeviceListSection(),
                 ],
@@ -9283,13 +9358,7 @@ class _AccountContentState extends State<_AccountContent> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      _featureRow(
-                        context,
-                        LucideIcons.refreshCw,
-                        s.accountFeatureConfigSync,
-                        s.accountFeatureConfigSyncDesc,
-                        badge: s.accountComingSoon,
-                      ),
+                      _configSyncRow(context),
                       _accountDivider(context),
                       _featureRow(
                         context,
@@ -9357,54 +9426,91 @@ class _AccountContentState extends State<_AccountContent> {
     );
   }
 
-  /// 已登录：昵称/套餐 chip 与邮箱左对齐纵向排布，退出按钮靠右（无头像展示）。
-  Widget _profileBody(S s, AppColors c, CloudUser user) {
+  /// 已登录：单行纯身份 —— 左侧集群（昵称 + 套餐 chip + Origin ID 胶囊徽章，可点复制）
+  /// 与右侧退出登录按钮同基线；左侧集群整体用 Expanded 独占剩余宽度撑开，
+  /// 按钮贴右对齐（避免 Flexible+Spacer 同行均分弹性空间的坑）。
+  /// 邮箱不在此展示——移至下方「账号与安全」分组（见 _AccountContentState.build）。
+  Widget _profileBody(BuildContext context, S s, AppColors c, CloudUser user) {
     final displayName =
         user.nickname.isNotEmpty ? user.nickname : user.email.split('@').first;
+    final hasOriginId = user.originId != null;
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
       children: [
+        // 左侧集群必须用 Expanded 独占剩余宽度：若 Flexible(昵称) 与 Spacer 并存，
+        // 两者会均分弹性空间，昵称用不完的配额不归还，在按钮右侧留下大块空白。
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Row(
             children: [
-              Row(
-                children: [
-                  Flexible(
-                    child: Text(
-                      displayName,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 14.5,
-                        fontWeight: FontWeight.w600,
-                        color: c.textPrimary,
+              Flexible(
+                child: Text(
+                  displayName,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w600,
+                    color: c.textPrimary,
+                  ),
+                ),
+              ),
+              if (user.plan.isNotEmpty) ...[
+                const SizedBox(width: 8),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: c.accent.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(
+                    user.plan,
+                    style: TextStyle(
+                      fontSize: 10,
+                      fontWeight: FontWeight.w600,
+                      color: c.accent,
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(width: 8),
+              // Origin ID 胶囊徽章：类 QQ 号的唯一数字身份，理论上登录态不会为 null
+              // （防御兜底灰色 "#—"，不可点）；中英文显示名统一 "Origin ID"，见契约。
+              ShadTooltip(
+                builder: (_) => const Text('Origin ID'),
+                child: MouseRegion(
+                  cursor: hasOriginId ? SystemMouseCursors.click : MouseCursor.defer,
+                  child: GestureDetector(
+                    onTap: hasOriginId
+                        ? () => unawaited(_copyOriginId(context, user.originId!))
+                        : null,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: (hasOriginId ? c.accent : c.textMuted).withValues(
+                          alpha: 0.12,
+                        ),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            hasOriginId ? '#${user.originId}' : '#—',
+                            style: TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              fontFeatures: const [FontFeature.tabularFigures()],
+                              color: hasOriginId ? c.accent : c.textMuted,
+                            ),
+                          ),
+                          if (hasOriginId) ...[
+                            const SizedBox(width: 3),
+                            Icon(LucideIcons.copy, size: 10, color: c.accent),
+                          ],
+                        ],
                       ),
                     ),
                   ),
-                  if (user.plan.isNotEmpty) ...[
-                    const SizedBox(width: 8),
-                    Container(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: c.accent.withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Text(
-                        user.plan,
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
-                          color: c.accent,
-                        ),
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 3),
-              Text(
-                user.email,
-                style: TextStyle(fontSize: 12, color: c.textMuted),
+                ),
               ),
             ],
           ),
@@ -9416,6 +9522,17 @@ class _AccountContentState extends State<_AccountContent> {
           child: Text(s.accountLogout),
         ),
       ],
+    );
+  }
+
+  Future<void> _copyOriginId(BuildContext context, int originId) async {
+    await Clipboard.setData(ClipboardData(text: originId.toString()));
+    if (!context.mounted) return;
+    FluxSonner.of(context).show(
+      ShadToast(
+        title: Text(LocaleScope.of(context).accountOriginIdCopied),
+        duration: const Duration(seconds: 2),
+      ),
     );
   }
 }
@@ -9513,6 +9630,126 @@ Widget _featureRow(
       ],
     ),
   );
+}
+
+/// 配置同步行：图标 + 名称/说明 + 开关（顶部），下方状态文案 + 「立即同步」
+/// 按钮（底部）。替代原「即将推出」占位（[_featureRow] + accountFeatureConfigSync），
+/// 经 [ConfigSyncService] 单例展示实时状态。
+Widget _configSyncRow(BuildContext context) {
+  return ListenableBuilder(
+    listenable: ConfigSyncService.instance,
+    builder: (context, _) {
+      final s = LocaleScope.of(context);
+      final c = AppColors.of(context);
+      final sync = ConfigSyncService.instance;
+      final busy =
+          sync.status == CloudSyncStatus.connecting ||
+          sync.status == CloudSyncStatus.syncing;
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 30,
+                  height: 30,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: c.surface2,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Icon(LucideIcons.refreshCw, size: 15, color: c.textSecondary),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        s.cloudSyncTitle,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                          color: c.textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        s.cloudSyncDesc,
+                        style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                ShadSwitch(
+                  value: sync.enabled,
+                  onChanged: (v) => unawaited(sync.setEnabled(v)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                _cloudSyncStatusIcon(c, sync.status, busy),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    _cloudSyncStatusText(s, sync),
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ShadButton.outline(
+                  size: ShadButtonSize.sm,
+                  enabled: sync.enabled && !busy,
+                  onPressed: () => unawaited(sync.syncNow()),
+                  child: Text(s.cloudSyncNow),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    },
+  );
+}
+
+/// 状态图标：连接中/同步中用小圆环转圈（同 Tracker/ED2K 订阅刷新中的既有惯例），
+/// 其余状态用静态图标 + 语义色。
+Widget _cloudSyncStatusIcon(AppColors c, CloudSyncStatus status, bool busy) {
+  if (busy) {
+    return SizedBox(
+      width: 12,
+      height: 12,
+      child: CircularProgressIndicator(strokeWidth: 2, color: c.textSecondary),
+    );
+  }
+  final (icon, color) = switch (status) {
+    CloudSyncStatus.synced => (LucideIcons.cloudCheck, c.statusSuccess),
+    CloudSyncStatus.error => (LucideIcons.cloudAlert, c.statusError),
+    _ => (LucideIcons.cloudOff, c.textMuted),
+  };
+  return Icon(icon, size: 13, color: color);
+}
+
+/// 状态文案：已同步态附带相对时间（复用 [_relativeDeviceTime]，同设备"最近活跃"格式）。
+String _cloudSyncStatusText(S s, ConfigSyncService sync) {
+  final base = switch (sync.status) {
+    CloudSyncStatus.disabled => s.cloudSyncStatusDisabled,
+    CloudSyncStatus.connecting => s.cloudSyncStatusConnecting,
+    CloudSyncStatus.syncing => s.cloudSyncStatusSyncing,
+    CloudSyncStatus.synced => s.cloudSyncStatusSynced,
+    CloudSyncStatus.error => s.cloudSyncStatusError(sync.lastError ?? ''),
+  };
+  final lastSyncAt = sync.lastSyncAt;
+  if (sync.status == CloudSyncStatus.synced && lastSyncAt != null) {
+    return '$base · ${_relativeDeviceTime(lastSyncAt.toIso8601String())}';
+  }
+  return base;
 }
 
 /// 已知服务端错误 code → 本地化文案；未识别的 code 回退服务端原文 message。
@@ -9615,7 +9852,7 @@ class _ServerAddressCardState extends State<_ServerAddressCard> {
     if (!valid) {
       setState(() => _controller.text = CloudApiConfig.baseUrl);
       if (!mounted) return;
-      ShadSonner.of(context).show(
+      FluxSonner.of(context).show(
         ShadToast.destructive(title: Text(s.accountServerAddressInvalid)),
       );
       return;
@@ -9623,7 +9860,7 @@ class _ServerAddressCardState extends State<_ServerAddressCard> {
     await CloudApiConfig.setBaseUrl(value);
     if (!mounted) return;
     setState(() {});
-    ShadSonner.of(context).show(
+    FluxSonner.of(context).show(
       ShadToast(
         title: Text(s.accountServerAddressSaved),
         duration: const Duration(seconds: 2),
@@ -10282,7 +10519,7 @@ class _DeviceDetailDialogState extends State<_DeviceDetailDialog> {
     final s = LocaleScope.of(context);
     await Clipboard.setData(ClipboardData(text: _device.deviceId));
     if (!mounted) return;
-    ShadSonner.of(context).show(
+    FluxSonner.of(context).show(
       ShadToast(
         title: Text(s.apiServiceCopied),
         duration: const Duration(seconds: 2),
@@ -10791,7 +11028,7 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
   _LoginTab _tab = _LoginTab.code;
   _LoginStep _step = _LoginStep.form;
 
-  final _emailController = TextEditingController();
+  final _accountController = TextEditingController();
   final _passwordController = TextEditingController();
   final _codeController = TextEditingController();
 
@@ -10806,13 +11043,20 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
   @override
   void dispose() {
     _timer?.cancel();
-    _emailController.dispose();
+    _accountController.dispose();
     _passwordController.dispose();
     _codeController.dispose();
     super.dispose();
   }
 
-  String get _email => _emailController.text.trim();
+  /// 账号输入：验证码 tab 语义为邮箱；密码 tab（及新设备验证）接受邮箱或纯数字 Origin ID。
+  String get _account => _accountController.text.trim();
+
+  /// 纯数字视为 Origin ID 登录，本地不做邮箱格式校验（交由服务端判定）。
+  bool get _isNumericAccount => RegExp(r'^\d+$').hasMatch(_account);
+
+  /// 引导重注册预填邮箱：账号栏是号码时号码不是邮箱，预填留空。
+  String get _emailPrefillForRegister => _isNumericAccount ? '' : _account;
 
   void _startCountdown(int ttlSeconds) {
     _timer?.cancel();
@@ -10834,14 +11078,14 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
   }
 
   Future<void> _sendLoginCode() async {
-    if (_email.isEmpty) return;
+    if (_account.isEmpty) return;
     final s = LocaleScope.of(context);
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      final ttl = await CloudAuthService.instance.sendCode(_email);
+      final ttl = await CloudAuthService.instance.sendCode(_account);
       if (!mounted) return;
       setState(() {
         _busy = false;
@@ -10865,14 +11109,20 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
 
   Future<void> _submitCodeLogin() async {
     final code = _codeController.text.trim();
-    if (_email.isEmpty || code.isEmpty) return;
+    if (_account.isEmpty || code.isEmpty) return;
     final s = LocaleScope.of(context);
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await CloudAuthService.instance.verifyCode(email: _email, code: code);
+      await CloudAuthService.instance.verifyCode(
+        email: _account,
+        code: code,
+        // 邮箱不存在时会自动注册新用户，恒传默认昵称建议（服务端仅在该分支采用，
+        // 已存在用户忽略）；跟随当前界面语言，不固定中文。
+        nickname: NicknamePool.suggest(currentLocale.startsWith('zh')),
+      );
       if (!mounted) return;
       Navigator.of(context).pop();
     } on CloudApiException catch (e) {
@@ -10893,7 +11143,7 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
   /// 密码登录：既用于初次提交，也用于新设备验证步骤的"重新发送"
   /// （服务端 60s 限频外会重新发码，限频内仍返回 deviceVerificationRequired）。
   Future<void> _performLogin() async {
-    if (_email.isEmpty || _passwordController.text.isEmpty) return;
+    if (_account.isEmpty || _passwordController.text.isEmpty) return;
     final s = LocaleScope.of(context);
     setState(() {
       _busy = true;
@@ -10901,7 +11151,7 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
     });
     try {
       final result = await CloudAuthService.instance.login(
-        email: _email,
+        account: _account,
         password: _passwordController.text,
       );
       if (!mounted) return;
@@ -10918,7 +11168,7 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
     } on CloudApiException catch (e) {
       if (!mounted) return;
       if (_step == _LoginStep.form && e.code == 'registration_incomplete') {
-        final email = _email;
+        final email = _emailPrefillForRegister;
         final password = _passwordController.text;
         Navigator.of(context).pop();
         _showRegisterDialog(context, initialEmail: email, initialPassword: password);
@@ -10947,7 +11197,7 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
     });
     try {
       await CloudAuthService.instance.loginVerify(
-        email: _email,
+        account: _account,
         password: _passwordController.text,
         code: code,
       );
@@ -10978,7 +11228,11 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
         title: Text(s.accountDeviceVerifyTitle),
         constraints: const BoxConstraints(maxWidth: 400),
         child: _CodeVerifyForm(
-          subtitle: s.accountDeviceVerifySubtitle(_email),
+          // 号码登录命中新设备验证时，验证码仍发到账号绑定邮箱（服务端语义），
+          // 但客户端并不知道具体邮箱地址，退化为通用文案。
+          subtitle: _isNumericAccount
+              ? s.accountDeviceVerifySubtitleGeneric
+              : s.accountDeviceVerifySubtitle(_account),
           codeController: _codeController,
           ttlRemaining: _ttlRemaining,
           resendRemaining: _resendRemaining,
@@ -11059,10 +11313,13 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
           ),
           const SizedBox(height: 14),
           ShadInput(
-            controller: _emailController,
-            placeholder: Text(s.accountEmailPlaceholder),
+            controller: _accountController,
+            // 验证码 tab 只认邮箱；密码 tab 接受邮箱或纯数字 Origin ID。
+            placeholder: Text(
+              useCode ? s.accountEmailPlaceholder : s.accountLoginAccountPlaceholder,
+            ),
             enabled: !_busy,
-            keyboardType: TextInputType.emailAddress,
+            keyboardType: useCode ? TextInputType.emailAddress : TextInputType.text,
           ),
           const SizedBox(height: 10),
           if (useCode) ...[
@@ -11080,7 +11337,7 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
                 const SizedBox(width: 8),
                 ShadButton.outline(
                   size: ShadButtonSize.sm,
-                  enabled: !_busy && _email.isNotEmpty && _resendRemaining <= 0,
+                  enabled: !_busy && _account.isNotEmpty && _resendRemaining <= 0,
                   onPressed: _sendLoginCode,
                   child: Text(
                     _resendRemaining > 0 ? '${_resendRemaining}s' : s.accountSendCode,
@@ -11133,7 +11390,7 @@ class _LoginDialogContentState extends State<_LoginDialogContent> {
               ),
               ShadButton.link(
                 onPressed: () {
-                  final email = _email;
+                  final email = _emailPrefillForRegister;
                   Navigator.of(context).pop();
                   _showRegisterDialog(context, initialEmail: email);
                 },
@@ -11183,6 +11440,22 @@ class _RegisterDialogContentState extends State<_RegisterDialogContent> {
   int _resendRemaining = 0;
 
   @override
+  void initState() {
+    super.initState();
+    // 预填「盲盒兽名」默认昵称建议（跟随当前界面语言），情绪触点前置；
+    // 用户可改可清空，清空时提交前会静默重新生成（见 _register）。
+    _nicknameController.text = NicknamePool.suggest(currentLocale.startsWith('zh'));
+  }
+
+  /// 🎲 换一换：显式用户操作，重新随机生成一个「盲盒兽名」覆盖当前输入框
+  /// （不受“用户手改后不自动覆盖”限制——那条规则约束的是无操作触发的自动覆盖）。
+  void _rerollNickname() {
+    setState(() {
+      _nicknameController.text = NicknamePool.suggest(currentLocale.startsWith('zh'));
+    });
+  }
+
+  @override
   void dispose() {
     _timer?.cancel();
     _emailController.dispose();
@@ -11218,12 +11491,16 @@ class _RegisterDialogContentState extends State<_RegisterDialogContent> {
       _error = null;
     });
     try {
+      final nicknameInput = _nicknameController.text.trim();
+      // 预填建议被用户清空：提交前静默重新生成一个（跟随当前界面语言），
+      // 保证账户不会落到服务端默认名，不打断用户的提交操作。
+      final nickname = nicknameInput.isNotEmpty
+          ? nicknameInput
+          : NicknamePool.suggest(currentLocale.startsWith('zh'));
       final ttl = await CloudAuthService.instance.register(
         email: _emailController.text.trim(),
         password: _passwordController.text,
-        nickname: _nicknameController.text.trim().isEmpty
-            ? null
-            : _nicknameController.text.trim(),
+        nickname: nickname,
       );
       if (!mounted) return;
       setState(() {
@@ -11346,6 +11623,17 @@ class _RegisterDialogContentState extends State<_RegisterDialogContent> {
             placeholder: Text(s.accountNicknamePlaceholder),
             enabled: !_busy,
             onSubmitted: (_) => _submitForm(),
+            trailing: ShadTooltip(
+              builder: (_) => Text(s.accountNicknameReroll),
+              child: MouseRegion(
+                cursor: _busy ? MouseCursor.defer : SystemMouseCursors.click,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _busy ? null : _rerollNickname,
+                  child: Icon(LucideIcons.dices, size: 15, color: c.textMuted),
+                ),
+              ),
+            ),
           ),
           if (_error != null) ...[
             const SizedBox(height: 8),

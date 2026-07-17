@@ -10,6 +10,8 @@ export interface CloudUser {
   nickname: string
   plan: string
   status: CloudUserStatus
+  /** Origin ID(v1.2 新增):类 QQ 号唯一数字身份,从 10001 起严格递增;pending 用户为 null。 */
+  originId: number | null
   createdAt: string
   lastLoginAt?: string
 }

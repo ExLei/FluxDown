@@ -118,20 +118,27 @@ export const cloudApi = {
   registerVerify: (email: string, code: string) =>
     rawRequest<AuthResponse>('POST', '/auth/register/verify', { email, code, ...deviceTriple() }),
 
-  /** POST /auth/login：tagged 响应，设备已受信任直接下发令牌，新设备返回 deviceVerificationRequired。 */
-  login: (email: string, password: string) =>
-    rawRequest<LoginResult>('POST', '/auth/login', { email, password, ...deviceTriple() }),
+  /** POST /auth/login：tagged 响应，设备已受信任直接下发令牌，新设备返回 deviceVerificationRequired。
+   *  account（v1.2）：邮箱或纯数字 Origin ID，服务端按格式分流查询。 */
+  login: (account: string, password: string) =>
+    rawRequest<LoginResult>('POST', '/auth/login', { account, password, ...deviceTriple() }),
 
-  /** POST /auth/login/verify：新设备验证码登录，重新校验密码 + 消费验证码 + 信任设备。 */
-  loginVerify: (email: string, password: string, code: string) =>
-    rawRequest<AuthResponse>('POST', '/auth/login/verify', { email, password, code, ...deviceTriple() }),
+  /** POST /auth/login/verify：新设备验证码登录，重新校验密码 + 消费验证码 + 信任设备（account 语义同 login）。 */
+  loginVerify: (account: string, password: string, code: string) =>
+    rawRequest<AuthResponse>('POST', '/auth/login/verify', { account, password, code, ...deviceTriple() }),
 
   /** POST /auth/code/send：验证码登录用的验证码。 */
   codeSend: (email: string) => rawRequest<TtlResponse>('POST', '/auth/code/send', { email }),
 
-  /** POST /auth/code/verify：验证码登录（邮箱不存在则自动注册），信任当前设备。 */
-  codeVerify: (email: string, code: string) =>
-    rawRequest<AuthResponse>('POST', '/auth/code/verify', { email, code, ...deviceTriple() }),
+  /** POST /auth/code/verify：验证码登录（邮箱不存在则自动注册，此时采用 nickname；已存在
+   *  用户忽略该字段），信任当前设备。 */
+  codeVerify: (email: string, code: string, nickname?: string) =>
+    rawRequest<AuthResponse>('POST', '/auth/code/verify', {
+      email,
+      code,
+      ...deviceTriple(),
+      ...(nickname?.trim() ? { nickname: nickname.trim() } : {}),
+    }),
 
   /** POST /auth/refresh：刷新令牌轮换。 */
   refresh: (refreshToken: string) => rawRequest<AuthResponse>('POST', '/auth/refresh', { refreshToken }),

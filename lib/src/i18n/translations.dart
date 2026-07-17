@@ -388,6 +388,9 @@ class S {
   String get accountLogin => _r('accountLogin');
   String get accountLogout => _r('accountLogout');
   String get accountRegister => _r('accountRegister');
+  String get accountOriginIdCopied => _r('accountOriginIdCopied');
+  String get accountSecurityGroup => _r('accountSecurityGroup');
+  String get accountSecurityGroupDesc => _r('accountSecurityGroupDesc');
   String get accountGroupCloudFeatures => _r('accountGroupCloudFeatures');
   String get accountCloudFeaturesDesc => _r('accountCloudFeaturesDesc');
   String get accountComingSoon => _r('accountComingSoon');
@@ -401,6 +404,8 @@ class S {
   String get accountLoginTabCode => _r('accountLoginTabCode');
   String get accountLoginTabPassword => _r('accountLoginTabPassword');
   String get accountEmailPlaceholder => _r('accountEmailPlaceholder');
+  String get accountLoginAccountPlaceholder =>
+      _r('accountLoginAccountPlaceholder');
   String get accountCodePlaceholder => _r('accountCodePlaceholder');
   String get accountSendCode => _r('accountSendCode');
   String get accountPasswordPlaceholder => _r('accountPasswordPlaceholder');
@@ -409,10 +414,13 @@ class S {
   String get accountAlreadyHaveAccount => _r('accountAlreadyHaveAccount');
   String get accountRegisterDialogTitle => _r('accountRegisterDialogTitle');
   String get accountNicknamePlaceholder => _r('accountNicknamePlaceholder');
+  String get accountNicknameReroll => _r('accountNicknameReroll');
   String get accountPasswordHint => _r('accountPasswordHint');
   String get accountDeviceVerifyTitle => _r('accountDeviceVerifyTitle');
   String accountDeviceVerifySubtitle(String email) =>
       _r('accountDeviceVerifySubtitle', {'email': email});
+  String get accountDeviceVerifySubtitleGeneric =>
+      _r('accountDeviceVerifySubtitleGeneric');
   String get accountRegisterVerifyTitle => _r('accountRegisterVerifyTitle');
   String accountRegisterVerifySubtitle(String email) =>
       _r('accountRegisterVerifySubtitle', {'email': email});
@@ -482,6 +490,26 @@ class S {
       _r('accountServerAddressInvalid');
   String get accountServerAddressReset => _r('accountServerAddressReset');
   String get accountServerAddressSaved => _r('accountServerAddressSaved');
+
+  // 配置同步 —— FluxCloud 云端设置同步（见 local://sync-contract.md）
+  String get cloudSyncTitle => _r('cloudSyncTitle');
+  String get cloudSyncDesc => _r('cloudSyncDesc');
+  String get cloudSyncStatusDisabled => _r('cloudSyncStatusDisabled');
+  String get cloudSyncStatusConnecting => _r('cloudSyncStatusConnecting');
+  String get cloudSyncStatusSyncing => _r('cloudSyncStatusSyncing');
+  String get cloudSyncStatusSynced => _r('cloudSyncStatusSynced');
+  String cloudSyncStatusError(String reason) =>
+      _r('cloudSyncStatusError', {'reason': reason});
+  String get cloudSyncNow => _r('cloudSyncNow');
+  String get cloudSyncOtherDevice => _r('cloudSyncOtherDevice');
+  String cloudSyncAppliedToast(int count, String deviceName) =>
+      _r('cloudSyncAppliedToast', {'count': count, 'deviceName': deviceName});
+  String cloudSyncFailedToast(String reason) =>
+      _r('cloudSyncFailedToast', {'reason': reason});
+  String get cloudSyncErrorDeviceLimit => _r('cloudSyncErrorDeviceLimit');
+  String get cloudSyncErrorDeviceUntrusted =>
+      _r('cloudSyncErrorDeviceUntrusted');
+  String get cloudSyncErrorNetwork => _r('cloudSyncErrorNetwork');
 
   // 分类子 Tab
   String get settingsTabGeneral => _r('settingsTabGeneral');

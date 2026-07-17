@@ -34,6 +34,9 @@ class CloudUser {
   final String createdAt;
   final String? lastLoginAt;
 
+  /// 唯一数字身份（v1.2 新增，类 QQ 号）：激活时分配，pending 用户为 null。
+  final int? originId;
+
   const CloudUser({
     required this.id,
     required this.email,
@@ -42,6 +45,7 @@ class CloudUser {
     required this.status,
     required this.createdAt,
     this.lastLoginAt,
+    this.originId,
   });
 
   factory CloudUser.fromJson(Map<String, dynamic> json) => CloudUser(
@@ -52,6 +56,7 @@ class CloudUser {
     status: CloudUserStatus.fromWire(json['status'] as String?),
     createdAt: (json['createdAt'] as String?) ?? '',
     lastLoginAt: json['lastLoginAt'] as String?,
+    originId: (json['originId'] as num?)?.toInt(),
   );
 
   Map<String, dynamic> toJson() => {
@@ -62,6 +67,7 @@ class CloudUser {
     'status': status.wireValue,
     'createdAt': createdAt,
     'lastLoginAt': lastLoginAt,
+    'originId': originId,
   };
 }
 
@@ -199,4 +205,57 @@ class CloudApiException implements Exception {
 
   @override
   String toString() => 'CloudApiException($status $code: $message)';
+}
+
+/// 配置同步单条目（对应服务端 GET /sync/items 响应的 items[]，见契约 v1 数据模型）。
+/// [value] 为任意 JSON 值（bool/number/string/…），墓碑条目（[deleted]=true）时为 null。
+class SyncItem {
+  final String key;
+  final dynamic value;
+  final bool deleted;
+  final int version;
+  final String deviceId;
+  final String? deviceName;
+  final String updatedAt;
+
+  const SyncItem({
+    required this.key,
+    required this.value,
+    required this.deleted,
+    required this.version,
+    required this.deviceId,
+    this.deviceName,
+    required this.updatedAt,
+  });
+
+  factory SyncItem.fromJson(Map<String, dynamic> json) => SyncItem(
+    key: json['key'] as String,
+    value: json['value'],
+    deleted: (json['deleted'] as bool?) ?? false,
+    version: (json['version'] as num?)?.toInt() ?? 0,
+    deviceId: (json['deviceId'] as String?) ?? '',
+    deviceName: json['deviceName'] as String?,
+    updatedAt: (json['updatedAt'] as String?) ?? '',
+  );
+}
+
+/// GET /sync/items 响应：当前修订号 + 是否强制重同步 + 变更条目列表。
+class SyncPullResult {
+  final int revision;
+  final bool resync;
+  final List<SyncItem> items;
+
+  const SyncPullResult({
+    required this.revision,
+    required this.resync,
+    required this.items,
+  });
+
+  factory SyncPullResult.fromJson(Map<String, dynamic> json) => SyncPullResult(
+    revision: (json['revision'] as num?)?.toInt() ?? 0,
+    resync: (json['resync'] as bool?) ?? false,
+    items: (json['items'] as List<dynamic>? ?? const [])
+        .map((e) => SyncItem.fromJson(e as Map<String, dynamic>))
+        .toList(),
+  );
 }

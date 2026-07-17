@@ -99,9 +99,10 @@ class CloudAuthService extends ChangeNotifier {
 
   /// 密码登录：设备已受信任直接建立会话；新设备返回 [LoginDeviceVerificationRequired]
   /// （服务端已自动发码），调用方转入验证码输入界面后再调 [loginVerify]。
-  Future<LoginResult> login({required String email, required String password}) async {
+  /// [account] 接受邮箱或纯数字 Origin ID（契约 v1.2）。
+  Future<LoginResult> login({required String account, required String password}) async {
     final result = await CloudClient.instance.login(
-      email: email,
+      account: account,
       password: password,
       deviceId: DeviceIdentity.deviceId(),
       deviceName: await DeviceIdentity.resolvedName(),
@@ -116,12 +117,12 @@ class CloudAuthService extends ChangeNotifier {
 
   /// 新设备验证码登录：重新校验密码 + 消费验证码 + 信任设备 + 建立会话。
   Future<void> loginVerify({
-    required String email,
+    required String account,
     required String password,
     required String code,
   }) async {
     final auth = await CloudClient.instance.loginVerify(
-      email: email,
+      account: account,
       password: password,
       code: code,
       deviceId: DeviceIdentity.deviceId(),
@@ -138,7 +139,12 @@ class CloudAuthService extends ChangeNotifier {
   Future<int> sendCode(String email) => CloudClient.instance.sendCode(email);
 
   /// 提交验证码：邮箱不存在则自动注册，pending 用户自动激活，信任当前设备并建立会话。
-  Future<void> verifyCode({required String email, required String code}) async {
+  /// [nickname] 转发给服务端，仅在自动注册新用户分支生效（见 CloudClient.verifyCode）。
+  Future<void> verifyCode({
+    required String email,
+    required String code,
+    String? nickname,
+  }) async {
     final auth = await CloudClient.instance.verifyCode(
       email: email,
       code: code,
@@ -146,6 +152,7 @@ class CloudAuthService extends ChangeNotifier {
       deviceName: await DeviceIdentity.resolvedName(),
       devicePlatform: DeviceIdentity.platform(),
       appVersion: DeviceIdentity.appVersion(),
+      nickname: nickname,
     );
     await _applySession(auth);
   }

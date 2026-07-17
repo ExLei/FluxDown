@@ -132,8 +132,9 @@ class CloudClient {
 
   /// POST /auth/login：tagged 响应，设备已受信任直接下发令牌，
   /// 新设备则返回 deviceVerificationRequired（服务端已自动发码）。
+  /// [account] 接受邮箱或纯数字 Origin ID（契约 v1.2），服务端字段名 account。
   Future<LoginResult> login({
-    required String email,
+    required String account,
     required String password,
     required String deviceId,
     String? deviceName,
@@ -144,7 +145,7 @@ class CloudClient {
       'POST',
       '/auth/login',
       body: _withDeviceInfo(
-        {'email': email, 'password': password},
+        {'account': account, 'password': password},
         deviceId,
         deviceName,
         devicePlatform,
@@ -167,8 +168,9 @@ class CloudClient {
   }
 
   /// POST /auth/login/verify：新设备验证码登录，重新校验密码 + 消费验证码。
+  /// [account] 语义同 [login]。
   Future<AuthResponse> loginVerify({
-    required String email,
+    required String account,
     required String password,
     required String code,
     required String deviceId,
@@ -180,7 +182,7 @@ class CloudClient {
       'POST',
       '/auth/login/verify',
       body: _withDeviceInfo(
-        {'email': email, 'password': password, 'code': code},
+        {'account': account, 'password': password, 'code': code},
         deviceId,
         deviceName,
         devicePlatform,
@@ -197,6 +199,8 @@ class CloudClient {
   }
 
   /// POST /auth/code/verify：验证码登录（邮箱不存在则自动注册），信任当前设备。
+  /// [nickname] 仅在服务端"邮箱不存在→自动注册新用户"分支生效，已存在用户忽略，
+  /// 可放心恒传（默认昵称跟随当前界面语言，见 nickname_pool.dart）。
   Future<AuthResponse> verifyCode({
     required String email,
     required String code,
@@ -204,12 +208,18 @@ class CloudClient {
     String? deviceName,
     String? devicePlatform,
     String? appVersion,
+    String? nickname,
   }) async {
     final json = await _request(
       'POST',
       '/auth/code/verify',
       body: _withDeviceInfo(
-        {'email': email, 'code': code},
+        {
+          'email': email,
+          'code': code,
+          if (nickname != null && nickname.trim().isNotEmpty)
+            'nickname': nickname.trim(),
+        },
         deviceId,
         deviceName,
         devicePlatform,
@@ -265,6 +275,36 @@ class CloudClient {
   /// DELETE /devices/{id}：删除设备 + 吊销其名下全部未撤销 refresh token。
   Future<void> deleteDevice(String id) => _authed(() async {
     await _request('DELETE', '/devices/$id', authed: true);
+  });
+
+  // ── 配置同步（Bearer UserAuth，401 自动刷新重放一次；SSE 事件流由
+  //    ConfigSyncService 用独立 HttpClient 直连，不走本类）──────────────────
+
+  /// GET /sync/items：拉取 version > since 的条目（含墓碑），resync=true 时
+  /// 客户端应重置水位线并将本地目录中云端缺失的键标脏重传。
+  Future<SyncPullResult> syncPull({required int since, required String deviceId}) =>
+      _authed(() async {
+        final json = await _request(
+          'GET',
+          '/sync/items?since=$since&deviceId=${Uri.encodeQueryComponent(deviceId)}',
+          authed: true,
+        );
+        return SyncPullResult.fromJson(json);
+      });
+
+  /// PUT /sync/items：批量推送本地变更，返回服务端最新 revision（契约要求
+  /// 客户端不用此 revision 更新水位线，统一靠 SSE 事件→pull 单一路径推进）。
+  Future<int> syncPush({
+    required String deviceId,
+    required List<Map<String, dynamic>> items,
+  }) => _authed(() async {
+    final json = await _request(
+      'PUT',
+      '/sync/items',
+      body: {'deviceId': deviceId, 'items': items},
+      authed: true,
+    );
+    return (json['revision'] as num?)?.toInt() ?? 0;
   });
 
   // ── 内部实现 ─────────────────────────────────────────────────────────
@@ -326,6 +366,7 @@ class CloudClient {
       final HttpClientRequest req = await switch (method) {
         'GET' => _http!.getUrl(uri).timeout(_timeout),
         'POST' => _http!.postUrl(uri).timeout(_timeout),
+        'PUT' => _http!.putUrl(uri).timeout(_timeout),
         'PATCH' => _http!.patchUrl(uri).timeout(_timeout),
         'DELETE' => _http!.deleteUrl(uri).timeout(_timeout),
         _ => throw ArgumentError('unsupported method $method'),
