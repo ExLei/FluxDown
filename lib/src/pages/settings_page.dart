@@ -7907,33 +7907,43 @@ class _ThemeModeSelector extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final provider = FluxDownApp.of(context);
-    final current = provider.themeMode;
-    final c = AppColors.of(context);
-    final s = LocaleScope.of(context);
+    // FluxDownApp.of 走 findAncestorStateOfType，不建立响应式依赖；
+    // 本组件又以 const 挂载，父级重建会被 const 同一性跳过。当主题模式在
+    // 视觉等价的档位间切换（如系统为亮色时 跟随系统 ↔ 亮色）时，AppColors/
+    // ShadTheme 均无变化，没有任何 inherited 依赖会触发重建，高亮就停留在
+    // 上一次的值。必须显式监听 ThemeProvider。
+    return ListenableBuilder(
+      listenable: provider,
+      builder: (context, _) {
+        final current = provider.themeMode;
+        final c = AppColors.of(context);
+        final s = LocaleScope.of(context);
 
-    final modes = [
-      (
-        mode: ThemeMode.system,
-        label: s.themeModeSystem,
-        icon: LucideIcons.monitor,
-      ),
-      (mode: ThemeMode.light, label: s.themeModeLight, icon: LucideIcons.sun),
-      (mode: ThemeMode.dark, label: s.themeModeDark, icon: LucideIcons.moon),
-    ];
-
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
-      children: [
-        for (final item in modes)
-          _ThemeModeCard(
-            icon: item.icon,
-            label: item.label,
-            selected: current == item.mode,
-            colors: c,
-            onTap: () => provider.setThemeMode(item.mode),
+        final modes = [
+          (
+            mode: ThemeMode.system,
+            label: s.themeModeSystem,
+            icon: LucideIcons.monitor,
           ),
-      ],
+          (mode: ThemeMode.light, label: s.themeModeLight, icon: LucideIcons.sun),
+          (mode: ThemeMode.dark, label: s.themeModeDark, icon: LucideIcons.moon),
+        ];
+
+        return Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            for (final item in modes)
+              _ThemeModeCard(
+                icon: item.icon,
+                label: item.label,
+                selected: current == item.mode,
+                colors: c,
+                onTap: () => provider.setThemeMode(item.mode),
+              ),
+          ],
+        );
+      },
     );
   }
 }
