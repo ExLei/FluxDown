@@ -7,8 +7,9 @@ import { applyCloudSession, clearCloudSession, cloudDefaultDeviceName, cloudDevi
 import type { AuthResponse, CloudDevice, CloudProfile, DevicesResponse, LoginResult, TtlResponse } from './types'
 import { CloudApiError } from './types'
 
-/** 开发期默认服务地址；FluxCloud 正式上线后这里切换为官方地址常量。 */
-const DEFAULT_BASE_URL = 'http://127.0.0.1:8720'
+/** 默认服务地址：Actions 打包时经 VITE_FLUXCLOUD_BASE_URL 构建期注入官方地址，
+ *  未注入（本地开发）回退本地联调端口，与桌面端 FLUXCLOUD_BASE_URL dart-define 对称。 */
+const DEFAULT_BASE_URL: string = import.meta.env.VITE_FLUXCLOUD_BASE_URL?.trim() || 'http://127.0.0.1:8720'
 const BASE_KEY = 'fluxdown.cloud.base'
 const API_PREFIX = '/api/v1'
 

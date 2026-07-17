@@ -1189,6 +1189,8 @@ jobs:
       - name: Build web SPA
         working-directory: web
         run: bun run build
+        env:
+          VITE_FLUXCLOUD_BASE_URL: ${{ secrets.FLUXCLOUD_BASE_URL }}
 
       - name: Upload webroot artifact
         uses: actions/upload-artifact@v4
