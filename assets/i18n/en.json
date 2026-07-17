@@ -309,6 +309,8 @@
     "useServerTimeDesc": "Set the modified time of completed files to the server-provided original time (Last-Modified) instead of the download completion time",
     "keepAwakeWhileDownloading": "Keep Awake While Downloading",
     "keepAwakeWhileDownloadingDesc": "Prevent the system from sleeping or turning off the display while downloads are active. Restores automatically when done",
+    "analyticsEnabled": "Anonymous Usage Statistics",
+    "analyticsEnabledDesc": "Help improve FluxDown by sending anonymous usage data. No personal or sensitive data is collected",
     "sidebarVisibility": "Sidebar Sections",
     "sidebarVisibilityDesc": "Choose which sections to show in the sidebar",
     "showSidebarStatus": "Show Status",

@@ -260,6 +260,8 @@
     "set.general.connPolicyClear": "清除",
     "set.general.connPolicyCount": "{count} 条记录",
     "set.general.connPolicyEmpty": "暂无记录",
+    "set.general.analytics": "匿名使用统计",
+    "set.general.analyticsDesc": "发送匿名使用数据以帮助改进 FluxDown，不收集任何个人或敏感数据",
     "set.general.retries": "自动重试次数上限",
     "set.general.retriesDesc": "下载失败后自动重试的最大次数",
     "set.general.retryDelay": "重试间隔",

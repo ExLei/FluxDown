@@ -1981,6 +1981,14 @@ class _GeneralContent extends StatelessWidget {
                         settingsProvider.setKeepAwakeWhileDownloading(v),
                   ),
                 ),
+                _SettingRow(
+                  label: s.analyticsEnabled,
+                  description: s.analyticsEnabledDesc,
+                  child: ShadSwitch(
+                    value: settingsProvider.analyticsEnabled,
+                    onChanged: (v) => settingsProvider.setAnalyticsEnabled(v),
+                  ),
+                ),
               ],
             ),
             _SettingsGroup(

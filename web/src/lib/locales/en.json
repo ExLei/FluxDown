@@ -260,6 +260,8 @@
     "set.general.connPolicyClear": "Clear",
     "set.general.connPolicyCount": "{count} records",
     "set.general.connPolicyEmpty": "No records",
+    "set.general.analytics": "Anonymous usage statistics",
+    "set.general.analyticsDesc": "Help improve FluxDown by sending anonymous usage data. No personal or sensitive data is collected",
     "set.general.retries": "Max auto retries",
     "set.general.retriesDesc": "Maximum automatic retries after a failed download",
     "set.general.retryDelay": "Retry delay",

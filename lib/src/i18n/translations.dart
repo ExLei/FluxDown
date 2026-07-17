@@ -803,6 +803,8 @@ class S {
   String get checkUpdateDesc => _r('checkUpdateDesc');
   String get autoCheckUpdate => _r('autoCheckUpdate');
   String get autoCheckUpdateDesc => _r('autoCheckUpdateDesc');
+  String get analyticsEnabled => _r('analyticsEnabled');
+  String get analyticsEnabledDesc => _r('analyticsEnabledDesc');
   String get updateChannel => _r('updateChannel');
   String get updateChannelDesc => _r('updateChannelDesc');
   String get updateChannelStable => _r('updateChannelStable');

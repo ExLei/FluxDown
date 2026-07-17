@@ -309,6 +309,8 @@
     "useServerTimeDesc": "下载完成后将文件的修改时间设为服务器提供的原始时间（Last-Modified），而非下载完成时间",
     "keepAwakeWhileDownloading": "下载时保持唤醒",
     "keepAwakeWhileDownloadingDesc": "有任务下载时阻止系统睡眠和息屏，任务完成后自动恢复",
+    "analyticsEnabled": "匿名使用统计",
+    "analyticsEnabledDesc": "发送匿名使用数据以帮助改进 FluxDown，不收集任何个人或敏感数据",
     "sidebarVisibility": "侧边栏显示",
     "sidebarVisibilityDesc": "选择在侧边栏中显示哪些区块",
     "showSidebarStatus": "显示状态",
