@@ -981,5 +981,8 @@
     "componentsUninstallSuccess": "{name} uninstalled",
     "componentsUninstallFailed": "Uninstall failed: {message}",
     "componentsUninstallConfirmTitle": "Uninstall {name}",
-    "componentsUninstallConfirmMsg": "This removes the managed {name} build. Manual and system-PATH {name} are not affected."
+    "componentsUninstallConfirmMsg": "This removes the managed {name} build. Manual and system-PATH {name} are not affected.",
+  "autoCleanupMissingFiles": "Auto-cleanup missing file tasks",
+  "autoCleanupMissingFilesDesc": "Automatically remove completed, paused, and error tasks whose files no longer exist on disk",
+  "searchKeywordsAutoCleanupMissingFiles": "auto,cleanup,missing,file,delete"
 }

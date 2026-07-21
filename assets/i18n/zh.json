@@ -981,5 +981,8 @@
     "componentsUninstallSuccess": "{name} 已卸载",
     "componentsUninstallFailed": "卸载失败：{message}",
     "componentsUninstallConfirmTitle": "卸载 {name}",
-    "componentsUninstallConfirmMsg": "这将删除托管安装的 {name}，手动指定路径与系统 PATH 中的 {name} 不受影响"
+    "componentsUninstallConfirmMsg": "这将删除托管安装的 {name}，手动指定路径与系统 PATH 中的 {name} 不受影响",
+  "autoCleanupMissingFiles": "自动清理丢失文件的任务",
+  "autoCleanupMissingFilesDesc": "扫描时自动删除文件已不存在的已完成、已暂停和出错任务",
+  "searchKeywordsAutoCleanupMissingFiles": "自动,清理,丢失,文件,删除"
 }

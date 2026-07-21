@@ -557,6 +557,8 @@ class S {
   String get notifyOnCompleteDesc => _r('notifyOnCompleteDesc');
   String get silentDownload => _r('silentDownload');
   String get silentDownloadDesc => _r('silentDownloadDesc');
+  String get autoCleanupMissingFiles => _r('autoCleanupMissingFiles');
+  String get autoCleanupMissingFilesDesc => _r('autoCleanupMissingFilesDesc');
   String get useServerTime => _r('useServerTime');
   String get useServerTimeDesc => _r('useServerTimeDesc');
   String get keepAwakeWhileDownloading => _r('keepAwakeWhileDownloading');
@@ -1034,6 +1036,8 @@ class S {
   List<String> get searchKeywordsSilentDownload =>
       _r('searchKeywordsSilentDownload').split(',')
         ..addAll(['silent', 'confirm', 'dialog']);
+  List<String> get searchKeywordsAutoCleanupMissingFiles =>
+      _r('searchKeywordsAutoCleanupMissingFiles').split(',');
   List<String> get searchKeywordsUseServerTime =>
       _r('searchKeywordsUseServerTime').split(',')
         ..addAll(['time', 'timestamp', 'mtime', 'last-modified']);
