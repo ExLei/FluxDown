@@ -804,6 +804,30 @@ impl Db {
         Ok(tasks)
     }
 
+    /// Load tasks by status values. Status count is bounded (currently
+    /// ≤3), so no chunking is needed for SQLite's 999 variable limit.
+    pub async fn load_tasks_by_statuses(&self, statuses: &[i32]) -> Result<Vec<TaskInfo>, DbError> {
+        if statuses.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders: String = (1..=statuses.len())
+            .map(|i| format!("${i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT {TASK_COLUMNS} FROM tasks WHERE status IN ({placeholders}) ORDER BY created_at DESC"
+        );
+        let mut query = sqlx::query(AssertSqlSafe(sql));
+        for status in statuses {
+            query = query.bind(*status);
+        }
+        let rows = query.fetch_all(&self.pool).await?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for row in &rows {
+            tasks.push(task_from_row(row)?);
+        }
+        Ok(tasks)
+    }
     pub async fn load_task_by_id(&self, id: &str) -> Result<Option<TaskInfo>, DbError> {
         let sql = format!("SELECT {TASK_COLUMNS} FROM tasks WHERE id = $1");
         let row = sqlx::query(AssertSqlSafe(sql))
