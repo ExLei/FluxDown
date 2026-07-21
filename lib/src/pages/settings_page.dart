@@ -315,6 +315,13 @@ List<SettingsSearchItem> get settingsSearchItems {
     ),
     SettingsSearchItem(
       category: SettingsCategory.download,
+      label: s.autoCleanupMissingFiles,
+      description: s.autoCleanupMissingFilesDesc,
+      keywords: s.searchKeywordsAutoCleanupMissingFiles,
+      icon: LucideIcons.trash2,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.download,
       label: s.defaultThreads,
       description: s.defaultThreadsDesc,
       keywords: s.searchKeywordsThreads,
@@ -2958,16 +2965,120 @@ class _DownloadContent extends StatelessWidget {
       builder: (context, _) {
         final s = LocaleScope.of(context);
         final queues = downloadController?.queues ?? [];
-        return _AdaptiveSections(
-          sections: [
-            _SettingsGroup(
-              title: s.settingsGroupSaveLocation,
-              children: [
-                _SettingRow(
-                  label: s.defaultSaveDir,
-                  description: s.defaultSaveDirDesc,
-                  vertical: true,
-                  child: _SaveDirPicker(settingsProvider: settingsProvider),
+        return Column(
+          children: [
+            _SettingCard(
+              label: s.defaultSaveDir,
+              description: s.defaultSaveDirDesc,
+              vertical: true,
+              child: _SaveDirPicker(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.rememberLastSaveDir,
+              description: s.rememberLastSaveDirDesc,
+              child: ShadSwitch(
+                value: settingsProvider.rememberLastSaveDir,
+                onChanged: (v) => settingsProvider.setRememberLastSaveDir(v),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.silentDownload,
+              description: s.silentDownloadDesc,
+              child: ShadSwitch(
+                value: settingsProvider.silentDownloadEnabled,
+                onChanged: (v) => settingsProvider.setSilentDownloadEnabled(v),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.useServerTime,
+              description: s.useServerTimeDesc,
+              child: ShadSwitch(
+                value: settingsProvider.useServerTime,
+                onChanged: (v) => settingsProvider.setUseServerTime(v),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.autoCleanupMissingFiles,
+              description: s.autoCleanupMissingFilesDesc,
+              child: ShadSwitch(
+                value: settingsProvider.autoCleanupMissingFiles,
+                onChanged: (v) => settingsProvider.setAutoCleanupMissingFiles(v),
+              ),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.defaultThreads,
+              description: s.defaultThreadsDesc,
+              child: _SegmentSelector(settingsProvider: settingsProvider),
+            ),
+            if (settingsProvider.defaultSegments == 0) ...[
+              const SizedBox(height: 10),
+              _SettingCard(
+                label: s.autoMaxConnections,
+                description: s.autoMaxConnectionsDesc,
+                child: _AutoMaxConnSelector(settingsProvider: settingsProvider),
+              ),
+            ],
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.connPolicyCache,
+              description: s.connPolicyCacheDesc,
+              child: _ConnPolicyClearButton(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.maxConcurrent,
+              description: s.maxConcurrentDesc,
+              child: _ConcurrentSelector(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.speedLimit,
+              description: s.speedLimitDesc,
+              vertical: true,
+              child: _SpeedLimitInput(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.autoRetryCount,
+              description: s.autoRetryCountDesc,
+              child: _AutoRetryCountSelector(
+                settingsProvider: settingsProvider,
+              ),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.autoRetryDelay,
+              description: s.autoRetryDelayDesc,
+              vertical: true,
+              child: _AutoRetryDelayInput(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.userAgent,
+              description: s.userAgentDesc,
+              vertical: true,
+              child: _UserAgentEditor(settingsProvider: settingsProvider),
+            ),
+            const SizedBox(height: 10),
+            _SettingCard(
+              label: s.revealFileCmdLabel,
+              description: s.revealFileCmdDesc,
+              vertical: true,
+              child: _FileManagerCmdInput(settingsProvider: settingsProvider),
+            ),
+            if (queues.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _SettingCard(
+                label: s.defaultQueueSetting,
+                description: s.defaultQueueSettingDesc,
+                child: _DefaultQueueSelector(
+                  settingsProvider: settingsProvider,
+                  queues: queues,
                 ),
                 _SettingRow(
                   label: s.rememberLastSaveDir,
@@ -2998,6 +3109,15 @@ class _DownloadContent extends StatelessWidget {
                   child: ShadSwitch(
                     value: settingsProvider.useServerTime,
                     onChanged: (v) => settingsProvider.setUseServerTime(v),
+                  ),
+                ),
+                _SettingRow(
+                  label: s.autoCleanupMissingFiles,
+                  description: s.autoCleanupMissingFilesDesc,
+                  child: ShadSwitch(
+                    value: settingsProvider.autoCleanupMissingFiles,
+                    onChanged: (v) =>
+                        settingsProvider.setAutoCleanupMissingFiles(v),
                   ),
                 ),
                 if (queues.isNotEmpty)
