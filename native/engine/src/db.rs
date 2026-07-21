@@ -625,10 +625,11 @@ impl Db {
         Ok(())
     }
 
-    /// 更新任务的「文件已丢失」标志（文件跟踪）。仅当任务仍处于 completed
-    /// (`status = 3`) 时生效——文件扫描的「读快照 → 异步 stat → 写回」三阶段间，
-    /// 任务可能已被删除或状态变化，`WHERE id AND status = 3` 让这类竞态退化为
-    /// 良性空操作，绝不复活已删除的行。返回是否真的更新了行
+    /// 更新任务的「文件已丢失」标志（文件跟踪）。仅当任务处于 paused /
+    /// completed / error（`status IN (2, 3, 4)`）时生效——文件扫描的
+    ///「读快照 → 异步 stat → 写回」三阶段间，任务可能已被删除或状态变化，
+    /// `WHERE id AND status IN (2, 3, 4)` 让这类竞态退化为良性空操作，
+    /// 绝不复活已删除的行。返回是否真的更新了行
     /// (`rows_affected > 0`)，供调用方仅对实际变更下发事件。
     ///
     /// # Examples
@@ -643,7 +644,7 @@ impl Db {
     /// # }
     /// ```
     pub async fn update_task_file_missing(&self, id: &str, missing: bool) -> Result<bool, DbError> {
-        let result = sqlx::query("UPDATE tasks SET file_missing = $1 WHERE id = $2 AND status = 3")
+        let result = sqlx::query("UPDATE tasks SET file_missing = $1 WHERE id = $2 AND status IN (2, 3, 4)")
             .bind(missing as i32)
             .bind(id)
             .execute(&self.pool)
