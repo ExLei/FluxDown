@@ -3480,6 +3480,93 @@ mod tests {
         let y = db.load_task_by_id("y").await.expect("load").expect("row");
         assert_eq!(y.queue_id, MAIN_QUEUE_ID);
         assert_eq!(y.queue_order, 0, "explicit order resets on reassignment");
+    // Correctness: load_tasks_by_statuses filtering
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn load_tasks_by_statuses_filters_correctly() {
+        let (db, dir) = open_test_db().await;
+        // Insert tasks with different statuses — use raw SQL since
+        // insert_task forces status=1.
+        for (id, status) in [
+            ("t-dl", 1i32),
+            ("t-pause", 2),
+            ("t-done", 3),
+            ("t-err", 4),
+        ] {
+            sqlx::query(
+                "INSERT INTO tasks (id, url, file_name, save_dir, status, \
+                 total_bytes, downloaded_bytes, segments, created_at) \
+                 VALUES ($1, 'http://x', 'f', '/tmp', $2, 0, 0, 0, '0')",
+            )
+            .bind(id)
+            .bind(status)
+            .execute(&db.pool)
+            .await
+            .expect("insert");
+        }
+
+        let tasks = db
+            .load_tasks_by_statuses(&[2, 3, 4])
+            .await
+            .expect("load");
+        let ids: Vec<&str> = tasks.iter().map(|t| t.task_id.as_str()).collect();
+        assert!(ids.contains(&"t-pause"));
+        assert!(ids.contains(&"t-done"));
+        assert!(ids.contains(&"t-err"));
+        assert!(!ids.contains(&"t-dl"));
+        assert_eq!(ids.len(), 3);
+
+        close_test_db(&db, dir).await;
+    }
+
+    #[tokio::test]
+    async fn load_tasks_by_statuses_empty_input() {
+        let (db, dir) = open_test_db().await;
+        let tasks = db.load_tasks_by_statuses(&[]).await.expect("empty");
+        assert!(tasks.is_empty());
+        close_test_db(&db, dir).await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Correctness: update_task_file_missing status guard
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn update_task_file_missing_guard_respects_status() {
+        let (db, dir) = open_test_db().await;
+        // Insert paused task (status=2)
+        sqlx::query(
+            "INSERT INTO tasks (id, url, file_name, save_dir, status, \
+             total_bytes, downloaded_bytes, segments, created_at) \
+             VALUES ('tp', 'http://x', 'f', '/tmp', 2, 0, 0, 0, '0')",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("insert paused");
+        // Insert downloading task (status=1)
+        sqlx::query(
+            "INSERT INTO tasks (id, url, file_name, save_dir, status, \
+             total_bytes, downloaded_bytes, segments, created_at) \
+             VALUES ('td', 'http://x', 'f', '/tmp', 1, 0, 0, 0, '0')",
+        )
+        .execute(&db.pool)
+        .await
+        .expect("insert downloading");
+
+        // paused task (status=2): must be updatable
+        let ok = db
+            .update_task_file_missing("tp", true)
+            .await
+            .expect("update paused");
+        assert!(ok, "paused task must be updatable");
+
+        // downloading task (status=1): must NOT be updatable
+        let ok = db
+            .update_task_file_missing("td", true)
+            .await
+            .expect("update downloading");
+        assert!(!ok, "downloading task must NOT be updatable");
         close_test_db(&db, dir).await;
     }
 }
