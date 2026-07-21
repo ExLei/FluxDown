@@ -204,7 +204,7 @@ async fn probe_missing(path: &Path) -> Option<bool> {
     }
 }
 
-/// 文件跟踪：并发探测所有 completed 任务的目标文件是否仍在磁盘上，把变化
+/// 文件跟踪：并发探测所有已完成/暂停/错误状态任务的目标文件是否仍在磁盘上，把变化
 /// 落库并通过 [`EngineEvent::FileMissingChanged`] 上报。仅由
 /// [`DownloadManager::spawn_file_scan`] 在 detached task 中调用；`scanning`
 /// 标志确保同一时刻只有一个扫描在跑。双向判定（探到存在即把标志翻回 false），
@@ -223,6 +223,18 @@ async fn scan_missing_files(db: Db, sink: Arc<dyn EventSink>, scanning: Arc<Atom
     }
     let _guard = ScanGuard(scanning);
 
+    // 活跃任务（pending/downloading/preparing）占用的目标路径：避免正在重下
+    // 同名文件时把旧的 completed 任务误判为丢失。
+    let active_paths: HashSet<(String, String)> = match db.load_tasks_by_statuses(&[0, 1, 5]).await {
+        Ok(t) => t.iter()
+            .map(|t| (t.save_dir.clone(), t.file_name.clone()))
+            .collect(),
+        Err(e) => {
+            log_info!("[file-scan] load active tasks error: {}", e);
+            HashSet::new()  // degrade gracefully: no exclusion, still safe
+        }
+    };
+
     let tasks = match db.load_tasks_by_statuses(&[2, 3, 4]).await {
         Ok(t) => t,
         Err(e) => {
@@ -231,18 +243,10 @@ async fn scan_missing_files(db: Db, sink: Arc<dyn EventSink>, scanning: Arc<Atom
         }
     };
 
-    // 活跃任务（pending/downloading/preparing）占用的目标路径：避免正在重下
-    // 同名文件时把旧的 completed 任务误判为丢失。
-    let active_paths: HashSet<(&str, &str)> = tasks
-        .iter()
-        .filter(|t| matches!(t.status, 0 | 1 | 5))
-        .map(|t| (t.save_dir.as_str(), t.file_name.as_str()))
-        .collect();
-
     let sem = Arc::new(Semaphore::new(FILE_SCAN_CONCURRENCY));
     let mut futs = Vec::new();
     for t in tasks.iter() {
-        if active_paths.contains(&(t.save_dir.as_str(), t.file_name.as_str())) {
+        if active_paths.contains(&(t.save_dir.clone(), t.file_name.clone())) {
             continue;
         }
         let Some(path) = task_target_path(&t.save_dir, &t.file_name) else {
@@ -266,7 +270,7 @@ async fn scan_missing_files(db: Db, sink: Arc<dyn EventSink>, scanning: Arc<Atom
     {
         match db.update_task_file_missing(&id, missing).await {
             Ok(true) => changes.push((id, missing)),
-            Ok(false) => {} // 任务已离开 status=3（被删/状态变化）→ 良性空操作
+            Ok(false) => {} // 任务已离开 status∈{2,3,4}（被删/状态变化）→ 良性空操作
             Err(e) => log_info!("[file-scan] update {} error: {}", id, e),
         }
     }
