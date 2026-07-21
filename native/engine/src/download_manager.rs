@@ -278,6 +278,48 @@ async fn scan_missing_files(db: Db, sink: Arc<dyn EventSink>, scanning: Arc<Atom
     if !changes.is_empty() {
         sink.emit(EngineEvent::FileMissingChanged(changes));
     }
+
+    // Run auto-cleanup after the scan so it reuses fresh probe results.
+    auto_cleanup_missing_files(&db).await;
+}
+
+/// Auto-cleanup: if the user opted in, remove tasks whose target files are
+/// confirmed missing.  Runs as the final step of `scan_missing_files` so it
+/// reuses the fresh probe results already written to `file_missing`.
+async fn auto_cleanup_missing_files(db: &Db) {
+    let enabled = db
+        .get_config("auto_cleanup_missing_files")
+        .await
+        .ok()
+        .flatten()
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+
+    let tasks = match db.load_tasks_by_statuses(&[2, 3, 4]).await {
+        Ok(t) => t,
+        Err(e) => {
+            log_info!("[auto-cleanup] load_tasks_by_statuses error: {}", e);
+            return;
+        }
+    };
+
+    let ids: Vec<String> = tasks
+        .into_iter()
+        .filter(|t| t.file_missing)
+        .map(|t| t.task_id)
+        .collect();
+
+    if ids.is_empty() {
+        return;
+    }
+
+    log_info!("[auto-cleanup] removing {} tasks with missing files", ids.len());
+    if let Err(e) = db.delete_tasks_batch(&ids).await {
+        log_info!("[auto-cleanup] delete_tasks_batch error: {}", e);
+    }
 }
 
 /// Returns true only when `name` is safe to join onto a base directory for
