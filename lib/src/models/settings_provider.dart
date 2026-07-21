@@ -31,6 +31,8 @@ class SettingsProvider extends ChangeNotifier {
   String _updateChannel = 'stable'; // 更新渠道：stable 稳定版 / frontier 前沿版（含预发布）
   bool _notifyOnComplete = true; // 默认任务完成时弹出通知
   bool _silentDownloadEnabled = false; // 免打扰下载：外部请求不弹确认框直接下载
+  /// 扫描时自动删除文件已不存在的 completed/paused/error 任务
+  bool _autoCleanupMissingFiles = false;
   bool _useServerTime = false; // 完成文件的修改时间采用服务器 Last-Modified
   bool _keepAwakeWhileDownloading = false; // 默认不阻止睡眠/息屏
   bool _analyticsEnabled = true; // 匿名使用统计（每日活跃）；首装事件不受此开关控制
@@ -199,6 +201,7 @@ class SettingsProvider extends ChangeNotifier {
   String get updateChannel => _updateChannel;
   bool get notifyOnComplete => _notifyOnComplete;
   bool get silentDownloadEnabled => _silentDownloadEnabled;
+  bool get autoCleanupMissingFiles => _autoCleanupMissingFiles;
   bool get useServerTime => _useServerTime;
   bool get keepAwakeWhileDownloading => _keepAwakeWhileDownloading;
   bool get analyticsEnabled => _analyticsEnabled;
@@ -544,6 +547,13 @@ class SettingsProvider extends ChangeNotifier {
     _silentDownloadEnabled = value;
     notifyListeners();
     _saveToRust('silent_download_enabled', value.toString());
+  }
+
+  void setAutoCleanupMissingFiles(bool value) {
+    if (_autoCleanupMissingFiles == value) return;
+    _autoCleanupMissingFiles = value;
+    notifyListeners();
+    _saveToRust('auto_cleanup_missing_files', value.toString());
   }
 
   void setUseServerTime(bool value) {
@@ -1258,6 +1268,8 @@ class SettingsProvider extends ChangeNotifier {
           _notifyOnComplete = entry.value != 'false'; // 默认 true
         case 'silent_download_enabled':
           _silentDownloadEnabled = entry.value == 'true'; // 默认 false
+        case 'auto_cleanup_missing_files':
+          _autoCleanupMissingFiles = entry.value == 'true';
         case 'use_server_time':
           _useServerTime = entry.value == 'true'; // 默认 false
         case 'keep_awake_while_downloading':
