@@ -2015,3 +2015,31 @@ pub struct WebhookTestResult {
     pub latency_ms: i64,
     pub error_message: String,
 }
+
+// ========== 丢失文件清理 ==========
+
+/// 请求丢失文件清理候选预览（Dart → Rust）。
+/// 无参信号：引擎返回当前所有「已完成且文件确证丢失」的任务列表。
+#[derive(Deserialize, DartSignal)]
+pub struct GetMissingCleanupCandidates {}
+
+/// 执行丢失文件清理（Dart → Rust）。
+/// 参数为确认删除的任务 ID 列表（来自预览弹窗的用户选择）。
+#[derive(Deserialize, DartSignal)]
+pub struct ExecuteMissingCleanup {
+    pub task_ids: Vec<String>,
+}
+
+/// 丢失文件清理候选预览结果（Rust → Dart）。
+/// 返回当前所有「已完成且文件确证丢失」的任务列表，供 Dart 端展示确认弹窗。
+#[derive(Serialize, RustSignal)]
+pub struct MissingCleanupCandidatesResult {
+    pub candidates: Vec<TaskInfo>,
+}
+
+/// 丢失文件清理执行结果（Rust → Dart）。
+/// `deleted` 为实际删除数（已做资格复核，部分 ID 可能因状态/做种态漂移被跳过）。
+#[derive(Serialize, RustSignal)]
+pub struct MissingCleanupExecuted {
+    pub deleted: i32,
+}
