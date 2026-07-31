@@ -343,6 +343,20 @@ List<SettingsSearchItem> get settingsSearchItems {
     ),
     SettingsSearchItem(
       category: SettingsCategory.download,
+      label: s.autoCleanupMissingFiles,
+      description: s.autoCleanupMissingFilesDesc,
+      keywords: s.searchKeywordsMissingCleanup,
+      icon: LucideIcons.trash2,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.download,
+      label: s.cleanupMissingFiles,
+      description: s.cleanupMissingFilesDesc,
+      keywords: s.searchKeywordsMissingCleanup,
+      icon: LucideIcons.fileX,
+    ),
+    SettingsSearchItem(
+      category: SettingsCategory.download,
       label: s.useServerTime,
       description: s.useServerTimeDesc,
       keywords: s.searchKeywordsUseServerTime,
@@ -1331,25 +1345,26 @@ class _SettingsContentState extends State<_SettingsContent> {
         settingsProvider: settingsProvider,
         downloadController: widget.downloadController,
       ),
-      SettingsCategory.extensions => tabId == _kTabComponents
-          ? Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: const [
-                _ComponentsContent(
-                  key: ValueKey('component-ffmpeg'),
-                  kind: _ComponentKind.ffmpeg,
-                ),
-                SizedBox(height: 12),
-                _ComponentsContent(
-                  key: ValueKey('component-ytdlp'),
-                  kind: _ComponentKind.ytdlp,
-                ),
-              ],
-            )
-          : PluginListView(
-              provider: widget.pluginProvider,
-              onNavigateToComponents: () => _selectTab(_kTabComponents),
-            ),
+      SettingsCategory.extensions =>
+        tabId == _kTabComponents
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: const [
+                  _ComponentsContent(
+                    key: ValueKey('component-ffmpeg'),
+                    kind: _ComponentKind.ffmpeg,
+                  ),
+                  SizedBox(height: 12),
+                  _ComponentsContent(
+                    key: ValueKey('component-ytdlp'),
+                    kind: _ComponentKind.ytdlp,
+                  ),
+                ],
+              )
+            : PluginListView(
+                provider: widget.pluginProvider,
+                onNavigateToComponents: () => _selectTab(_kTabComponents),
+              ),
       SettingsCategory.about => _AboutContent(
         settingsProvider: settingsProvider,
       ),
@@ -3123,6 +3138,24 @@ class _DownloadContent extends StatelessWidget {
                     value: settingsProvider.silentDownloadEnabled,
                     onChanged: (v) =>
                         settingsProvider.setSilentDownloadEnabled(v),
+                  ),
+                ),
+                _SettingRow(
+                  label: s.autoCleanupMissingFiles,
+                  description: s.autoCleanupMissingFilesDesc,
+                  child: ShadSwitch(
+                    value: settingsProvider.autoCleanupMissingFiles,
+                    onChanged: (v) =>
+                        settingsProvider.setAutoCleanupMissingFiles(v),
+                  ),
+                ),
+                _SettingRow(
+                  label: s.cleanupMissingFiles,
+                  description: s.cleanupMissingFilesDesc,
+                  child: ShadButton.outline(
+                    size: ShadButtonSize.sm,
+                    onPressed: () => _showMissingCleanupDialog(context),
+                    child: Text(s.cleanupMissingFiles),
                   ),
                 ),
                 _SettingRow(
@@ -5635,7 +5668,10 @@ class _ApiServiceContentState extends State<_ApiServiceContent> {
                             const SizedBox(height: 2),
                             Text(
                               s.apiServiceLanEnableDesc,
-                              style: TextStyle(fontSize: 11.5, color: c.textMuted),
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                color: c.textMuted,
+                              ),
                             ),
                           ],
                         ),
@@ -5730,7 +5766,10 @@ class _NotifyContent extends StatefulWidget {
   final SettingsProvider settingsProvider;
   final DownloadController? downloadController;
 
-  const _NotifyContent({required this.settingsProvider, this.downloadController});
+  const _NotifyContent({
+    required this.settingsProvider,
+    this.downloadController,
+  });
 
   @override
   State<_NotifyContent> createState() => _NotifyContentState();
@@ -5848,7 +5887,11 @@ class _NotifyContentState extends State<_NotifyContent> {
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: Text(
                 s.webhookSemantics,
-                style: TextStyle(fontSize: 10.5, height: 1.6, color: c.textMuted),
+                style: TextStyle(
+                  fontSize: 10.5,
+                  height: 1.6,
+                  color: c.textMuted,
+                ),
               ),
             ),
           ],
@@ -10484,7 +10527,8 @@ class _AccountContentState extends State<_AccountContent> {
                       cursor: SystemMouseCursors.click,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onTap: () => _showChangeEmailDialog(context, user.email),
+                        onTap: () =>
+                            _showChangeEmailDialog(context, user.email),
                         child: Padding(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 16,
@@ -10912,7 +10956,11 @@ Widget _configSyncRow(BuildContext context) {
                 color: c.surface2,
                 borderRadius: BorderRadius.circular(8),
               ),
-              child: Icon(LucideIcons.refreshCw, size: 15, color: c.textSecondary),
+              child: Icon(
+                LucideIcons.refreshCw,
+                size: 15,
+                color: c.textSecondary,
+              ),
             ),
             const SizedBox(width: 12),
             Expanded(
@@ -11456,8 +11504,14 @@ class _LocalDeviceSectionState extends State<_LocalDeviceSection> {
                   const SizedBox(height: 12),
                   if (code != null && code.isNotEmpty) ...[
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                      decoration: BoxDecoration(color: c.surface2, borderRadius: m.brInput),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.surface2,
+                        borderRadius: m.brInput,
+                      ),
                       child: Row(
                         children: [
                           Expanded(
@@ -11468,7 +11522,9 @@ class _LocalDeviceSectionState extends State<_LocalDeviceSection> {
                                 fontWeight: FontWeight.w700,
                                 letterSpacing: 2,
                                 color: c.textPrimary,
-                                fontFeatures: const [FontFeature.tabularFigures()],
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
                               ),
                             ),
                           ),
@@ -11487,8 +11543,14 @@ class _LocalDeviceSectionState extends State<_LocalDeviceSection> {
                     ),
                   ] else if (_expiredCodeSnapshot != null) ...[
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-                      decoration: BoxDecoration(color: c.surface2, borderRadius: m.brInput),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 12,
+                      ),
+                      decoration: BoxDecoration(
+                        color: c.surface2,
+                        borderRadius: m.brInput,
+                      ),
                       child: Text(
                         _expiredCodeSnapshot!.split('').join('  '),
                         style: TextStyle(
@@ -13773,5 +13835,101 @@ class _RegisterDialogContentState extends State<_RegisterDialogContent> {
         ],
       ),
     );
+  }
+}
+
+final _cleanupGuard = ValueNotifier<bool>(false);
+
+Future<void> _showMissingCleanupDialog(BuildContext context) async {
+  if (_cleanupGuard.value) {
+    if (context.mounted) {
+      FluxSonner.of(context).show(ShadToast(
+        title: Text(LocaleScope.of(context).cleanupInProgress),
+      ));
+    }
+    return;
+  }
+  _cleanupGuard.value = true;
+  try {
+    final s = LocaleScope.of(context);
+    final resultFuture = MissingCleanupCandidatesResult.rustSignalStream.first;
+    GetMissingCleanupCandidates().sendSignalToRust();
+    final result;
+    try {
+      result = await resultFuture.timeout(const Duration(seconds: 5));
+    } on TimeoutException {
+      if (context.mounted) {
+        FluxSonner.of(
+          context,
+        ).show(ShadToast(title: Text(s.missingCleanupTimeout)));
+      }
+      return;
+    }
+    final candidates = result.message.candidates;
+    if (!context.mounted) return;
+
+    if (candidates.isEmpty) {
+      FluxSonner.of(
+        context,
+      ).show(ShadToast(title: Text(s.noMissingFilesToClean)));
+      return;
+    }
+
+    final confirmed = await showShadDialog<bool>(
+      context: context,
+      barrierColor: AppColors.of(context).dialogBarrier,
+      animateIn: const [],
+      animateOut: const [],
+      builder: (ctx) => ShadDialog(
+        title: Text(s.cleanupMissingFiles),
+        description: Text(s.cleanupMissingFilesConfirm(candidates.length)),
+        actions: [
+          ShadButton.outline(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: Text(LocaleScope.of(ctx).cancel),
+          ),
+          ShadButton.destructive(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: Text(LocaleScope.of(ctx).confirm),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !context.mounted) return;
+
+    final ids = candidates.map((t) => t.taskId).toList();
+    final execFuture = MissingCleanupExecuted.rustSignalStream.first;
+    try {
+      ExecuteMissingCleanup(taskIds: ids).sendSignalToRust();
+    } catch (_) {
+      if (context.mounted) {
+        FluxSonner.of(context).show(ShadToast(
+          title: Text(s.missingCleanupExecTimeout),
+        ));
+      }
+      return;
+    }
+    final execResult;
+    try {
+      execResult = await execFuture.timeout(const Duration(seconds: 30));
+    } on TimeoutException {
+      if (context.mounted) {
+        FluxSonner.of(
+          context,
+        ).show(ShadToast(title: Text(s.missingCleanupExecTimeout)));
+      }
+      return;
+    }
+
+    if (context.mounted) {
+      FluxSonner.of(context).show(
+        ShadToast(
+          title: Text(s.cleanupMissingFilesResult(execResult.message.deleted)),
+        ),
+      );
+    }
+  } finally {
+    _cleanupGuard.value = false;
   }
 }

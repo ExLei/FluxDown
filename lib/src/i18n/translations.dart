@@ -390,10 +390,8 @@ class S {
   String get detailCdnKickBuild => _r('detailCdnKickBuild');
   String detailLogCdnBreaker(String host) =>
       _r('detailLogCdnBreaker', {'host': host});
-  String detailLogCdnFallbackFew(int candidates, int alive) => _r(
-    'detailLogCdnFallbackFew',
-    {'candidates': candidates, 'alive': alive},
-  );
+  String detailLogCdnFallbackFew(int candidates, int alive) =>
+      _r('detailLogCdnFallbackFew', {'candidates': candidates, 'alive': alive});
   String get detailLogCdnFallbackError => _r('detailLogCdnFallbackError');
   String detailLogCdnLeases(String host) =>
       _r('detailLogCdnLeases', {'host': host});
@@ -401,10 +399,8 @@ class S {
       _r('detailLogCdnLeasesNode', {'ip': ip, 'count': count});
   String detailLogCdnSummary(String host) =>
       _r('detailLogCdnSummary', {'host': host});
-  String detailLogCdnSummaryNode(String ip, String bytes, String speed) => _r(
-    'detailLogCdnSummaryNode',
-    {'ip': ip, 'bytes': bytes, 'speed': speed},
-  );
+  String detailLogCdnSummaryNode(String ip, String bytes, String speed) =>
+      _r('detailLogCdnSummaryNode', {'ip': ip, 'bytes': bytes, 'speed': speed});
   String get detailCdnNodeSys => _r('detailCdnNodeSys');
   String get detailNotSet => _r('detailNotSet');
   String get detailFollowGlobal => _r('detailFollowGlobal');
@@ -763,8 +759,7 @@ class S {
   String get localPairingCodeLabel => _r('localPairingCodeLabel');
   String get localPairingCodePlaceholder => _r('localPairingCodePlaceholder');
   String get localPairingCodeHint => _r('localPairingCodeHint');
-  String get localPairingCodeIncomplete =>
-      _r('localPairingCodeIncomplete');
+  String get localPairingCodeIncomplete => _r('localPairingCodeIncomplete');
   String get localPairingConnect => _r('localPairingConnect');
   String get localPairingManualAddress => _r('localPairingManualAddress');
   String get localPairingHostRequired => _r('localPairingHostRequired');
@@ -805,8 +800,7 @@ class S {
   String get localDeviceUnpair => _r('localDeviceUnpair');
   String get localDeviceUnpairConfirmTitle =>
       _r('localDeviceUnpairConfirmTitle');
-  String get localDeviceUnpairConfirmDesc =>
-      _r('localDeviceUnpairConfirmDesc');
+  String get localDeviceUnpairConfirmDesc => _r('localDeviceUnpairConfirmDesc');
   String get localDeviceCodeCopied => _r('localDeviceCodeCopied');
   String localDeviceCodeRemaining(int seconds) =>
       _r('localDeviceCodeRemaining', {'seconds': seconds});
@@ -923,7 +917,21 @@ class S {
   String get selectDefaultSaveDir => _r('selectDefaultSaveDir');
   String get rememberLastSaveDir => _r('rememberLastSaveDir');
   String get rememberLastSaveDirDesc => _r('rememberLastSaveDirDesc');
+  String get autoCleanupMissingFiles => _r('autoCleanupMissingFiles');
+  String get autoCleanupMissingFilesDesc => _r('autoCleanupMissingFilesDesc');
+  String get cleanupMissingFiles => _r('cleanupMissingFiles');
+  String get cleanupMissingFilesDesc => _r('cleanupMissingFilesDesc');
+  String cleanupMissingFilesConfirm(int n) =>
+      _r('cleanupMissingFilesConfirm', {'n': n});
+  String cleanupMissingFilesResult(int n) =>
+      _r('cleanupMissingFilesResult', {'n': n});
+  String get noMissingFilesToClean => _r('noMissingFilesToClean');
+  List<String> get searchKeywordsMissingCleanup =>
+      _r('searchKeywordsMissingCleanup').split(',');
   String get defaultThreads => _r('defaultThreads');
+  String get missingCleanupTimeout => _r('missingCleanupTimeout');
+  String get missingCleanupExecTimeout => _r('missingCleanupExecTimeout');
+  String get cleanupInProgress => _r('cleanupInProgress');
   String get defaultThreadsDesc => _r('defaultThreadsDesc');
   String get autoMaxConnections => _r('autoMaxConnections');
   String get autoMaxConnectionsDesc => _r('autoMaxConnectionsDesc');
@@ -1807,15 +1815,13 @@ class S {
   // ─────────────────────────────────────────────
   String groupItemsCount(int n) => _r('groupItemsCount', {'n': n});
   String groupDoneCount(int n) => _r('groupDoneCount', {'n': n});
-  String groupDownloadingCount(int n) =>
-      _r('groupDownloadingCount', {'n': n});
+  String groupDownloadingCount(int n) => _r('groupDownloadingCount', {'n': n});
   String groupPendingCount(int n) => _r('groupPendingCount', {'n': n});
   String groupPausedCount(int n) => _r('groupPausedCount', {'n': n});
   String groupFailedCount(int n) => _r('groupFailedCount', {'n': n});
   String groupDoneOfTotal(int done, int total) =>
       _r('groupDoneOfTotal', {'done': done, 'total': total});
-  String groupEtaRemaining(String eta) =>
-      _r('groupEtaRemaining', {'eta': eta});
+  String groupEtaRemaining(String eta) => _r('groupEtaRemaining', {'eta': eta});
   String get groupPauseAll => _r('groupPauseAll');
   String get groupResumeAll => _r('groupResumeAll');
   String get groupRetryFailed => _r('groupRetryFailed');
